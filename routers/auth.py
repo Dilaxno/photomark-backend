@@ -9,6 +9,7 @@ from core.config import logger
 from utils.emailing import render_email, send_email_smtp
 from utils.storage import write_json_key, read_json_key
 from utils.rate_limit import signup_throttle
+from utils.validation import validate_signup_data
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
@@ -16,10 +17,12 @@ router = APIRouter(prefix="/api", tags=["auth"])
 # ---- Signup rate limiting ----
 
 @router.post("/auth/signup/check")
-async def auth_signup_check(request: Request):
+async def auth_signup_check(request: Request, payload: dict = Body(None)):
     """
     Check if signup is allowed from this IP address.
+    Validates name and email for gibberish.
     Rate limit: 1 signup per IP per 6 hours.
+    Body (optional): { "name": str, "email": str }
     """
     # Get client IP
     ip = request.client.host if request.client else "unknown"
@@ -33,6 +36,23 @@ async def auth_signup_check(request: Request):
     if ip == "unknown":
         logger.warning("[auth.signup] Could not determine client IP")
         return JSONResponse({"error": "Could not verify request"}, status_code=400)
+    
+    # Server-side validation of name and email if provided
+    if payload:
+        name = (payload.get("name") or "").strip()
+        email = (payload.get("email") or "").strip()
+        
+        if name and email:
+            is_valid, error_msg = validate_signup_data(name, email)
+            if not is_valid:
+                logger.warning(f"[auth.signup] Validation failed for IP {ip}: {error_msg}")
+                return JSONResponse(
+                    {
+                        "error": error_msg,
+                        "allowed": False
+                    },
+                    status_code=400
+                )
     
     try:
         # Check current rate limit state without consuming quota
