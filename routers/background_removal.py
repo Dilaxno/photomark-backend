@@ -25,13 +25,13 @@ try:
 except ImportError:
     from utils.storage import read_json_key
 
-# Rembg import
+# transparent-background import (cleaner alternative to rembg, PyTorch-only, no TensorFlow)
 try:
-    from rembg import remove, new_session
-    REMBG_AVAILABLE = True
+    from transparent_background import Remover
+    BG_REMOVER_AVAILABLE = True
 except ImportError:
-    REMBG_AVAILABLE = False
-    logger.warning("Rembg not available")
+    BG_REMOVER_AVAILABLE = False
+    logger.warning("transparent-background not available")
 
 # Global state
 _sam_predictor = None
@@ -75,11 +75,17 @@ def _get_mobile_sam_predictor():
             return None
     return _sam_predictor
 
-def _get_rembg_session():
-    """Get or create rembg session"""
+def _get_bg_remover():
+    """Get or create background remover instance"""
     global _rembg_session
     if _rembg_session is None:
-        _rembg_session = new_session("u2net")
+        try:
+            # Initialize remover with fast mode for better performance
+            _rembg_session = Remover(mode='fast', jit=True, device='cuda:0', ckpt='~/.transparent-background/models')
+            logger.info("Background remover loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load background remover: {e}")
+            _rembg_session = None
     return _rembg_session
 
 def _billing_uid_from_request(request: Request) -> str:
@@ -130,9 +136,13 @@ async def step1_rembg_cutout(
         img_bytes = await image.read()
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         
-        # Apply Rembg
-        session = _get_rembg_session()
-        output = remove(img, session=session, alpha_matting=True, alpha_matting_foreground_threshold=240, alpha_matting_background_threshold=10)
+        # Apply background removal
+        remover = _get_bg_remover()
+        if remover is None:
+            raise HTTPException(status_code=503, detail="Background removal model not available")
+        
+        # Process image (returns RGBA with transparent background)
+        output = remover.process(img, type='rgba')
         
         # Extract mask from alpha channel
         if output.mode == "RGBA":
