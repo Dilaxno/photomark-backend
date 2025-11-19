@@ -101,6 +101,28 @@ curl -X POST "http://localhost:8000/api/background-removal/step1-rembg" \
 
 Or test from the frontend at: `http://localhost:5173/background-removal`
 
+## Troubleshooting
+
+### Path Expansion Error
+If you see: `No such file or directory: '/path/to/~/.transparent-background/models'`
+
+**Fix:** Updated in commit after initial version - the `~` is now properly expanded using `os.path.expanduser()`
+
+Pull latest changes:
+```bash
+cd ~/photomark-backend
+git pull origin main
+sudo systemctl restart photomark
+```
+
+### Model Download Issues
+If model fails to download automatically, manually download:
+```bash
+mkdir -p ~/.transparent-background/models
+cd ~/.transparent-background/models
+wget https://github.com/plemeri/InSPyReNet/releases/download/v1.0/InSPyReNet_SwinB.pth
+```
+
 ## Rollback (if needed)
 
 If issues arise, revert to previous version:
