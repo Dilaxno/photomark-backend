@@ -2,7 +2,7 @@ from typing import Optional, Tuple, List
 import os
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-from backend.core.config import logger
+from core.config import logger
 
 # Torch + Kornia (GPU-batchable)
 try:

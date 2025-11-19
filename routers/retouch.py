@@ -10,9 +10,9 @@ from PIL import Image
 
 from rembg import remove, new_session  # background removal
 
-from backend.core.config import logger
-from backend.utils.storage import read_json_key, write_json_key
-from backend.core.auth import resolve_workspace_uid
+from core.config import logger
+from utils.storage import read_json_key, write_json_key
+from core.auth import resolve_workspace_uid
 from datetime import datetime as _dt
 
 # ---------------- CONFIG ----------------

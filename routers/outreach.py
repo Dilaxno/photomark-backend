@@ -3,9 +3,9 @@ from fastapi.responses import JSONResponse
 import os
 from typing import List, Optional
 
-from backend.core.auth import get_uid_from_request
-from backend.core.config import logger
-from backend.utils.emailing import render_email, send_email_smtp
+from core.auth import get_uid_from_request
+from core.config import logger
+from utils.emailing import render_email, send_email_smtp
 
 router = APIRouter(prefix="/api/outreach", tags=["outreach"])  # POST /api/outreach/email
 

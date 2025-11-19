@@ -4,11 +4,11 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
-from backend.core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: ignore
-from backend.core.config import logger
-from backend.utils.emailing import render_email, send_email_smtp
-from backend.utils.storage import write_json_key, read_json_key
-from backend.utils.rate_limit import signup_throttle
+from core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: ignore
+from core.config import logger
+from utils.emailing import render_email, send_email_smtp
+from utils.storage import write_json_key, read_json_key
+from utils.rate_limit import signup_throttle
 
 router = APIRouter(prefix="/api", tags=["auth"])
 

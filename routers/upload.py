@@ -8,19 +8,19 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 import zipfile
 
-from backend.core.config import MAX_FILES, logger
-from backend.core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
-from backend.utils.watermark import (
+from core.config import MAX_FILES, logger
+from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
+from utils.watermark import (
     add_text_watermark,
     add_signature_watermark,
     add_text_watermark_tiled,
     add_signature_watermark_tiled,
 )
-from backend.utils.storage import upload_bytes, read_json_key
-from backend.utils.invisible_mark import embed_signature as embed_invisible, build_payload_for_uid
+from utils.storage import upload_bytes, read_json_key
+from utils.invisible_mark import embed_signature as embed_invisible, build_payload_for_uid
 
 # Import vault helpers to update vaults after upload
-from backend.routers.vaults import (
+from routers.vaults import (
     _read_vault, _write_vault, _vault_key,
     _read_vault_meta, _write_vault_meta, _unlock_vault,
     _vault_salt, _hash_password

@@ -7,11 +7,11 @@ from datetime import datetime as _dt
 from starlette.concurrency import run_in_threadpool
 from PIL import Image
 
-from backend.core.config import MAX_FILES, logger
-from backend.core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
-from backend.utils.storage import upload_bytes
-from backend.utils.watermark import add_text_watermark, add_signature_watermark
-from backend.utils.invisible_mark import detect_signature, payload_matches_uid, PAYLOAD_LEN
+from core.config import MAX_FILES, logger
+from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
+from utils.storage import upload_bytes
+from utils.watermark import add_text_watermark, add_signature_watermark
+from utils.invisible_mark import detect_signature, payload_matches_uid, PAYLOAD_LEN
 
 try:
     import piexif  # type: ignore

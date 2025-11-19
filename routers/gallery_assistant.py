@@ -8,10 +8,10 @@ import re
 import io
 import zipfile
 
-from backend.core.config import logger, GROQ_API_KEY, s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
-from backend.core.auth import resolve_workspace_uid, has_role_access
+from core.config import logger, GROQ_API_KEY, s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
+from core.auth import resolve_workspace_uid, has_role_access
 # Reuse vault helpers
-from backend.routers.vaults import (
+from routers.vaults import (
     _read_vault,
     _write_vault,
     _read_vault_meta,

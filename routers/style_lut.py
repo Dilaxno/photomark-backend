@@ -17,9 +17,9 @@ except Exception:
     except Exception:
         LUT3D = None  # handled at runtime
 
-from backend.core.auth import resolve_workspace_uid, has_role_access
-from backend.core.config import logger
-from backend.utils.storage import read_json_key, write_json_key
+from core.auth import resolve_workspace_uid, has_role_access
+from core.config import logger
+from utils.storage import read_json_key, write_json_key
 
 router = APIRouter(prefix="/api/style", tags=["style"])  # includes /lut-apply and /lut/generate
 

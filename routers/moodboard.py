@@ -9,7 +9,7 @@ from PIL import Image
 import zipfile
 from io import BytesIO
 
-from backend.core.config import STATIC_DIR
+from core.config import STATIC_DIR
 
 router = APIRouter(prefix="/api", tags=["moodboard"])  # included by app.main
 

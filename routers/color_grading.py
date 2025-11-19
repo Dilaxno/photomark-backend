@@ -11,8 +11,8 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from PIL import Image
 from datetime import datetime as _dt
-from backend.core.auth import resolve_workspace_uid, has_role_access
-from backend.utils.storage import upload_bytes, read_json_key, write_json_key
+from core.auth import resolve_workspace_uid, has_role_access
+from utils.storage import upload_bytes, read_json_key, write_json_key
 
 router = APIRouter(prefix="/api", tags=["color-grading"])
 

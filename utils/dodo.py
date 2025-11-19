@@ -1,7 +1,7 @@
 import os
 import httpx
 from typing import Dict, Any, Optional, Tuple
-from backend.core.config import logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_API_KEY
+from core.config import logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_API_KEY
 
 # Build standard headers list including variants used across integrations
 def build_headers_list() -> list[dict]:

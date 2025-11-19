@@ -10,7 +10,7 @@ import cv2
 from PIL import Image
 import secrets
 
-from backend.core.config import (
+from core.config import (
     logger,
     COLLAB_MAX_IMAGE_MB,
     COLLAB_ALLOWED_EXTS,
@@ -18,9 +18,9 @@ from backend.core.config import (
     COLLAB_RATE_LIMIT_MAX_ACTIONS,
     COLLAB_MAX_RECIPIENTS,
 )
-from backend.core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid, get_fs_client as _get_fs_client
-from backend.utils.emailing import render_email, send_email_smtp
-from backend.utils.storage import upload_bytes, read_json_key, write_json_key, read_bytes_key
+from core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid, get_fs_client as _get_fs_client
+from utils.emailing import render_email, send_email_smtp
+from utils.storage import upload_bytes, read_json_key, write_json_key, read_bytes_key
 
 # Firestore admin helpers (for server timestamps)
 try:

@@ -11,8 +11,8 @@ from starlette.responses import StreamingResponse
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-from backend.core.config import MAX_FILES, logger
-from backend.core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access, get_user_email_from_uid
+from core.config import MAX_FILES, logger
+from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access, get_user_email_from_uid
 
 try:
     from wand.image import Image as WandImage
@@ -39,7 +39,7 @@ except Exception:
 router = APIRouter(prefix="/api", tags=["convert"])
 
 # ---- One-free-generation helpers ----
-from backend.utils.storage import read_json_key, write_json_key
+from utils.storage import read_json_key, write_json_key
 from datetime import datetime as _dt
 
 def _is_paid_customer(uid: str) -> bool:
@@ -295,8 +295,8 @@ async def convert_bulk(
     if want_email or large_batch:
         try:
             from datetime import datetime
-            from backend.utils.storage import upload_bytes
-            from backend.utils.emailing import render_email, send_email_smtp
+            from utils.storage import upload_bytes
+            from utils.emailing import render_email, send_email_smtp
 
             # Run the heavy work after returning response
             def do_upload_and_email():

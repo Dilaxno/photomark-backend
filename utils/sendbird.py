@@ -2,7 +2,7 @@ import httpx
 import json
 import os
 from typing import List, Optional, Dict, Any
-from backend.core.config import logger
+from core.config import logger
 
 # Sendbird configuration - these should be set as environment variables
 SENDBIRD_APP_ID = os.getenv('SENDBIRD_APP_ID', '')

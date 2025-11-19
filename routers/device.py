@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import httpx
 
-from backend.core.auth import get_uid_from_request, get_user_email_from_uid
-from backend.core.config import GEOIP_LOOKUP_URL, logger, NEW_DEVICE_ALERT_COOLDOWN_SEC
-from backend.utils.storage import read_json_key, write_json_key
-from backend.utils.emailing import render_email, send_email_smtp
+from core.auth import get_uid_from_request, get_user_email_from_uid
+from core.config import GEOIP_LOOKUP_URL, logger, NEW_DEVICE_ALERT_COOLDOWN_SEC
+from utils.storage import read_json_key, write_json_key
+from utils.emailing import render_email, send_email_smtp
 
 router = APIRouter(prefix="/api", tags=["device"])
 

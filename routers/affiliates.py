@@ -3,17 +3,17 @@ from fastapi.responses import JSONResponse
 import os
 from datetime import datetime
 
-from backend.core.auth import get_uid_from_request
-from backend.core.config import logger
-from backend.utils.emailing import render_email, send_email_smtp
-from backend.utils.storage import read_json_key, write_json_key
+from core.auth import get_uid_from_request
+from core.config import logger
+from utils.emailing import render_email, send_email_smtp
+from utils.storage import read_json_key, write_json_key
 
 # Firestore client via centralized helper
 try:
     from firebase_admin import firestore as fb_fs  # type: ignore
 except Exception:
     fb_fs = None  # type: ignore
-from backend.core.auth import get_fs_client as _get_fs_client
+from core.auth import get_fs_client as _get_fs_client
 
 def _update_affiliate_profile_fs(affiliate_uid: str, stats: dict):
     """Mirror affiliate info (uid, referral link, stats) into users/<uid>.affiliate"""

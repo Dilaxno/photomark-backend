@@ -2,8 +2,8 @@ from fastapi import APIRouter, Query
 from fastapi.responses import HTMLResponse
 import json, os
 from datetime import datetime
-from backend.routers.photos import _build_manifest
-from backend.core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
+from routers.photos import _build_manifest
+from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
 
 router = APIRouter(prefix="/embed", tags=["embed"])
 

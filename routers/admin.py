@@ -6,8 +6,8 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from backend.core.config import logger, s3, R2_BUCKET
-from backend.core.auth import get_fs_client
+from core.config import logger, s3, R2_BUCKET
+from core.auth import get_fs_client
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])  # secure endpoints via ADMIN_SECRET
 

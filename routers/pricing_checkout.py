@@ -4,8 +4,8 @@ import os
 import httpx
 from typing import Optional
 
-from backend.core.config import logger
-from backend.core.auth import (
+from core.config import logger
+from core.auth import (
     get_fs_client as _get_fs_client,
     get_uid_from_request,
     firebase_enabled,
@@ -19,7 +19,7 @@ except Exception:
 
 # Reuse normalization/allow-list logic from webhook module
 try:
-    from backend.routers.pricing_webhook import _normalize_plan, _allowed_plans  # type: ignore
+    from routers.pricing_webhook import _normalize_plan, _allowed_plans  # type: ignore
 except Exception:
     # Minimal fallbacks
     def _normalize_plan(plan: Optional[str]) -> str:
@@ -235,7 +235,7 @@ async def create_pricing_link(request: Request):
     ]
 
     # Use shared Dodo helper for link creation
-    from backend.utils.dodo import create_checkout_link
+    from utils.dodo import create_checkout_link
 
     try:
         logger.info(
@@ -248,7 +248,7 @@ async def create_pricing_link(request: Request):
     if link:
         # Persist lightweight context so webhook can recover uid/plan if provider omits metadata
         try:
-            from backend.utils.storage import write_json_key
+            from utils.storage import write_json_key
             code = link.rsplit('/', 1)[-1]
             write_json_key(
                 f"pricing/cache/links/{code}.json",
@@ -330,7 +330,7 @@ async def create_pricing_session(request: Request):
         {**ref_fields, "metadata": meta, "query_params": qp, "query": qp, "params": qp, "price_id": product_id, "quantity": qty, "return_url": return_url, "cancel_url": cancel_url, **({"customer": {"email": email}, "email": email, "customer_email": email} if email else {})},
     ]
 
-    from backend.utils.dodo import create_checkout_link, pick_checkout_url
+    from utils.dodo import create_checkout_link, pick_checkout_url
 
     url, details = await create_checkout_link(alt_payloads)
     if not url:

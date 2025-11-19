@@ -7,10 +7,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from backend.core.config import s3, R2_BUCKET, logger
-from backend.utils.storage import read_json_key, write_json_key
-from backend.core.auth import get_uid_from_request, get_user_email_from_uid
-from backend.utils.emailing import render_email, send_email_smtp
+from core.config import s3, R2_BUCKET, logger
+from utils.storage import read_json_key, write_json_key
+from core.auth import get_uid_from_request, get_user_email_from_uid
+from utils.emailing import render_email, send_email_smtp
 
 router = APIRouter(prefix="/api", tags=["updates"])  # separate tag for clarity
 

@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 import os
 import warnings
 
-from backend.core.config import logger  # type: ignore
+from core.config import logger  # type: ignore
 
 # Silence a noisy Kornia FutureWarning (does not affect our watermark pipeline)
 warnings.filterwarnings(
@@ -15,14 +15,14 @@ warnings.filterwarnings(
 )
 
 # Routers
-from backend.routers import (
+from routers import (
     images, photos, auth, convert, vaults, voice, collab,
     gallery_assistant, color_grading, admin, mark, smart_resize,
 )  # type: ignore
 
 # Background removal router
 try:
-    from backend.routers import background_removal  # noqa: E402
+    from routers import background_removal  # noqa: E402
 except Exception as _ex:
     logger.warning(f"background_removal router import failed: {_ex}")
     background_removal = None
@@ -78,10 +78,10 @@ app.include_router(smart_resize.router)
 
 # app.include_router(pricing_checkout.router)  # removed
 # embed iframe endpoints
-from backend.routers import embed  # noqa: E402
+from routers import embed  # noqa: E402
 app.include_router(embed.router)
 # extra endpoints for frontend compatibility
-from backend.routers import upload, device  # noqa: E402
+from routers import upload, device  # noqa: E402
 app.include_router(upload.router)
 app.include_router(device.router)
 # admin endpoints
@@ -90,25 +90,25 @@ app.include_router(admin.router)
 
 # legacy style LUT GPU endpoint
 try:
-    from backend.routers import style_lut  # noqa: E402
+    from routers import style_lut  # noqa: E402
     app.include_router(style_lut.router)
 except Exception as _ex:
     logger.warning(f"style_lut router not available: {_ex}")
 
 # style histogram matching endpoint
 try:
-    from backend.routers import style_hist  # noqa: E402
+    from routers import style_hist  # noqa: E402
     app.include_router(style_hist.router)
 except Exception as _ex:
     logger.warning(f"style_hist router not available: {_ex}")
 
 # new endpoints for signup and account email change
-from backend.routers import auth_ip, account  # noqa: E402
+from routers import auth_ip, account  # noqa: E402
 app.include_router(auth_ip.router)
 app.include_router(account.router)
 
 # retouch endpoints (AI background)
-from backend.routers import retouch  # noqa: E402
+from routers import retouch  # noqa: E402
 app.include_router(retouch.router)
 
 # background removal endpoints
@@ -117,7 +117,7 @@ if background_removal is not None:
 
 # Moodboard generator
 try:
-    from backend.routers import moodboard  # noqa: E402
+    from routers import moodboard  # noqa: E402
     app.include_router(moodboard.router)
 except Exception as _ex:
     logger.warning(f"moodboard router not available: {_ex}")
@@ -128,7 +128,7 @@ except Exception as _ex:
 
 # prelaunch subscription endpoint
 try:
-    from backend.routers import prelaunch  # noqa: E402
+    from routers import prelaunch  # noqa: E402
     app.include_router(prelaunch.router)
 except Exception as _ex:
     logger.warning(f"prelaunch router not available: {_ex}")
@@ -136,16 +136,16 @@ except Exception as _ex:
 
 
 # affiliate endpoints (secret invite sender)
-from backend.routers import affiliates  # noqa: E402
+from routers import affiliates  # noqa: E402
 app.include_router(affiliates.router)
 
 # Pricing webhook (replaces legacy Dodo webhook)
 try:
-    from backend.routers import pricing_webhook  # noqa: E402
+    from routers import pricing_webhook  # noqa: E402
     app.include_router(pricing_webhook.router)
 
     # Backward-compatible Dodo webhook path
-    from backend.routers.pricing_webhook import pricing_webhook as _pricing_webhook_handler  # type: ignore
+    from routers.pricing_webhook import pricing_webhook as _pricing_webhook_handler  # type: ignore
 
     @app.post("/api/payments/dodo/webhook")
     async def dodo_webhook(request: Request):
@@ -154,18 +154,18 @@ except Exception as _ex:
     logger.warning(f"pricing webhook router not available: {_ex}")
 
 # outreach email endpoint (photographer/artist introduction)
-from backend.routers import outreach  # noqa: E402
+from routers import outreach  # noqa: E402
 app.include_router(outreach.router)
 
 # inbound email replies + list for UI
-from backend.routers import replies  # noqa: E402
+from routers import replies  # noqa: E402
 app.include_router(replies.router)
 
 # lens simulation tool removed
 
 # product updates (changelog + email broadcast)
 try:
-    from backend.routers import updates  # noqa: E402
+    from routers import updates  # noqa: E402
     app.include_router(updates.router)
 except Exception as _ex:
     logger.warning(f"updates router not available: {_ex}")

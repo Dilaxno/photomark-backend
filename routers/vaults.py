@@ -15,11 +15,11 @@ from fastapi import APIRouter, Request, Body, UploadFile, File, Form, Background
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from backend.core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
-from backend.utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
-from backend.core.auth import get_uid_from_request, get_user_email_from_uid, get_fs_client
-from backend.utils.emailing import render_email, send_email_smtp
-from backend.utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
+from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
+from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
+from core.auth import get_uid_from_request, get_user_email_from_uid, get_fs_client
+from utils.emailing import render_email, send_email_smtp
+from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
 
 router = APIRouter(prefix="/api", tags=["vaults"])
 
@@ -142,7 +142,7 @@ def _write_retouch_queue(uid: str, items: list[dict]):
     _write_json_key(_retouch_queue_key(uid), items or [])
 
 
-from backend.utils.invisible_mark import detect_signature, PAYLOAD_LEN
+from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
 from PIL import Image
 
@@ -2310,7 +2310,7 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
 
     try:
         # Build payload variants using shared Dodo helper
-        from backend.utils.dodo import create_checkout_link
+        from utils.dodo import create_checkout_link
 
         # Ensure webhook can resolve the purchasing user reliably
         # Include both uid aliases in metadata and reference fields at the top level

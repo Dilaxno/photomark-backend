@@ -1,8 +1,8 @@
 import os
 from typing import Optional, Tuple
 from fastapi import Request
-from backend.core.config import logger
-from backend.utils.storage import read_json_key
+from core.config import logger
+from utils.storage import read_json_key
 
 # Collaboration helpers
 ALLOWED_ROLES = {"admin", "retoucher", "gallery_manager"}
@@ -131,7 +131,7 @@ def get_uid_from_request(request: Request) -> Optional[str]:
         return None
     # Try collaborator JWT first (HS256)
     try:
-        from backend.core.config import COLLAB_JWT_SECRET
+        from core.config import COLLAB_JWT_SECRET
         import jwt  # type: ignore
         if COLLAB_JWT_SECRET:
             decoded = jwt.decode(token, COLLAB_JWT_SECRET, algorithms=["HS256"])  # raises on invalid

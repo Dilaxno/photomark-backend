@@ -33,9 +33,9 @@ import numpy as np
 from PIL import Image
 import cv2
 
-from backend.core.auth import resolve_workspace_uid, has_role_access
-from backend.core.config import logger
-from backend.utils.storage import read_json_key, write_json_key
+from core.auth import resolve_workspace_uid, has_role_access
+from core.config import logger
+from utils.storage import read_json_key, write_json_key
 
 router = APIRouter(prefix="/api/style", tags=["style"])  # matches existing /api/style namespace
 

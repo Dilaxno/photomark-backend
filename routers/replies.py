@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional
 import os
 import time
 
-from backend.core.auth import get_uid_from_request
-from backend.core.config import logger
+from core.auth import get_uid_from_request
+from core.config import logger
 
 # Firestore admin via firebase_admin
 try:

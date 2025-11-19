@@ -8,10 +8,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 import zipfile
 
-from backend.core.config import MAX_FILES, logger
-from backend.core.auth import resolve_workspace_uid, has_role_access
-from backend.utils.smart_crop import SmartCropper, parse_presets
-from backend.utils.storage import upload_bytes
+from core.config import MAX_FILES, logger
+from core.auth import resolve_workspace_uid, has_role_access
+from utils.smart_crop import SmartCropper, parse_presets
+from utils.storage import upload_bytes
 
 router = APIRouter(prefix="", tags=["smart-resize"])  # public-style endpoints
 

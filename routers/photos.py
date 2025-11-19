@@ -5,10 +5,10 @@ import os, json, re
 from datetime import datetime
 from io import BytesIO
 
-from backend.core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir, logger
-from backend.core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
-from backend.utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
-from backend.utils.invisible_mark import detect_signature, PAYLOAD_LEN
+from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir, logger
+from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
+from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
+from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
 from PIL import Image
 
@@ -721,7 +721,7 @@ async def get_external_photos(
         # Local filesystem
         else:
             try:
-                from backend.core.config import STATIC_DIR as static_dir
+                from core.config import STATIC_DIR as static_dir
                 dir_path = os.path.join(static_dir, prefix)
                 
                 if not os.path.isdir(dir_path):

@@ -8,7 +8,7 @@ from typing import Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import os
 
-from backend.core.config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM, logger
+from core.config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM, logger
 
 # Jinja env
 _templates_dir = os.path.join(os.path.dirname(__file__), "..", "templates")

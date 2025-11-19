@@ -2,7 +2,7 @@ from fastapi import APIRouter, Query, HTTPException
 import httpx
 from typing import Optional
 
-from backend.core.config import (
+from core.config import (
     RAPIDAPI_CAMERA_DB_KEY,
     logger,
 )

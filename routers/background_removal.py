@@ -11,17 +11,17 @@ import sys
 
 # Handle different import paths for local vs server
 try:
-    from backend.core.config import logger
+    from core.config import logger
 except ImportError:
     from core.config import logger
 
 try:
-    from backend.core.auth import resolve_workspace_uid
+    from core.auth import resolve_workspace_uid
 except ImportError:
     from core.auth import resolve_workspace_uid
 
 try:
-    from backend.utils.storage import read_json_key
+    from utils.storage import read_json_key
 except ImportError:
     from utils.storage import read_json_key
 

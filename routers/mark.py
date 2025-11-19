@@ -4,8 +4,8 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 import httpx
 
-from backend.core.config import logger, GROQ_API_KEY
-from backend.core.auth import get_uid_from_request, get_fs_client
+from core.config import logger, GROQ_API_KEY
+from core.auth import get_uid_from_request, get_fs_client
 
 router = APIRouter(prefix="/api/mark", tags=["mark_assistant"])  # Global Mark chat assistant
 

@@ -5,17 +5,17 @@ import os
 import json
 from datetime import datetime
 
-from backend.core.config import logger
+from core.config import logger
 from standardwebhooks import Webhook, WebhookVerificationError
-from backend.core.auth import (
+from core.auth import (
     get_fs_client as _get_fs_client,
     get_uid_from_request,
     get_uid_by_email,
     firebase_enabled,
     fb_auth,
 )
-from backend.utils.storage import read_json_key, write_json_key
-from backend.utils.emailing import render_email, send_email_smtp
+from utils.storage import read_json_key, write_json_key
+from utils.emailing import render_email, send_email_smtp
 
 # Firestore client via centralized helper
 try:

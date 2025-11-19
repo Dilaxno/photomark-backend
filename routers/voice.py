@@ -5,7 +5,7 @@ from fastapi import APIRouter, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 import websockets
 
-from backend.core.config import logger, DEEPGRAM_API_KEY
+from core.config import logger, DEEPGRAM_API_KEY
 
 router = APIRouter(prefix="/api", tags=["voice"])
 

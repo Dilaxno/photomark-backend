@@ -6,17 +6,17 @@ import os
 import secrets
 import shutil
 
-from backend.core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: ignore
-from backend.core.config import logger, STATIC_DIR, s3, R2_BUCKET
-from backend.utils.storage import write_json_key, read_json_key
-from backend.utils.emailing import render_email, send_email_smtp
+from core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: ignore
+from core.config import logger, STATIC_DIR, s3, R2_BUCKET
+from utils.storage import write_json_key, read_json_key
+from utils.emailing import render_email, send_email_smtp
 
 # Firestore client via centralized helper
 try:
     from firebase_admin import firestore as fb_fs  # type: ignore
 except Exception:
     fb_fs = None  # type: ignore
-from backend.core.auth import get_fs_client as _get_fs_client
+from core.auth import get_fs_client as _get_fs_client
 
 router = APIRouter(prefix="/api/account", tags=["account"]) 
 

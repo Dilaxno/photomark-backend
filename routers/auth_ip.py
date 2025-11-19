@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
-from backend.core.auth import firebase_enabled, fb_auth, get_uid_from_request  # type: ignore
-from backend.core.config import logger
+from core.auth import firebase_enabled, fb_auth, get_uid_from_request  # type: ignore
+from core.config import logger
 from datetime import datetime
 try:
     from firebase_admin import firestore as fb_fs  # type: ignore
 except Exception:
     fb_fs = None  # type: ignore
-from backend.core.auth import get_fs_client
+from core.auth import get_fs_client
 
 router = APIRouter(prefix="/api/auth/ip", tags=["auth-ip"]) 
 

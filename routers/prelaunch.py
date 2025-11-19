@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr
 import os
 from datetime import datetime, timezone
 
-from backend.core.config import logger
+from core.config import logger
 
 
 def _get_firestore():
