@@ -81,14 +81,12 @@ def _get_bg_remover():
     if _rembg_session is None:
         try:
             # Initialize remover with fast mode for better performance
-            # Expand ~ to home directory properly
-            model_dir = os.path.expanduser('~/.transparent-background/models')
-            os.makedirs(model_dir, exist_ok=True)
-            
             # Auto-detect device (cuda if available, else cpu)
-            device = 'cuda:0' if os.system('nvidia-smi > /dev/null 2>&1') == 0 else 'cpu'
+            import torch
+            device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
             
-            _rembg_session = Remover(mode='fast', jit=True, device=device, ckpt=model_dir)
+            # Let library handle model download automatically (ckpt=None uses default path)
+            _rembg_session = Remover(mode='fast', jit=True, device=device)
             logger.info(f"Background remover loaded successfully on {device}")
         except Exception as e:
             logger.error(f"Failed to load background remover: {e}")
