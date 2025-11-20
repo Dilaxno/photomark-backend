@@ -228,8 +228,9 @@ class SmartCropper:
 # Presets with default pixel sizes
 PRESETS: Dict[str, Tuple[int, int]] = {
     # Aspect presets commonly used
-    "16x9": (1920, 1080),            # Landscape
+    "1x1": (1080, 1080),             # Square (Instagram post)
     "4x5": (1080, 1350),             # Portrait (Instagram)
+    "16x9": (1920, 1080),            # Landscape
     "9x16": (1080, 1920),            # TikTok/Reels/Stories
     # Absolute pixel presets
     "1000x1500": (1000, 1500),       # Pinterest
@@ -243,7 +244,7 @@ def parse_presets(presets_csv: Optional[str]) -> List[Tuple[str, Tuple[int, int]
     If None or empty, returns a sensible default set.
     """
     if not presets_csv:
-        return [(k, PRESETS[k]) for k in ["16x9", "4x5", "9x16", "1000x1500", "1200x628"]]
+        return [(k, PRESETS[k]) for k in ["1x1", "4x5", "16x9", "9x16", "1000x1500", "1200x628"]]
     out: List[Tuple[str, Tuple[int, int]]] = []
     tokens = [t.strip().lower() for t in presets_csv.split(',') if t.strip()]
 
@@ -281,5 +282,5 @@ def parse_presets(presets_csv: Optional[str]) -> List[Tuple[str, Tuple[int, int]
             except Exception:
                 pass
     if not out:
-        out = [(k, PRESETS[k]) for k in ["16x9", "4x5", "9x16"]]
+        out = [(k, PRESETS[k]) for k in ["1x1", "4x5", "9x16"]]
     return out
