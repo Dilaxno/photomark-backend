@@ -10,6 +10,7 @@ from utils.emailing import render_email, send_email_smtp
 from utils.storage import write_json_key, read_json_key
 from utils.rate_limit import signup_throttle
 from utils.validation import validate_signup_data
+from utils.recaptcha import verify_recaptcha
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
@@ -36,6 +37,20 @@ async def auth_signup_check(request: Request, payload: dict = Body(None)):
     if ip == "unknown":
         logger.warning("[auth.signup] Could not determine client IP")
         return JSONResponse({"error": "Could not verify request"}, status_code=400)
+    
+    # Verify reCAPTCHA if token provided
+    if payload and payload.get("recaptchaToken"):
+        recaptcha_token = payload.get("recaptchaToken", "").strip()
+        is_valid_captcha = await verify_recaptcha(recaptcha_token, ip)
+        if not is_valid_captcha:
+            logger.warning(f"[auth.signup] reCAPTCHA verification failed for IP {ip}")
+            return JSONResponse(
+                {
+                    "error": "reCAPTCHA verification failed. Please try again.",
+                    "allowed": False
+                },
+                status_code=400
+            )
     
     # Server-side validation of name and email if provided
     if payload:
