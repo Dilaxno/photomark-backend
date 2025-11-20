@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse
-from core.auth import get_current_user
+from core.auth import get_uid_from_request
 from typing import Optional
 import boto3
 import os
@@ -26,15 +26,19 @@ s3_client = boto3.client(
 
 @router.post('/api/shop/upload')
 async def upload_shop_asset(
+    request: Request,
     file: UploadFile = File(...),
     type: str = Form(...),  # 'logo', 'pfp', or 'banner'
-    shop_id: str = Form(...),
-    user=Depends(get_current_user)
+    shop_id: str = Form(...)
 ):
     """
     Upload shop assets (logo, pfp, banner) to R2 storage
     """
     try:
+        # Verify user is authenticated
+        uid = get_uid_from_request(request)
+        if not uid:
+            raise HTTPException(status_code=401, detail='Unauthorized')
         # Validate file type
         allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
         if file.content_type not in allowed_types:
@@ -81,13 +85,17 @@ async def upload_shop_asset(
 
 @router.delete('/api/shop/upload/{filename:path}')
 async def delete_shop_asset(
-    filename: str,
-    user=Depends(get_current_user)
+    request: Request,
+    filename: str
 ):
     """
     Delete shop asset from R2 storage
     """
     try:
+        # Verify user is authenticated
+        uid = get_uid_from_request(request)
+        if not uid:
+            raise HTTPException(status_code=401, detail='Unauthorized')
         # Delete from R2
         s3_client.delete_object(
             Bucket=R2_BUCKET_NAME,
@@ -119,14 +127,18 @@ async def get_shop_settings(shop_id: str):
 
 @router.post('/api/shop/{shop_id}/settings')
 async def save_shop_settings(
+    request: Request,
     shop_id: str,
-    settings: dict,
-    user=Depends(get_current_user)
+    settings: dict
 ):
     """
     Save shop settings to database
     """
     try:
+        # Verify user is authenticated
+        uid = get_uid_from_request(request)
+        if not uid:
+            raise HTTPException(status_code=401, detail='Unauthorized')
         # TODO: Save to database (Firestore or PostgreSQL)
         # For now, just acknowledge
         return JSONResponse({
