@@ -578,6 +578,102 @@ async def vaults_add(request: Request, vault: str = Body(..., embed=True), keys:
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+@router.post("/vaults/upload")
+async def vaults_upload(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    vault: str = Form(...),
+    password: Optional[str] = Form(None)
+):
+    """Upload files directly to a vault (not to general uploads area)"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # Check vault exists or create it
+    try:
+        _read_vault_meta(uid, vault)
+    except:
+        # Vault doesn't exist, create it
+        try:
+            _write_vault_meta(uid, vault, {})
+            _write_vault(uid, vault, [])
+        except Exception as ex:
+            return JSONResponse({"error": f"Failed to create vault: {str(ex)}"}, status_code=400)
+    
+    # Check if vault is protected and unlock if needed
+    meta = _read_vault_meta(uid, vault)
+    if meta.get('protected') and not _is_vault_unlocked(uid, vault):
+        if not _unlock_vault(uid, vault, password or ''):
+            return JSONResponse({"error": "Vault locked or invalid password"}, status_code=403)
+    
+    if not files:
+        return JSONResponse({"error": "No files provided"}, status_code=400)
+    
+    uploaded = []
+    errors = []
+    
+    for uf in files:
+        try:
+            raw = await uf.read()
+            if not raw:
+                continue
+            
+            # Determine file extension
+            orig_filename = uf.filename or 'image.jpg'
+            ext = os.path.splitext(orig_filename)[1].lower()
+            if not ext or ext not in ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.gif', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.sr2', '.srf', '.srw', '.orf', '.raf', '.rw2', '.rwl', '.pef', '.dng', '.3fr', '.erf', '.kdc', '.mrw', '.x3f', '.mef', '.iiq', '.fff']:
+                ext = '.jpg'
+            
+            # Generate unique key in user's vault space
+            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            random_suffix = secrets.token_hex(4)
+            safe_filename = "".join(c for c in orig_filename if c.isalnum() or c in ('-', '_', '.')).replace(' ', '_')[:50]
+            safe_filename = os.path.splitext(safe_filename)[0]  # Remove extension
+            key = f"users/{uid}/vaults/{vault}/{ts}_{random_suffix}_{safe_filename}{ext}"
+            
+            # Upload to R2
+            content_type = uf.content_type or 'image/jpeg'
+            if s3 and R2_BUCKET:
+                s3.Object(R2_BUCKET, key).put(Body=raw, ContentType=content_type)
+            else:
+                # Fallback to local storage
+                local_path = os.path.join(STATIC_DIR, key)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, 'wb') as f:
+                    f.write(raw)
+            
+            uploaded.append({
+                "key": key,
+                "filename": orig_filename,
+                "size": len(raw)
+            })
+            
+        except Exception as ex:
+            logger.error(f"Failed to upload file {uf.filename}: {ex}")
+            errors.append({"filename": uf.filename, "error": str(ex)})
+    
+    if not uploaded:
+        return JSONResponse({"error": "No files uploaded successfully", "errors": errors}, status_code=400)
+    
+    # Add uploaded keys to vault
+    try:
+        exist = _read_vault(uid, vault)
+        new_keys = [item["key"] for item in uploaded]
+        merged = sorted(set(exist) | set(new_keys))
+        _write_vault(uid, vault, merged)
+    except Exception as ex:
+        logger.error(f"Failed to add keys to vault: {ex}")
+        return JSONResponse({"error": f"Files uploaded but failed to add to vault: {str(ex)}"}, status_code=500)
+    
+    return {
+        "uploaded": uploaded,
+        "vault": vault,
+        "count": len(uploaded),
+        "errors": errors if errors else None
+    }
+
+
 @router.post("/vaults/remove")
 async def vaults_remove(request: Request, vault: str = Body(..., embed=True), keys: List[str] = Body(..., embed=True), password: Optional[str] = Body(None, embed=True), delete_from_r2: Optional[bool] = Body(False, embed=True)):
     uid = get_uid_from_request(request)
