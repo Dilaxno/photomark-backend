@@ -44,10 +44,15 @@ def _normalize_plan(plan: Optional[str]) -> str:
         p = p[:-6]
     p = p.strip()
 
-    # Match by contains and common aliases. Map to new slugs: 'individual' | 'studios'
-    if "photograph" in p or p in ("photo", "pg", "p", "individual", "ind", "solo"):
+    # Match new plan names
+    if "individual" in p or p in ("ind", "indiv", "solo", "i"):
         return "individual"
-    if "agenc" in p or p in ("ag", "studio", "studios", "team", "teams"):
+    if "studio" in p or p in ("st", "s", "team", "teams"):
+        return "studios"
+    # Backward compatibility for old plan names
+    if "photograph" in p or p in ("photo", "pg", "p", "photographers", "photographer"):
+        return "individual"
+    if "agenc" in p or p in ("ag", "agencies", "agency"):
         return "studios"
     return ""
 
@@ -149,21 +154,26 @@ def _deep_find_first(obj: dict, keys: tuple[str, ...]) -> str:
 def _plan_from_products(obj: dict) -> str:
     """Infer plan from Dodo payload products when explicit plan metadata is missing.
     Prefers mapping by configured product IDs, then by product names, and only returns
-    one of the allowed internal slugs: 'photographers' or 'agencies'.
+    one of the allowed internal slugs: 'individual' or 'studios'.
     """
     allowed = _allowed_plans()
-    pid_phot = (
-        os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID")
+    # Try new env vars first, fallback to old ones for backward compatibility
+    pid_individual = (
+        os.getenv("DODO_INDIVIDUAL_PRODUCT_ID")
+        or os.getenv("VITE_DODO_INDIVIDUAL_PRODUCT_ID")
+        or os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID")
         or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID")
         or ""
     ).strip()
-    pid_ag = (
-        os.getenv("DODO_AGENCIES_PRODUCT_ID")
+    pid_studios = (
+        os.getenv("DODO_STUDIOS_PRODUCT_ID")
+        or os.getenv("VITE_DODO_STUDIOS_PRODUCT_ID")
+        or os.getenv("DODO_AGENCIES_PRODUCT_ID")
         or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID")
         or ""
     ).strip()
-    found_ag = False
-    found_phot = False
+    found_studios = False
+    found_individual = False
     names: list[str] = []
 
     try:
@@ -205,10 +215,10 @@ def _plan_from_products(obj: dict) -> str:
                     pid = pid or str((pr.get("id") or pr.get("price_id") or "")).strip()
 
                 # Compare ids against configured product ids
-                if pid_ag and pid and pid == pid_ag:
-                    found_ag = True
-                if pid_phot and pid and pid == pid_phot:
-                    found_phot = True
+                if pid_studios and pid and pid == pid_studios:
+                    found_studios = True
+                if pid_individual and pid and pid == pid_individual:
+                    found_individual = True
                 if name:
                     names.append(name)
 
@@ -217,15 +227,15 @@ def _plan_from_products(obj: dict) -> str:
             p = obj.get("product") or {}
             pid = str((p.get("id") or p.get("product_id") or "")).strip()
             name = str((p.get("name") or p.get("title") or "")).strip()
-            if pid_ag and pid and pid == pid_ag:
-                found_ag = True
-            if pid_phot and pid and pid == pid_phot:
-                found_phot = True
+            if pid_studios and pid and pid == pid_studios:
+                found_studios = True
+            if pid_individual and pid and pid == pid_individual:
+                found_individual = True
             if name:
                 names.append(name)
 
         # Fallback: bounded deep scan for id-like fields if nothing found so far
-        if not (found_ag or found_phot):
+        if not (found_studios or found_individual):
             seen_ids: set[str] = set()
             def _scan_ids(node: dict, depth: int = 0):
                 if depth > 4 or not isinstance(node, dict):
@@ -245,26 +255,26 @@ def _plan_from_products(obj: dict) -> str:
                             if isinstance(it, dict):
                                 _scan_ids(it, depth + 1)
             _scan_ids(obj)
-            if pid_ag and pid_ag in seen_ids:
-                found_ag = True
-            if pid_phot and pid_phot in seen_ids:
-                found_phot = True
+            if pid_studios and pid_studios in seen_ids:
+                found_studios = True
+            if pid_individual and pid_individual in seen_ids:
+                found_individual = True
 
         try:
-            logger.info(f"[pricing.webhook] product mapping: found_agencies={found_ag} found_photographers={found_phot} names={names}")
+            logger.info(f"[pricing.webhook] product mapping: found_studios={found_studios} found_individual={found_individual} names={names}")
         except Exception:
             pass
     except Exception:
         pass
 
     try:
-        logger.info(f"[pricing.webhook] product mapping: found_agencies={found_ag} found_photographers={found_phot} names={names}")
+        logger.info(f"[pricing.webhook] product mapping: found_studios={found_studios} found_individual={found_individual} names={names}")
     except Exception:
         pass
 
-    if found_ag:
+    if found_studios:
         return "studios"
-    if found_phot:
+    if found_individual:
         return "individual"
 
     # Fallback: try names
@@ -733,12 +743,13 @@ async def pricing_webhook(request: Request):
             product_id = str((event_obj.get("product_id") or "")).strip()
             if not product_id:
                 product_id = _deep_find_first(event_obj, ("product_id", "productId"))
-            pid_phot = (os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
-            pid_ag = (os.getenv("DODO_AGENCIES_PRODUCT_ID") or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID") or "").strip()
+            # Try new env vars first, fallback to old ones
+            pid_individual = (os.getenv("DODO_INDIVIDUAL_PRODUCT_ID") or os.getenv("VITE_DODO_INDIVIDUAL_PRODUCT_ID") or os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
+            pid_studios = (os.getenv("DODO_STUDIOS_PRODUCT_ID") or os.getenv("VITE_DODO_STUDIOS_PRODUCT_ID") or os.getenv("DODO_AGENCIES_PRODUCT_ID") or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID") or "").strip()
             if product_id:
-                if pid_ag and product_id == pid_ag:
+                if pid_studios and product_id == pid_studios:
                     plan = "studios"
-                elif pid_phot and product_id == pid_phot:
+                elif pid_individual and product_id == pid_individual:
                     plan = "individual"
         except Exception:
             pass

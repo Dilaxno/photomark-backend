@@ -28,23 +28,31 @@ except Exception:
             p = p[:-5]
         if p.endswith(" plans"):
             p = p[:-6]
-        if "photograph" in p or p in ("photo", "pg", "p"):
-            return "photographers"
-        if "agenc" in p or p in ("ag",):
-            return "agencies"
+        # New plan names
+        if "individual" in p or p in ("indiv", "ind", "i"):
+            return "individual"
+        if "studio" in p or p in ("st", "s"):
+            return "studios"
+        # Backward compatibility
+        if "photograph" in p or p in ("photo", "pg", "p", "photographers", "photographer"):
+            return "individual"
+        if "agenc" in p or p in ("ag", "agencies", "agency"):
+            return "studios"
         return ""
 
     def _allowed_plans() -> set[str]:
-        return {"photographers", "agencies"}
+        return {"individual", "studios"}
 
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
 
 
 def _plan_to_product_id(plan: str) -> str:
-    if plan == "photographers":
-        return (os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
-    if plan == "agencies":
-        return (os.getenv("DODO_AGENCIES_PRODUCT_ID") or "").strip()
+    if plan == "individual":
+        # Try new env var first, fallback to old one for backward compatibility
+        return (os.getenv("DODO_INDIVIDUAL_PRODUCT_ID") or os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
+    if plan == "studios":
+        # Try new env var first, fallback to old one for backward compatibility
+        return (os.getenv("DODO_STUDIOS_PRODUCT_ID") or os.getenv("DODO_AGENCIES_PRODUCT_ID") or "").strip()
     return ""
 
 
@@ -74,7 +82,7 @@ def _get_user_email(uid: str) -> str:
 async def create_pricing_link(request: Request):
     """Create a Dodo payment link with user_uid embedded in metadata.
 
-    Request JSON: { plan: "photographers" | "agencies", quantity?: 1 }
+    Request JSON: { plan: "individual" | "studios", quantity?: 1 }
     Response: { url }
     """
     uid = get_uid_from_request(request)
@@ -269,7 +277,7 @@ async def create_pricing_link(request: Request):
 async def create_pricing_session(request: Request):
     """Create a Dodo checkout SESSION (server-side) and return a session_url for full-page redirect.
 
-    Request JSON: { plan: "photographers" | "agencies", returnUrl?: string, cancelUrl?: string }
+    Request JSON: { plan: "individual" | "studios", returnUrl?: string, cancelUrl?: string }
     Response: { session_url }
     """
     uid = get_uid_from_request(request)
@@ -341,8 +349,8 @@ async def create_pricing_session(request: Request):
     return {"session_url": url, "plan": plan}
 
 
-@router.get("/link/photographers")
-async def link_photographers(request: Request):
+@router.get("/link/individual")
+async def link_individual(request: Request):
     # Convenience GET route
     return await create_pricing_link(Request({
         "type": request.scope.get("type"),
@@ -365,12 +373,18 @@ async def link_photographers(request: Request):
         "extensions": request.scope.get("extensions"),
         "user": getattr(request, "user", None),
         "session": getattr(request, "session", None),
-        "_body": b'{"plan":"photographers"}',
+        "_body": b'{"plan":"individual"}',
     }))
 
 
-@router.get("/link/agencies")
-async def link_agencies(request: Request):
+@router.get("/link/photographers")
+async def link_photographers(request: Request):
+    # Backward compatibility - redirect to individual
+    return await link_individual(request)
+
+
+@router.get("/link/studios")
+async def link_studios(request: Request):
     return await create_pricing_link(Request({
         "type": request.scope.get("type"),
         "http_version": request.scope.get("http_version"),
@@ -392,5 +406,11 @@ async def link_agencies(request: Request):
         "extensions": request.scope.get("extensions"),
         "user": getattr(request, "user", None),
         "session": getattr(request, "session", None),
-        "_body": b'{"plan":"agencies"}',
+        "_body": b'{"plan":"studios"}',
     }))
+
+
+@router.get("/link/agencies")
+async def link_agencies(request: Request):
+    # Backward compatibility - redirect to studios
+    return await link_studios(request)

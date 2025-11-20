@@ -392,7 +392,7 @@ async def affiliates_track_signup_verified(request: Request):
                     user_data = user_doc.to_dict() if user_doc.exists else {}
                     name = (user_data.get('name') or user_data.get('displayName') or user_data.get('email') or 'User').split('@')[0]
                     plan = (user_data.get('plan') or 'free')
-                    status = 'paid' if str(plan).lower() in ('photographers','agencies','pro','team','enterprise','paid') else 'free'
+                    status = 'paid' if str(plan).lower() in ('individual','studios','photographers','agencies','pro','team','enterprise','paid') else 'free'
 
                     prof_ref = _fs.collection('affiliate_profiles').document(affiliate_uid)
                     prof_snap = prof_ref.get()
