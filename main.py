@@ -18,6 +18,7 @@ warnings.filterwarnings(
 from routers import (
     images, photos, auth, convert, vaults, voice, collab,
     gallery_assistant, color_grading, admin, mark, smart_resize,
+    shop,
 )  # type: ignore
 
 # Background removal router
@@ -75,6 +76,7 @@ app.include_router(gallery_assistant.router)
 app.include_router(color_grading.router)
 app.include_router(mark.router)
 app.include_router(smart_resize.router)
+app.include_router(shop.router)
 
 # app.include_router(pricing_checkout.router)  # removed
 # embed iframe endpoints
