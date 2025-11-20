@@ -39,6 +39,8 @@ SYSTEM_PROMPT = (
     "- download_vault: { vault: string, originals?: boolean }  // Provide download links for a vault.\n"
     "- download_photos: { vault?: string, names?: [string], contains?: string, limit?: number }  // Return direct download links for matching photos.\n"
     "- search_photos: { query: string, vault?: string, limit?: number }  // Find photos by semantic/substring query (filename).\n"
+    "- batch_rename: { find: string, replace: string, names?: [string], contains?: string }  // Rename photos by find/replace pattern. Optional filters: specific names or substring match.\n"
+    "- rename_by_name: { old_contains: string, new_name: string }  // Rename photos matching old_contains to new_name.\n"
     "- get_info: {}  // Summarize user library: counts, vaults.\n"
     "- list_vaults: {}  // List vaults and counts.\n"
     "- open_vault: { vault: string }  // Hint UI to open a vault.\n"
@@ -413,6 +415,94 @@ async def chat(request: Request, body: Dict[str, Any]):
                     ui = executed.get("ui") or {}
                     ui["set_tab"] = t
                     executed["ui"] = ui
+                elif op == "batch_rename":
+                    find = str(args.get("find") or "").strip()
+                    replace = str(args.get("replace") or "").strip()
+                    names = args.get("names") if isinstance(args.get("names"), list) else None
+                    contains = str(args.get("contains") or "").strip()
+                    if not find:
+                        continue
+                    if photos_cache is None:
+                        photos_cache = await _list_photos(eff_uid)
+                    pool = photos_cache
+                    # Filter pool if specific criteria provided
+                    if names:
+                        want = set([str(n).lower() for n in names])
+                        sel = [it for it in pool if (it.get("name") or "").lower() in want]
+                    elif contains:
+                        needle = contains.lower()
+                        sel = [it for it in pool if needle in (it.get("name") or "").lower()]
+                    else:
+                        sel = pool
+                    # Perform rename via copy/delete for each item
+                    renamed_count = 0
+                    try:
+                        for it in sel:
+                            old_key = it.get("key")
+                            old_name = it.get("name") or ""
+                            if not old_key or find not in old_name:
+                                continue
+                            new_name = old_name.replace(find, replace)
+                            if new_name == old_name or not new_name:
+                                continue
+                            # Build new key path
+                            old_parts = old_key.rsplit("/", 1)
+                            new_key = f"{old_parts[0]}/{new_name}" if len(old_parts) > 1 else new_name
+                            # Copy and delete (S3 rename pattern)
+                            try:
+                                if s3 and R2_BUCKET:
+                                    s3.Object(R2_BUCKET, new_key).copy_from(CopySource={"Bucket": R2_BUCKET, "Key": old_key})
+                                    s3.Object(R2_BUCKET, old_key).delete()
+                                else:
+                                    import shutil
+                                    old_path = os.path.join(static_dir, old_key)
+                                    new_path = os.path.join(static_dir, new_key)
+                                    if os.path.exists(old_path):
+                                        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                                        shutil.move(old_path, new_path)
+                                renamed_count += 1
+                            except Exception as ex:
+                                logger.warning(f"Rename failed for {old_key}: {ex}")
+                                continue
+                        executed["renamed"] = {"count": renamed_count, "find": find, "replace": replace}
+                    except Exception as ex:
+                        executed["errors"] = list(set(list(executed.get("errors", [])) + [str(ex)]))
+                elif op == "rename_by_name":
+                    old_contains = str(args.get("old_contains") or "").strip()
+                    new_name = str(args.get("new_name") or "").strip()
+                    if not old_contains or not new_name:
+                        continue
+                    if photos_cache is None:
+                        photos_cache = await _list_photos(eff_uid)
+                    needle = old_contains.lower()
+                    sel = [it for it in photos_cache if needle in (it.get("name") or "").lower()]
+                    renamed_count = 0
+                    try:
+                        for it in sel:
+                            old_key = it.get("key")
+                            if not old_key:
+                                continue
+                            # Build new key path
+                            old_parts = old_key.rsplit("/", 1)
+                            new_key = f"{old_parts[0]}/{new_name}" if len(old_parts) > 1 else new_name
+                            try:
+                                if s3 and R2_BUCKET:
+                                    s3.Object(R2_BUCKET, new_key).copy_from(CopySource={"Bucket": R2_BUCKET, "Key": old_key})
+                                    s3.Object(R2_BUCKET, old_key).delete()
+                                else:
+                                    import shutil
+                                    old_path = os.path.join(static_dir, old_key)
+                                    new_path = os.path.join(static_dir, new_key)
+                                    if os.path.exists(old_path):
+                                        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                                        shutil.move(old_path, new_path)
+                                renamed_count += 1
+                            except Exception as ex:
+                                logger.warning(f"Rename failed for {old_key}: {ex}")
+                                continue
+                        executed["renamed"] = {"count": renamed_count, "old_contains": old_contains, "new_name": new_name}
+                    except Exception as ex:
+                        executed["errors"] = list(set(list(executed.get("errors", [])) + [str(ex)]))
         # Heuristic fallback if model didn't output a command
         if not executed["deleted"]:
             utext = (raw_msgs[0] or {}).get("content") if isinstance(raw_msgs[0], dict) else ""
