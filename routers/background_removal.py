@@ -358,8 +358,15 @@ async def step3_refine_clicks_mask(
         
         # Predict mask using existing mask as guidance
         # Convert existing mask to mask input for SAM
+        # SAM expects mask_input to be 256x256 (low-resolution logits)
+        from PIL import Image as PILImage
         mask_input = existing_mask_np.astype(np.float32) / 255.0
-        mask_input = mask_input[None, :, :]  # Add batch dimension
+        
+        # Resize to 256x256 as expected by SAM
+        mask_input_pil = PILImage.fromarray((mask_input * 255).astype(np.uint8))
+        mask_input_pil = mask_input_pil.resize((256, 256), PILImage.LANCZOS)
+        mask_input = np.array(mask_input_pil).astype(np.float32) / 255.0
+        mask_input = mask_input[None, :, :]  # Add batch dimension (1, 256, 256)
         
         # Predict refined mask
         masks, scores, logits = predictor.predict(
