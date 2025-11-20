@@ -31,8 +31,10 @@ SYSTEM_PROMPT = (
     "- delete_all: {}  // Delete all photos in the user's gallery.\\n"
     "- delete_by_name: { contains: string }  // Case-insensitive substring match on filename (no path).\\n"
     "- delete_by_vault: { vault: string }  // Delete all photos inside a given vault/folder.\\n"
+    "- delete_uploads: {}  // Delete all photos in the 'My uploads' tab (original uploaded photos). Use this when user says 'uploads', 'my uploads', or 'external'.\\n"
     "Guidance: Map natural language to the closest supported op. For example, 'delete all photos' => delete_all; "
-    "'remove everything in wedding vault' => delete_by_vault with vault='wedding'; 'delete pictures named dog' => delete_by_name with contains='dog'. "
+    "'remove everything in wedding vault' => delete_by_vault with vault='wedding'; 'delete pictures named dog' => delete_by_name with contains='dog'; "
+    "'delete all photos in uploads' or 'delete my uploads' => delete_uploads. "
     "- create_vault: { name: string, protect?: boolean, password?: string }  // Create a vault; optional password to protect.\n"
     "- add_to_vault: { vault: string, names?: [string], contains?: string }  // Add photos to a vault by names or substring match.\n"
     "- remove_vault: { vault: string }  // Remove a vault definition (does not delete physical files).\n"
@@ -113,6 +115,52 @@ async def _list_photos(uid: str, vault: str | None = None) -> List[Dict[str, Any
                 })
         except Exception as ex:
             logger.exception(f"list photos failed: {ex}")
+    else:
+        dir_path = os.path.join(static_dir, prefix)
+        if os.path.isdir(dir_path):
+            for root, _, files in os.walk(dir_path):
+                for f in files:
+                    if f == "_history.txt":
+                        continue
+                    local_path = os.path.join(root, f)
+                    rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
+                    items.append({
+                        "key": rel,
+                        "url": f"/static/{rel}",
+                        "name": f,
+                        "size": os.path.getsize(local_path) if os.path.exists(local_path) else 0,
+                    })
+    return items
+
+async def _list_external_photos(uid: str) -> List[Dict[str, Any]]:
+    """List photos in the 'My uploads' tab - original uploaded photos before watermarking."""
+    items: List[Dict[str, Any]] = []
+    prefix = f"users/{uid}/external/"
+    if s3 and R2_BUCKET:
+        try:
+            bucket = s3.Bucket(R2_BUCKET)
+            for obj in bucket.objects.filter(Prefix=prefix):
+                key = obj.key
+                if key.endswith("/_history.txt") or key.endswith("/"):
+                    continue
+                if R2_PUBLIC_BASE_URL:
+                    url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+                elif R2_CUSTOM_DOMAIN and s3_presign_client:
+                    url = s3_presign_client.generate_presigned_url(
+                        "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
+                    )
+                else:
+                    url = s3.meta.client.generate_presigned_url(
+                        "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
+                    )
+                items.append({
+                    "key": key,
+                    "url": url,
+                    "name": os.path.basename(key),
+                    "size": getattr(obj, "size", 0),
+                })
+        except Exception as ex:
+            logger.exception(f"list external photos failed: {ex}")
     else:
         dir_path = os.path.join(static_dir, prefix)
         if os.path.isdir(dir_path):
@@ -254,6 +302,14 @@ async def chat(request: Request, body: Dict[str, Any]):
                         continue
                     photos_cache = await _list_photos(eff_uid, vault=vault)
                     keys = [it["key"] for it in photos_cache]
+                    if keys:
+                        res = await _delete_keys(eff_uid, keys)
+                        executed["deleted"] = list(set(list(executed.get("deleted", [])) + res.get("deleted", [])))
+                        executed["errors"] = list(set(list(executed.get("errors", [])) + res.get("errors", [])))
+                elif op == "delete_uploads":
+                    # Delete all photos in 'My uploads' tab (external/original uploads)
+                    uploads_list = await _list_external_photos(eff_uid)
+                    keys = [it["key"] for it in uploads_list]
                     if keys:
                         res = await _delete_keys(eff_uid, keys)
                         executed["deleted"] = list(set(list(executed.get("deleted", [])) + res.get("deleted", [])))
