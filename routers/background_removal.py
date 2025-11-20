@@ -25,13 +25,13 @@ try:
 except ImportError:
     from utils.storage import read_json_key
 
-# transparent-background import (cleaner alternative to rembg, PyTorch-only, no TensorFlow)
+# rembg import for background removal
 try:
-    from transparent_background import Remover
+    from rembg import remove, new_session
     BG_REMOVER_AVAILABLE = True
 except ImportError:
     BG_REMOVER_AVAILABLE = False
-    logger.warning("transparent-background not available")
+    logger.warning("rembg not available")
 
 # Global state
 _sam_predictor = None
@@ -76,20 +76,16 @@ def _get_mobile_sam_predictor():
     return _sam_predictor
 
 def _get_bg_remover():
-    """Get or create background remover instance"""
+    """Get or create rembg session"""
     global _rembg_session
     if _rembg_session is None:
         try:
-            # Initialize remover with fast mode for better performance
-            # Auto-detect device (cuda if available, else cpu)
-            import torch
-            device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-            
-            # Let library handle model download automatically (ckpt=None uses default path)
-            _rembg_session = Remover(mode='fast', jit=True, device=device)
-            logger.info(f"Background remover loaded successfully on {device}")
+            # Initialize rembg session with u2net model (default)
+            # Use 'u2net' for better quality or 'u2netp' for faster processing
+            _rembg_session = new_session('u2net')
+            logger.info(f"Rembg session loaded successfully with u2net model")
         except Exception as e:
-            logger.error(f"Failed to load background remover: {e}")
+            logger.error(f"Failed to load rembg session: {e}")
             _rembg_session = None
     return _rembg_session
 
@@ -142,12 +138,12 @@ async def step1_rembg_cutout(
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         
         # Apply background removal
-        remover = _get_bg_remover()
-        if remover is None:
+        session = _get_bg_remover()
+        if session is None:
             raise HTTPException(status_code=503, detail="Background removal model not available")
         
-        # Process image (returns RGBA with transparent background)
-        output = remover.process(img, type='rgba')
+        # Process image with rembg (returns RGBA with transparent background)
+        output = remove(img, session=session)
         
         # Extract mask from alpha channel
         if output.mode == "RGBA":
