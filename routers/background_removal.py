@@ -315,6 +315,96 @@ async def step3_refine_brush_mask(
         logger.error(f"Brush refinement failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/step3-refine-clicks")
+async def step3_refine_clicks_mask(
+    request: Request,
+    image_base64: str = Form(...),
+    mask_base64: str = Form(...),
+    click_points: str = Form(...)  # JSON array of {x, y, type: "positive"|"negative"}
+):
+    """
+    Step 3 Alternative: Refine existing mask using SAM with click points
+    This allows users to refine the final result by clicking on areas to add/remove
+    """
+    try:
+        # Parse click points
+        points = json.loads(click_points)
+        if not points:
+            raise HTTPException(status_code=400, detail="No click points provided")
+        
+        # Convert base64 to images
+        img = _base64_to_image(image_base64).convert("RGB")
+        img_np = np.array(img)
+        existing_mask = _base64_to_image(mask_base64).convert("L")
+        existing_mask_np = np.array(existing_mask)
+        
+        # Get Mobile-SAM predictor
+        predictor = _get_mobile_sam_predictor()
+        if predictor is None:
+            raise HTTPException(status_code=503, detail="Mobile-SAM model not available")
+        
+        # Set image for predictor
+        predictor.set_image(img_np)
+        
+        # Prepare points and labels
+        point_coords = []
+        point_labels = []
+        for pt in points:
+            point_coords.append([pt['x'], pt['y']])
+            point_labels.append(1 if pt['type'] == 'positive' else 0)
+        
+        point_coords = np.array(point_coords)
+        point_labels = np.array(point_labels)
+        
+        # Predict mask using existing mask as guidance
+        # Convert existing mask to mask input for SAM
+        mask_input = existing_mask_np.astype(np.float32) / 255.0
+        mask_input = mask_input[None, :, :]  # Add batch dimension
+        
+        # Predict refined mask
+        masks, scores, logits = predictor.predict(
+            point_coords=point_coords,
+            point_labels=point_labels,
+            mask_input=mask_input,
+            multimask_output=False  # Use single mask output for refinement
+        )
+        
+        # Get the refined mask
+        refined_mask = masks[0]
+        
+        # Combine with existing mask (union for positive, subtract for negative)
+        final_mask_np = existing_mask_np.copy()
+        
+        # Apply positive clicks (add to mask)
+        if any(label == 1 for label in point_labels):
+            final_mask_np = np.maximum(final_mask_np, (refined_mask * 255).astype(np.uint8))
+        
+        # Apply negative clicks (remove from mask)
+        if any(label == 0 for label in point_labels):
+            final_mask_np = np.where(refined_mask, 0, final_mask_np)
+        
+        # Convert refined mask to PIL Image
+        final_mask_img = Image.fromarray(final_mask_np.astype(np.uint8), mode="L")
+        
+        # Generate preview with transparent background
+        cutout = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        img_rgba = img.convert("RGBA")
+        cutout.paste(img_rgba, (0, 0), final_mask_img)
+        
+        # Convert to base64
+        mask_b64 = _image_to_base64(final_mask_img, "PNG")
+        preview_b64 = _image_to_base64(cutout, "PNG")
+        
+        return {
+            "success": True,
+            "mask": mask_b64,
+            "preview": preview_b64
+        }
+    
+    except Exception as e:
+        logger.error(f"Click-based refinement failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/step4-generate-cutout")
 async def step4_generate_final_cutout(
     request: Request,
