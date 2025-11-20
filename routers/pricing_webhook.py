@@ -930,6 +930,76 @@ async def pricing_webhook(request: Request):
         except Exception as pm_ex:
             logger.debug(f"[pricing.webhook] could not store payment method: {pm_ex}")
         
+        # Send thank you email after successful plan change
+        try:
+            # Get user email
+            user_email = email or _get_user_email(uid)
+            if user_email:
+                # Get user name
+                user_doc = db.collection("users").document(uid).get()
+                user_data = user_doc.to_dict() if user_doc.exists else {}
+                user_name = (user_data.get('name') or user_data.get('displayName') or 'there')
+                
+                # Determine plan display name
+                plan_display = {
+                    'individual': 'Individual',
+                    'studios': 'Studios',
+                    'pro': 'Pro'
+                }.get(plan.lower(), plan.capitalize())
+                
+                # Determine if upgrade (assuming any paid plan is an upgrade for now)
+                is_upgrade = True  # Could be enhanced to check previous plan
+                
+                # Get features based on plan
+                features = []
+                if plan.lower() == 'individual':
+                    features = [
+                        'All premium tools unlocked',
+                        'Cloud gallery (up to 100k photos)',
+                        'Priority support',
+                        'All future updates included',
+                        'Batch upload & processing'
+                    ]
+                elif plan.lower() == 'studios':
+                    features = [
+                        'All premium tools unlocked',
+                        'Cloud gallery (unlimited)',
+                        'Collaboration & team features',
+                        'Priority support',
+                        'All future updates included',
+                        'Batch upload & processing'
+                    ]
+                
+                # Format payment amount
+                amount_display = f"${amount_cents / 100:.2f}" if amount_cents > 0 else "your subscription"
+                
+                # Render and send email
+                html_body = render_email(
+                    "plan_change.html",
+                    title=f"Welcome to {plan_display}!" if is_upgrade else f"Plan Updated to {plan_display}",
+                    greeting=f"Hi {user_name},",
+                    plan_name=plan_display,
+                    is_upgrade=is_upgrade,
+                    features=features,
+                    payment_details=f"Your payment of {amount_display} has been processed successfully. A receipt has been sent to {user_email}.",
+                    button_url=f"{os.getenv('FRONTEND_ORIGIN', 'https://photomark.cloud')}/#gallery",
+                    button_label="Start Creating"
+                )
+                
+                send_email_smtp(
+                    to_addr=user_email,
+                    subject=f"🎉 Welcome to {plan_display}!" if is_upgrade else f"Your plan has been updated to {plan_display}",
+                    html=html_body,
+                    from_addr="billing@photomark.cloud",
+                    from_name="Photomark Billing",
+                    reply_to="support@photomark.cloud"
+                )
+                
+                logger.info(f"[pricing.webhook] sent thank you email to {user_email} for plan={plan}")
+        except Exception as email_ex:
+            # Don't fail webhook if email fails
+            logger.warning(f"[pricing.webhook] failed to send thank you email: {email_ex}")
+        
     except Exception as ex:
         logger.warning(f"[pricing.webhook] failed to persist plan for {uid}: {ex}")
         return {"ok": True, "skipped": True, "reason": "firestore_write_failed", "error": str(ex)}
