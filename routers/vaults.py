@@ -1944,25 +1944,26 @@ async def vaults_shared_approve(payload: ApprovalPayload):
         logger.warning(f"update approvals failed: {ex}")
         return JSONResponse({"error": "failed to save"}, status_code=500)
 
-    # Notify owner via email (best-effort)
+    # Notify owner via email only for approvals (not denials)
     try:
-        owner_email = (get_user_email_from_uid(uid) or "").strip()
-        if owner_email:
-            name = os.path.basename(photo_key)
-            client_display = client_name if client_name else client_email
-            subject = f"{client_display} {('approved' if action.startswith('approv') else 'denied')} a photo in '{vault}'"
-            intro = f"Client <strong>{client_display}</strong> <strong>{'approved' if action.startswith('approv') else 'denied'}</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
-            if comment:
-                intro += f"<br>Comment: {comment}"
-            html = render_email(
-                "email_basic.html",
-                title="Client feedback received",
-                intro=intro,
-                button_label="Open Gallery",
-                button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
-            )
-            text = f"{client_email} {('approved' if action.startswith('approv') else 'denied')} the photo {name} in vault '{vault}'."
-            send_email_smtp(owner_email, subject, html, text)
+        if action.startswith('approv'):
+            owner_email = (get_user_email_from_uid(uid) or "").strip()
+            if owner_email:
+                name = os.path.basename(photo_key)
+                client_display = client_name if client_name else client_email
+                subject = f"{client_display} approved a photo in '{vault}'"
+                intro = f"Client <strong>{client_display}</strong> <strong>approved</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
+                if comment:
+                    intro += f"<br>Comment: {comment}"
+                html = render_email(
+                    "email_basic.html",
+                    title="Photo approved by client",
+                    intro=intro,
+                    button_label="Open Gallery",
+                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
+                )
+                text = f"{client_email} approved the photo {name} in vault '{vault}'."
+                send_email_smtp(owner_email, subject, html, text)
     except Exception:
         pass
 
