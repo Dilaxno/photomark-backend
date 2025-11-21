@@ -117,6 +117,10 @@ app.include_router(retouch.router)
 from routers import retouch_upload  # noqa: E402
 app.include_router(retouch_upload.router)
 
+# shared upload endpoint (for marked photos)
+from routers import shared_upload  # noqa: E402
+app.include_router(shared_upload.router)
+
 # background removal endpoints
 if background_removal is not None:
     app.include_router(background_removal.router)

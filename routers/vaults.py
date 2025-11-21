@@ -2028,6 +2028,23 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
                         ann = None
         except Exception:
             ann = None
+        
+        # Parse markups from payload
+        markups = None
+        try:
+            if getattr(payload, "markups", None):
+                markups = payload.markups
+        except Exception:
+            pass
+        
+        # Parse marked_photo_url from payload
+        marked_photo_url = None
+        try:
+            if getattr(payload, "marked_photo_url", None):
+                marked_photo_url = str(payload.marked_photo_url).strip()
+        except Exception:
+            pass
+        
         item = {
             "id": rid,
             "uid": uid,
@@ -2043,6 +2060,10 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
         }
         if ann is not None:
             item["annotations"] = ann
+        if markups is not None:
+            item["markups"] = markups
+        if marked_photo_url:
+            item["marked_photo_url"] = marked_photo_url
         q.append(item)
         # Keep most recent first (optional)
         try:
