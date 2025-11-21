@@ -1180,23 +1180,12 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     password_info_text = ""
     
     if is_protected:
-        # For protected vaults, we need to send the password
-        # Note: The password was already used to create the vault, we can't retrieve it
-        # So we'll add a note that they need to contact photographer
-        # Actually, let's check if password is in the payload
         vault_password = str((payload or {}).get('vault_password') or '').strip()
         if vault_password:
             password_info = (
-                f"<br><br><div style='background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 16px; margin: 16px 0;'>"
-                f"<strong>🔒 Password Protected Vault</strong><br><br>"
-                f"This vault is password protected. Use the following password to access your photos:<br><br>"
-                f"<div style='background-color: #ffffff; border: 2px solid #ffc107; border-radius: 6px; padding: 12px; margin: 8px 0; font-family: monospace; font-size: 18px; font-weight: bold; text-align: center;'>"
-                f"{vault_password}"
-                f"</div>"
-                f"<small>Please keep this password secure.</small>"
-                f"</div>"
+                f"<br>Vault Password: <strong>{vault_password}</strong>"
             )
-            password_info_text = f"\n\n🔒 PASSWORD PROTECTED VAULT\nThis vault requires a password to access. Your password is: {vault_password}\nPlease keep this password secure.\n"
+            password_info_text = f"\nVault Password: {vault_password}"
 
     body_html = (
         f"{client_greeting}<br><br>"
