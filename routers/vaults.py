@@ -861,6 +861,63 @@ async def vaults_lock(request: Request, vault: str = Body(..., embed=True)):
     return {"ok": True}
 
 
+class VaultProtectionPayload(BaseModel):
+    vault: str
+    protect: bool
+    password: Optional[str] = None
+
+
+@router.post("/vaults/update-protection")
+async def vaults_update_protection(request: Request, payload: VaultProtectionPayload):
+    """Update vault protection settings (add or remove password protection)"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    vault = (payload.vault or '').strip()
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    
+    try:
+        # Get the safe vault name
+        safe_vault = _vault_key(uid, vault)[1]
+        
+        # Read existing metadata
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        
+        if payload.protect:
+            # Adding protection
+            if not payload.password:
+                return JSONResponse({"error": "password required for protection"}, status_code=400)
+            
+            salt = _vault_salt(uid, safe_vault)
+            meta["protected"] = True
+            meta["hash"] = _hash_password(payload.password, salt)
+            
+            # Lock the vault after adding protection
+            _lock_vault(uid, safe_vault)
+        else:
+            # Removing protection
+            meta["protected"] = False
+            if "hash" in meta:
+                del meta["hash"]
+            
+            # Unlock the vault after removing protection
+            _lock_vault(uid, safe_vault)
+        
+        # Save updated metadata
+        _write_vault_meta(uid, safe_vault, meta)
+        
+        return {
+            "ok": True,
+            "vault": safe_vault,
+            "protected": bool(meta.get("protected"))
+        }
+    except Exception as ex:
+        logger.error(f"Failed to update vault protection: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
 @router.get("/vaults/photos")
 async def vaults_photos(request: Request, vault: str, password: Optional[str] = None):
     uid = get_uid_from_request(request)
