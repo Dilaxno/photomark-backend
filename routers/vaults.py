@@ -1840,7 +1840,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
     return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
 
 
-def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None) -> dict:
+def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
     """Update approvals file for a vault and return the full approvals map."""
     # Normalize
     action_norm = "approved" if action.lower().startswith("approv") else ("denied" if action.lower().startswith("deny") else None)
@@ -1851,11 +1851,14 @@ def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, a
     by_photo = data.get("by_photo") or {}
     photo = by_photo.get(photo_key) or {}
     by_email = photo.get("by_email") or {}
-    by_email[client_email] = {
+    approval_data = {
         "status": action_norm,
         "comment": (comment or ""),
         "at": datetime.utcnow().isoformat(),
     }
+    if client_name:
+        approval_data["client_name"] = client_name
+    by_email[client_email] = approval_data
     photo["by_email"] = by_email
     by_photo[photo_key] = photo
     data["by_photo"] = by_photo
@@ -1892,6 +1895,7 @@ async def vaults_shared_approve(payload: ApprovalPayload):
     uid = rec.get('uid') or ''
     vault = rec.get('vault') or ''
     client_email = (rec.get('email') or '').lower()
+    client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
 
@@ -1904,7 +1908,7 @@ async def vaults_shared_approve(payload: ApprovalPayload):
         return JSONResponse({"error": "photo not in vault"}, status_code=400)
 
     try:
-        data = _update_approvals(uid, vault, photo_key, client_email, action, comment)
+        data = _update_approvals(uid, vault, photo_key, client_email, action, comment, client_name)
     except ValueError as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
     except Exception as ex:
@@ -1916,8 +1920,9 @@ async def vaults_shared_approve(payload: ApprovalPayload):
         owner_email = (get_user_email_from_uid(uid) or "").strip()
         if owner_email:
             name = os.path.basename(photo_key)
-            subject = f"{client_email} {('approved' if action.startswith('approv') else 'denied')} a photo in '{vault}'"
-            intro = f"Client <strong>{client_email}</strong> <strong>{'approved' if action.startswith('approv') else 'denied'}</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
+            client_display = client_name if client_name else client_email
+            subject = f"{client_display} {('approved' if action.startswith('approv') else 'denied')} a photo in '{vault}'"
+            intro = f"Client <strong>{client_display}</strong> <strong>{'approved' if action.startswith('approv') else 'denied'}</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
             if comment:
                 intro += f"<br>Comment: {comment}"
             html = render_email(
@@ -1961,6 +1966,7 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
     uid = rec.get('uid') or ''
     vault = rec.get('vault') or ''
     client_email = (rec.get('email') or '').lower()
+    client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
 
@@ -1999,6 +2005,7 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
             "token": token,
             "key": photo_key,
             "client_email": client_email,
+            "client_name": client_name,
             "comment": comment,
             "status": "open",  # open | in_progress | done
             "requested_at": datetime.utcnow().isoformat(),
@@ -2069,6 +2076,7 @@ async def vaults_shared_favorite(payload: FavoritePayload):
     uid = rec.get('uid') or ''
     vault = rec.get('vault') or ''
     client_email = (rec.get('email') or '').lower()
+    client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
 
@@ -2080,12 +2088,15 @@ async def vaults_shared_favorite(payload: FavoritePayload):
     if photo_key not in keys:
         return JSONResponse({"error": "photo not in vault"}, status_code=400)
 
-    # Update favorites structure: { by_photo: { key: { by_email: { email: { favorite: true, at } } } } }
+    # Update favorites structure: { by_photo: { key: { by_email: { email: { favorite: true, at, client_name } } } } }
     data = _read_json_key(_favorites_key(uid, vault)) or {}
     by_photo = data.get("by_photo") or {}
     photo = by_photo.get(photo_key) or {}
     by_email = photo.get("by_email") or {}
-    by_email[client_email] = {"favorite": favorite, "at": datetime.utcnow().isoformat()}
+    fav_data = {"favorite": favorite, "at": datetime.utcnow().isoformat()}
+    if client_name:
+        fav_data["client_name"] = client_name
+    by_email[client_email] = fav_data
     photo["by_email"] = by_email
     by_photo[photo_key] = photo
     data["by_photo"] = by_photo
@@ -2118,8 +2129,9 @@ async def vaults_shared_favorite(payload: FavoritePayload):
         owner_email = (get_user_email_from_uid(uid) or "").strip()
         if owner_email and favorite:
             name = os.path.basename(photo_key)
-            subject = f"{client_email} favorited a photo in '{vault}'"
-            intro = f"Client <strong>{client_email}</strong> <strong>favorited</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
+            client_display = client_name if client_name else client_email
+            subject = f"{client_display} favorited a photo in '{vault}'"
+            intro = f"Client <strong>{client_display}</strong> <strong>favorited</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
             html = render_email(
                 "email_basic.html",
                 title="Client favorited a photo",
