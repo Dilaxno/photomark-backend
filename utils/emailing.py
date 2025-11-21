@@ -22,7 +22,7 @@ EMAIL_BRAND_BUTTON_TEXT = os.getenv("EMAIL_BRAND_BUTTON_TEXT", "#000000")
 EMAIL_BRAND_BG = os.getenv("EMAIL_BRAND_BG", "#0F1115")
 APP_NAME = os.getenv("APP_NAME", "Photomark")
 _front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "").rstrip("/")
-EMAIL_LOGO_URL = os.getenv("EMAIL_LOGO_URL", (_front + "/marklogo.svg") if _front else "")
+EMAIL_LOGO_URL = os.getenv("EMAIL_LOGO_URL", (_front + "/marklogo.png") if _front else "")
 
 
 def render_email(template_name: str, **context) -> str:
