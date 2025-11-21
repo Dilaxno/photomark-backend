@@ -113,6 +113,10 @@ app.include_router(account.router)
 from routers import retouch  # noqa: E402
 app.include_router(retouch.router)
 
+# retouch result upload endpoint
+from routers import retouch_upload  # noqa: E402
+app.include_router(retouch_upload.router)
+
 # background removal endpoints
 if background_removal is not None:
     app.include_router(background_removal.router)

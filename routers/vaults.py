@@ -2315,6 +2315,9 @@ async def retouch_update(request: Request, payload: dict = Body(...)):
         for it in items:
             if it.get("id") == rid:
                 if status:
+                    # Prevent marking as done without result image
+                    if status == "done" and not it.get("result_photo_url"):
+                        return JSONResponse({"error": "Cannot mark as done without uploading final result image"}, status_code=400)
                     it["status"] = status
                 if note:
                     it["note"] = note
