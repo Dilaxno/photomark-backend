@@ -66,6 +66,8 @@ class RetouchRequestPayload(BaseModel):
     key: str
     comment: Optional[str] | None = None
     annotations: Optional[dict] | None = None
+    markups: Optional[list] | None = None
+    marked_photo_url: Optional[str] | None = None
 
 # Local static dir used when s3 is not configured
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
@@ -1977,6 +1979,7 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
     token = (payload.token or "").strip()
     photo_key = (payload.key or "").strip()
     comment = (payload.comment or "").strip()
+    logger.info(f"Retouch request received - marked_photo_url: {payload.marked_photo_url}, markups: {bool(payload.markups)}")
     if not token or not photo_key:
         return JSONResponse({"error": "token and key required"}, status_code=400)
 
@@ -2029,21 +2032,11 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
         except Exception:
             ann = None
         
-        # Parse markups from payload
-        markups = None
-        try:
-            if getattr(payload, "markups", None):
-                markups = payload.markups
-        except Exception:
-            pass
+        # Parse markups from payload (now in Pydantic model)
+        markups = payload.markups if payload.markups else None
         
-        # Parse marked_photo_url from payload
-        marked_photo_url = None
-        try:
-            if getattr(payload, "marked_photo_url", None):
-                marked_photo_url = str(payload.marked_photo_url).strip()
-        except Exception:
-            pass
+        # Parse marked_photo_url from payload (now in Pydantic model)
+        marked_photo_url = str(payload.marked_photo_url).strip() if payload.marked_photo_url else None
         
         item = {
             "id": rid,
