@@ -5,6 +5,7 @@ Prevents spam and gibberish submissions
 import re
 import dns.resolver
 from typing import Tuple
+from .temp_email_domains import is_temp_email_domain
 
 
 def is_gibberish(text: str) -> bool:
@@ -106,6 +107,10 @@ def validate_email_mx(email: str) -> Tuple[bool, str]:
         return False, "Invalid email format"
     
     domain = trimmed.split('@')[-1]
+    
+    # Check if domain is a temporary/disposable email service
+    if is_temp_email_domain(domain):
+        return False, "Temporary or disposable email addresses are not allowed. Please use a permanent email address."
     
     try:
         # Query MX records for the domain
