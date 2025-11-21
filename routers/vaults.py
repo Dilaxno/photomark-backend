@@ -564,10 +564,7 @@ async def vaults_add(request: Request, vault: str = Body(..., embed=True), keys:
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    meta = _read_vault_meta(uid, vault)
-    if meta.get('protected') and not _is_vault_unlocked(uid, vault):
-        if not _unlock_vault(uid, vault, password or ''):
-            return JSONResponse({"error": "Vault locked"}, status_code=403)
+    # Owner always has access to their own vaults, no password needed
     try:
         exist = _read_vault(uid, vault)
         filtered = [k for k in keys if k.startswith(f"users/{uid}/")]
@@ -601,11 +598,7 @@ async def vaults_upload(
         except Exception as ex:
             return JSONResponse({"error": f"Failed to create vault: {str(ex)}"}, status_code=400)
     
-    # Check if vault is protected and unlock if needed
-    meta = _read_vault_meta(uid, vault)
-    if meta.get('protected') and not _is_vault_unlocked(uid, vault):
-        if not _unlock_vault(uid, vault, password or ''):
-            return JSONResponse({"error": "Vault locked or invalid password"}, status_code=403)
+    # Owner always has access to their own vaults, no password needed
     
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
@@ -679,10 +672,7 @@ async def vaults_remove(request: Request, vault: str = Body(..., embed=True), ke
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    meta = _read_vault_meta(uid, vault)
-    if meta.get('protected') and not _is_vault_unlocked(uid, vault):
-        if not _unlock_vault(uid, vault, password or ''):
-            return JSONResponse({"error": "Vault locked"}, status_code=403)
+    # Owner always has access to their own vaults, no password needed
     try:
         exist = _read_vault(uid, vault)
         to_remove = set(keys)
@@ -923,13 +913,8 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    meta = _read_vault_meta(uid, vault)
-    # If protected and not already unlocked, allow one-shot password check
-    if meta.get('protected') and not _is_vault_unlocked(uid, vault):
-        if not _unlock_vault(uid, vault, password or ''):
-            return JSONResponse({"error": "Vault locked"}, status_code=403)
-        # Do not persist unlock beyond this request; immediately lock again
-        _lock_vault(uid, vault)
+    # Owner always has access to their own vaults, no password needed
+    # Password protection only applies to shared access via tokens
     try:
         keys = _read_vault(uid, vault)
         # Hide collaborator-sent items from 'Photos sent by friends' vault
@@ -1632,6 +1617,15 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
     email = (rec.get('email') or '').lower()
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
+
+    # Check if vault is protected - clients need password to access
+    meta = _read_vault_meta(uid, vault)
+    if meta.get('protected'):
+        # Verify password using the vault's hash
+        salt = _vault_salt(uid, vault)
+        provided_hash = _hash_password(password or '', salt)
+        if provided_hash != meta.get('hash'):
+            return JSONResponse({"error": "Vault is protected. Invalid or missing password."}, status_code=403)
 
     try:
         keys = _read_vault(uid, vault)
@@ -2693,6 +2687,15 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
     vault = rec.get('vault') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
+
+    # Check if vault is protected - clients need password to access
+    meta = _read_vault_meta(uid, vault)
+    if meta.get('protected'):
+        # Verify password using the vault's hash
+        salt = _vault_salt(uid, vault)
+        provided_hash = _hash_password(password or '', salt)
+        if provided_hash != meta.get('hash'):
+            return JSONResponse({"error": "Vault is protected. Invalid or missing password."}, status_code=403)
 
     # Collect vault keys and map to original keys
     try:
