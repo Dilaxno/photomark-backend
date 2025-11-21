@@ -2132,6 +2132,30 @@ async def vaults_approvals(request: Request, vault: str):
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+@router.get("/vaults/favorites")
+async def vaults_favorites(request: Request, vault: str):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        data = _read_json_key(_favorites_key(uid, safe_vault)) or {}
+        # Transform structure: { by_photo: { key: { by_email: { email: {...} } } } }
+        # into: { favorites: { email: [keys] } }
+        by_photo = data.get("by_photo") or {}
+        result = {}
+        for photo_key, photo_data in by_photo.items():
+            by_email = (photo_data or {}).get("by_email") or {}
+            for email, email_data in by_email.items():
+                if isinstance(email_data, dict) and email_data.get("favorite"):
+                    if email not in result:
+                        result[email] = []
+                    result[email].append(photo_key)
+        return {"vault": safe_vault, "favorites": result}
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
 @router.get("/vaults/retouch/queue")
 async def retouch_queue(request: Request, email: Optional[str] = None, vault: Optional[str] = None, status: Optional[str] = None):
     uid = get_uid_from_request(request)
