@@ -431,23 +431,52 @@ async def vaults_list(request: Request):
 
 
 @router.post("/vaults/delete")
-async def vaults_delete(request: Request, vaults: List[str] = Body(..., embed=True)):
+async def vaults_delete(request: Request, payload: dict = Body(...)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    vaults = payload.get("vaults", [])
+    password = str(payload.get("password", "") or "").strip()
+    
     if not vaults or not isinstance(vaults, list):
         return JSONResponse({"error": "No vaults provided"}, status_code=400)
+    
     deleted: list[str] = []
     errors: list[str] = []
+    
     for v in vaults:
         name = str(v or '').strip()
         if not name:
             continue
+        
+        # Check if vault is protected and validate password
+        try:
+            meta = _read_vault_meta(uid, name)
+            if meta.get("protected"):
+                # Verify password for protected vaults
+                if not password:
+                    errors.append(name)
+                    continue
+                
+                stored_hash = meta.get("password_hash")
+                if not stored_hash:
+                    errors.append(name)
+                    continue
+                
+                import hashlib
+                attempt_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+                if attempt_hash != stored_hash:
+                    return JSONResponse({"error": "Invalid password"}, status_code=403)
+        except Exception:
+            pass
+        
         ok = _delete_vault(uid, name)
         if ok:
             deleted.append(name)
         else:
             errors.append(name)
+    
     return {"deleted": deleted, "errors": errors}
 
 
