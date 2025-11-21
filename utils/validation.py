@@ -3,6 +3,7 @@ Validation utilities for user input (names, emails)
 Prevents spam and gibberish submissions
 """
 import re
+import dns.resolver
 from typing import Tuple
 
 
@@ -92,6 +93,36 @@ def validate_email(email: str) -> Tuple[bool, str]:
         return False, f"Invalid email: '{local_part}' appears to be gibberish"
     
     return True, ""
+
+
+def validate_email_mx(email: str) -> Tuple[bool, str]:
+    """
+    Validate email domain has valid MX records.
+    Returns (is_valid, error_message).
+    """
+    trimmed = email.strip().lower()
+    
+    if not trimmed or '@' not in trimmed:
+        return False, "Invalid email format"
+    
+    domain = trimmed.split('@')[-1]
+    
+    try:
+        # Query MX records for the domain
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        if not mx_records:
+            return False, f"No mail server found for domain '{domain}'"
+        return True, ""
+    except dns.resolver.NXDOMAIN:
+        return False, f"Domain '{domain}' does not exist"
+    except dns.resolver.NoAnswer:
+        return False, f"No mail server configured for '{domain}'"
+    except dns.resolver.Timeout:
+        # Don't fail on timeout - could be network issue
+        return True, ""
+    except Exception as e:
+        # Don't fail on other DNS errors - could be temporary
+        return True, ""
 
 
 def validate_signup_data(name: str, email: str) -> Tuple[bool, str]:

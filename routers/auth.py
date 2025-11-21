@@ -9,10 +9,37 @@ from core.config import logger
 from utils.emailing import render_email, send_email_smtp
 from utils.storage import write_json_key, read_json_key
 from utils.rate_limit import signup_throttle
-from utils.validation import validate_signup_data
+from utils.validation import validate_signup_data, validate_email, validate_email_mx
 from utils.recaptcha import verify_recaptcha
 
 router = APIRouter(prefix="/api", tags=["auth"])
+
+
+# ---- Email validation ----
+
+@router.post("/auth/validate-email")
+async def validate_email_endpoint(payload: dict = Body(...)):
+    """
+    Validate email address format and MX records in real-time.
+    Body: { "email": str }
+    Returns: { "valid": bool, "error": str | null }
+    """
+    email = (payload.get("email") or "").strip()
+    
+    if not email:
+        return {"valid": False, "error": "Email is required"}
+    
+    # First check basic email format
+    is_valid_format, format_error = validate_email(email)
+    if not is_valid_format:
+        return {"valid": False, "error": format_error}
+    
+    # Then check MX records
+    is_valid_mx, mx_error = validate_email_mx(email)
+    if not is_valid_mx:
+        return {"valid": False, "error": mx_error}
+    
+    return {"valid": True, "error": None}
 
 
 # ---- Signup rate limiting ----
