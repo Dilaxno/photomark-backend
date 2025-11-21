@@ -1173,6 +1173,31 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
 
     client_greeting = f"Hello {client_name}," if client_name else "Hello,"
 
+    # Check if vault is protected and get password info
+    vault_meta = _read_vault_meta(uid, safe_vault)
+    is_protected = vault_meta.get('protected', False)
+    password_info = ""
+    password_info_text = ""
+    
+    if is_protected:
+        # For protected vaults, we need to send the password
+        # Note: The password was already used to create the vault, we can't retrieve it
+        # So we'll add a note that they need to contact photographer
+        # Actually, let's check if password is in the payload
+        vault_password = str((payload or {}).get('vault_password') or '').strip()
+        if vault_password:
+            password_info = (
+                f"<br><br><div style='background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 16px; margin: 16px 0;'>"
+                f"<strong>🔒 Password Protected Vault</strong><br><br>"
+                f"This vault is password protected. Use the following password to access your photos:<br><br>"
+                f"<div style='background-color: #ffffff; border: 2px solid #ffc107; border-radius: 6px; padding: 12px; margin: 8px 0; font-family: monospace; font-size: 18px; font-weight: bold; text-align: center;'>"
+                f"{vault_password}"
+                f"</div>"
+                f"<small>Please keep this password secure.</small>"
+                f"</div>"
+            )
+            password_info_text = f"\n\n🔒 PASSWORD PROTECTED VAULT\nThis vault requires a password to access. Your password is: {vault_password}\nPlease keep this password secure.\n"
+
     body_html = (
         f"{client_greeting}<br><br>"
         f"{studio_name} has shared a set of photos with you to review and proof.<br><br>"
@@ -1180,6 +1205,7 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         f"Click the link below to view your photos:<br>"
         f"<a href=\"{link}\">{link}</a><br><br>"
         f"This link will expire on: <strong>{expire_pretty}</strong>."
+        f"{password_info}"
     )
 
     extra = ""
@@ -1202,6 +1228,7 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
         + "Click the link below to view your photos:\n"
         + f"{link}\n\n"
         + f"This link will expire on: {expire_pretty}."
+        + password_info_text
     )
 
     attachments = None
