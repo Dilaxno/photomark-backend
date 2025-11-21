@@ -7,7 +7,7 @@ import os
 import uuid
 from datetime import datetime
 
-router = APIRouter()
+router = APIRouter(prefix="/api/shop", tags=["shop"])
 
 # R2 Configuration
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
@@ -24,7 +24,7 @@ s3_client = boto3.client(
     region_name='auto'
 )
 
-@router.post('/api/shop/upload')
+@router.post('/upload')
 async def upload_shop_asset(
     request: Request,
     file: UploadFile = File(...),
@@ -39,15 +39,22 @@ async def upload_shop_asset(
         uid = get_uid_from_request(request)
         if not uid:
             raise HTTPException(status_code=401, detail='Unauthorized')
-        # Validate file type
-        allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
-        if file.content_type not in allowed_types:
-            raise HTTPException(status_code=400, detail='Invalid file type. Only images allowed.')
+        # Validate file type based on upload type
+        if type in ['logo', 'pfp', 'banner', 'product_image']:
+            allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+            if file.content_type not in allowed_types:
+                raise HTTPException(status_code=400, detail='Invalid file type. Only images allowed.')
+        elif type == 'product_video':
+            allowed_types = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo']
+            if file.content_type not in allowed_types:
+                raise HTTPException(status_code=400, detail='Invalid video type. Only MP4, WebM, MOV, AVI allowed.')
         
-        # Validate file size (max 10MB)
+        # Validate file size
         contents = await file.read()
-        if len(contents) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail='File too large. Maximum size is 10MB.')
+        max_size = 100 * 1024 * 1024 if type == 'product_video' else 10 * 1024 * 1024  # 100MB for video, 10MB for images
+        if len(contents) > max_size:
+            max_size_mb = max_size / (1024 * 1024)
+            raise HTTPException(status_code=400, detail=f'File too large. Maximum size is {max_size_mb}MB.')
         
         # Generate unique filename
         file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
@@ -83,7 +90,7 @@ async def upload_shop_asset(
         raise HTTPException(status_code=500, detail=f'Upload failed: {str(e)}')
 
 
-@router.delete('/api/shop/upload/{filename:path}')
+@router.delete('/upload/{filename:path}')
 async def delete_shop_asset(
     request: Request,
     filename: str
@@ -112,7 +119,7 @@ async def delete_shop_asset(
         raise HTTPException(status_code=500, detail=f'Delete failed: {str(e)}')
 
 
-@router.get('/api/shop/{shop_id}/settings')
+@router.get('/{shop_id}/settings')
 async def get_shop_settings(shop_id: str):
     """
     Get shop settings (public endpoint)
@@ -125,7 +132,7 @@ async def get_shop_settings(shop_id: str):
     })
 
 
-@router.post('/api/shop/{shop_id}/settings')
+@router.post('/{shop_id}/settings')
 async def save_shop_settings(
     request: Request,
     shop_id: str,
