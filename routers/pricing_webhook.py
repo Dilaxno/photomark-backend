@@ -655,10 +655,20 @@ async def pricing_webhook(request: Request):
         logger.warning("[pricing.webhook] missing metadata.user_uid; cannot upgrade")
         return {"ok": True, "skipped": True, "reason": "missing_metadata_user_uid"}
 
-    # --- Step 7: Resolve plan ---
+    # --- Step 7: Resolve plan and billing cycle ---
     # Prefer overlay query_params plan when present
     plan_raw = str((qp.get("plan") if isinstance(qp, dict) else "") or "").strip() or str((meta.get("plan") if isinstance(meta, dict) else "") or "").strip()
     plan = _normalize_plan(plan_raw)
+    
+    # Extract billing cycle from query_params or metadata
+    billing_cycle_raw = str((qp.get("billing") if isinstance(qp, dict) else "") or "").strip() or str((meta.get("billing") if isinstance(meta, dict) else "") or "").strip()
+    billing_cycle = None
+    if billing_cycle_raw:
+        bc = billing_cycle_raw.lower().strip()
+        if bc in ("monthly", "month", "m"):
+            billing_cycle = "monthly"
+        elif bc in ("yearly", "annual", "year", "y", "annually"):
+            billing_cycle = "yearly"
 
     # --- Step 7b: Capture and cache any available context for later payment.succeeded ---
     ctx = {"uid": uid, "plan": plan, "email": _first_email_from_payload(payload) or _first_email_from_payload(event_obj or {})}
@@ -817,18 +827,21 @@ async def pricing_webhook(request: Request):
 
     try:
         # Update user document with plan info
-        db.collection("users").document(uid).set(
-            {
-                "uid": uid,
-                "plan": plan,
-                "isPaid": True,
-                "planStatus": "paid",
-                "lastPaymentProvider": "dodo",
-                "updatedAt": fb_fs.SERVER_TIMESTAMP,
-                "paidAt": fb_fs.SERVER_TIMESTAMP,
-            },
-            merge=True,
-        )
+        update_data = {
+            "uid": uid,
+            "plan": plan,
+            "isPaid": True,
+            "planStatus": "paid",
+            "lastPaymentProvider": "dodo",
+            "updatedAt": fb_fs.SERVER_TIMESTAMP,
+            "paidAt": fb_fs.SERVER_TIMESTAMP,
+        }
+        # Include billing cycle if available
+        if billing_cycle:
+            update_data["billing_cycle"] = billing_cycle
+            update_data["billingCycle"] = billing_cycle  # Duplicate for backward compatibility
+        
+        db.collection("users").document(uid).set(update_data, merge=True)
         
         # Extract payment details from webhook payload
         amount_cents = 0
