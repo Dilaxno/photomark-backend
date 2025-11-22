@@ -1075,6 +1075,97 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+@router.post("/vaults/preview/generate")
+async def vaults_generate_preview(request: Request, vault: str = Body(..., embed=True)):
+    """Generate a public preview link for a vault"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    vault = str(vault or '').strip()
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    
+    try:
+        # Validate vault exists
+        safe_vault = _vault_key(uid, vault)[1]
+        keys = _read_vault(uid, safe_vault)
+        if not keys:
+            return JSONResponse({"error": "Vault is empty"}, status_code=400)
+        
+        # Generate preview token
+        token = secrets.token_urlsafe(24)
+        now = datetime.utcnow()
+        
+        # Preview links don't expire by default (or set a very long expiry)
+        preview_rec = {
+            "token": token,
+            "uid": uid,
+            "vault": safe_vault,
+            "type": "preview",
+            "created_at": now.isoformat(),
+        }
+        
+        # Store preview token
+        preview_key = f"previews/{token}.json"
+        _write_json_key(preview_key, preview_rec)
+        
+        # Generate preview URL
+        front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        preview_url = f"{front}/preview/{token}"
+        
+        return {
+            "token": token,
+            "url": preview_url,
+            "vault": safe_vault,
+            "photo_count": len(keys)
+        }
+    except Exception as ex:
+        logger.error(f"Failed to generate preview: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
+@router.get("/vaults/preview/{token}")
+async def vaults_get_preview(token: str):
+    """Get vault photos using preview token (public, no auth required)"""
+    try:
+        preview_key = f"previews/{token}.json"
+        preview_rec = _read_json_key(preview_key)
+        
+        if not preview_rec:
+            return JSONResponse({"error": "Invalid preview token"}, status_code=404)
+        
+        uid = preview_rec.get("uid")
+        vault = preview_rec.get("vault")
+        
+        if not uid or not vault:
+            return JSONResponse({"error": "Invalid preview data"}, status_code=400)
+        
+        # Get vault photos
+        keys = _read_vault(uid, vault)
+        items = []
+        for k in keys:
+            try:
+                item = _make_item_from_key(uid, k)
+                items.append(item)
+            except Exception:
+                pass
+        
+        # Get vault metadata
+        meta = _read_vault_meta(uid, vault)
+        display_name = meta.get("display_name") if meta else None
+        
+        return {
+            "vault": vault,
+            "display_name": display_name or vault.replace("_", " "),
+            "photos": items,
+            "photo_count": len(items)
+        }
+    except Exception as ex:
+        logger.error(f"Failed to get preview: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
 @router.post("/vaults/share")
 async def vaults_share(request: Request, payload: dict = Body(...)):
     uid = get_uid_from_request(request)
