@@ -667,100 +667,107 @@ async def get_external_photos(
     request: Request,
     limit: int = 1000
 ):
-    """Get all externally uploaded photos for the authenticated user."""
+    """Get all externally uploaded photos for uploads-preview page."""
     try:
+        # Get authenticated user
         eff_uid, req_uid = resolve_workspace_uid(request)
         if not eff_uid or not req_uid:
-            logger.warning("Unauthorized access to /photos/external")
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         
+        # Check gallery access
         if not has_role_access(req_uid, eff_uid, 'gallery'):
-            logger.warning(f"Forbidden access for user {req_uid} to {eff_uid}'s gallery")
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         
         uid = eff_uid
-        photos: list[dict] = []
+        photos = []
         prefix = f"users/{uid}/external/"
         
-        # Cloud storage (R2)
+        # R2 Cloud Storage
         if s3 and R2_BUCKET:
             try:
-                client = s3.meta.client
-                response = client.list_objects_v2(
+                paginator = s3.meta.client.get_paginator('list_objects_v2')
+                page_iterator = paginator.paginate(
                     Bucket=R2_BUCKET,
                     Prefix=prefix,
-                    MaxKeys=min(limit, 1000)
+                    PaginationConfig={'MaxItems': limit}
                 )
                 
-                for entry in response.get("Contents", []):
-                    key = entry.get("Key", "")
-                    if not key or key.endswith("/") or key.endswith("/_history.txt"):
-                        continue
-                    
-                    name = os.path.basename(key)
-                    if "-fromfriend" in name:
-                        continue
-                    
-                    url = _get_url_for_key(key, expires_in=3600)
-                    
-                    photos.append({
-                        "key": key,
-                        "url": url,
-                        "name": name,
-                        "size": int(entry.get("Size", 0)),
-                        "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
-                    })
-                    
-                logger.info(f"Listed {len(photos)} external photos for user {uid}")
-                return {"photos": photos, "count": len(photos)}
+                for page in page_iterator:
+                    for obj in page.get('Contents', []):
+                        key = obj['Key']
+                        
+                        # Skip directories and history files
+                        if key.endswith('/') or key.endswith('/_history.txt'):
+                            continue
+                        
+                        name = os.path.basename(key)
+                        
+                        # Skip friend photos
+                        if '-fromfriend' in name.lower():
+                            continue
+                        
+                        # Generate presigned URL
+                        url = _get_url_for_key(key, expires_in=3600)
+                        
+                        photos.append({
+                            'key': key,
+                            'url': url,
+                            'name': name,
+                            'size': obj.get('Size', 0),
+                            'last_modified': obj.get('LastModified', datetime.utcnow()).isoformat()
+                        })
+                
+                # Sort by last modified (newest first)
+                photos.sort(key=lambda x: x['last_modified'], reverse=True)
+                
+                return {'photos': photos[:limit], 'count': len(photos)}
                 
             except Exception as ex:
-                logger.exception(f"R2 listing failed for user {uid}: {ex}")
-                return JSONResponse({"error": f"Storage error: {str(ex)}"}, status_code=500)
+                logger.exception(f"R2 error for user {uid}: {ex}")
+                return JSONResponse({"error": "Storage error"}, status_code=500)
         
-        # Local filesystem
+        # Local Filesystem
         else:
             try:
-                from core.config import STATIC_DIR as static_dir
-                dir_path = os.path.join(static_dir, prefix)
+                from core.config import STATIC_DIR
+                base_path = os.path.join(STATIC_DIR, f"users/{uid}/external")
                 
-                if not os.path.isdir(dir_path):
-                    logger.info(f"No external directory for user {uid}")
-                    return {"photos": [], "count": 0}
+                if not os.path.exists(base_path):
+                    return {'photos': [], 'count': 0}
                 
-                files_with_time = []
-                for root, _, files in os.walk(dir_path):
-                    for f in files:
-                        if f == "_history.txt":
+                # Collect all image files
+                for root, dirs, files in os.walk(base_path):
+                    for filename in files:
+                        # Skip history files
+                        if filename == '_history.txt':
                             continue
-                        path = os.path.join(root, f)
-                        rel_path = os.path.relpath(path, static_dir).replace("\\", "/")
-                        mtime = os.path.getmtime(path)
-                        size = os.path.getsize(path)
-                        files_with_time.append((rel_path, mtime, size, f))
+                        
+                        # Skip friend photos
+                        if '-fromfriend' in filename.lower():
+                            continue
+                        
+                        full_path = os.path.join(root, filename)
+                        rel_path = os.path.relpath(full_path, STATIC_DIR).replace('\\', '/')
+                        
+                        photos.append({
+                            'key': rel_path,
+                            'url': f'/static/{rel_path}',
+                            'name': filename,
+                            'size': os.path.getsize(full_path),
+                            'last_modified': datetime.fromtimestamp(os.path.getmtime(full_path)).isoformat()
+                        })
                 
-                # Sort by modification time (newest first)
-                files_with_time.sort(key=lambda x: x[1], reverse=True)
+                # Sort by last modified (newest first)
+                photos.sort(key=lambda x: x['last_modified'], reverse=True)
                 
-                # Limit results
-                for rel_path, mtime, size, name in files_with_time[:limit]:
-                    photos.append({
-                        "key": rel_path,
-                        "url": f"/static/{rel_path}",
-                        "name": name,
-                        "size": size,
-                        "last_modified": datetime.utcfromtimestamp(mtime).isoformat(),
-                    })
-                
-                logger.info(f"Listed {len(photos)} local external photos for user {uid}")
-                return {"photos": photos, "count": len(photos)}
+                return {'photos': photos[:limit], 'count': len(photos)}
                 
             except Exception as ex:
-                logger.exception(f"Local listing failed for user {uid}: {ex}")
-                return JSONResponse({"error": f"Filesystem error: {str(ex)}"}, status_code=500)
+                logger.exception(f"Filesystem error for user {uid}: {ex}")
+                return JSONResponse({"error": "Filesystem error"}, status_code=500)
                 
     except Exception as ex:
-        logger.exception(f"Unexpected error in /photos/external: {ex}")
+        logger.exception(f"Error in /photos/external: {ex}")
         return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 @router.get("/photos/originals")
