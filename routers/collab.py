@@ -901,24 +901,47 @@ async def retouch_send_back(
 async def generate_collaborator_password(request: Request):
     """
     Generate or rotate the collaborator password for the owner (current user).
-    Stores it under Firestore collection 'collaborators-passwords/{owner_uid}'.
+    Stores it under Firestore collection 'collaborators-passwords/{password_id}' with role assignment.
     Returns the plaintext password so it can be shared with collaborators.
+    
+    Valid roles:
+    - gallery_manager: Access only Gallery page
+    - retoucher: Access only Retouch tool
+    - editor_retoucher: Access all tools
+    - vaults_manager: Access only Vaults
+    - general_admin: Full access (like owner)
     """
     uid = get_uid_from_request(request)
     if not uid:
         _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    
+    # Parse role from request body
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    role = str((body or {}).get("role", "gallery_manager")).strip().lower()
+    
+    # Validate role
+    valid_roles = ["gallery_manager", "retoucher", "editor_retoucher", "vaults_manager", "general_admin"]
+    if role not in valid_roles:
+        _friendly_err(f"Invalid role. Must be one of: {', '.join(valid_roles)}")
+    
     db = _get_fs_client()
     if db is None or fb_fs is None:
         _friendly_err("Firestore unavailable", status.HTTP_500_INTERNAL_SERVER_ERROR)
     try:
         pw = secrets.token_urlsafe(10)
-        doc_ref = db.collection('collaborators-passwords').document(uid)
+        # Use password as document ID to allow easy lookup by password
+        doc_ref = db.collection('collaborators-passwords').document(pw)
         doc_ref.set({
             "owner_uid": uid,
             "password": pw,
+            "role": role,
             "updatedAt": fb_fs.SERVER_TIMESTAMP,
             "createdAt": fb_fs.SERVER_TIMESTAMP,
-        }, merge=True)
+        }, merge=False)
         return {"ok": True, "password": pw}
     except Exception as ex:
         logger.exception(f"generate_collaborator_password failed: {ex}")
@@ -930,7 +953,7 @@ async def verify_collaborator_password(request: Request):
     """
     Verify a collaborator password and unlock tools for the current user if valid.
     Body: { password: string }
-    Effect: sets users/{uid}.collab_unlocked = true when matched.
+    Effect: sets users/{uid}.collab_unlocked = true and assigns role when matched.
     """
     uid = get_uid_from_request(request)
     if not uid:
@@ -948,21 +971,30 @@ async def verify_collaborator_password(request: Request):
         _friendly_err("Firestore unavailable", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     try:
-        # Query for a matching password (owner rotates stored value)
-        coll = db.collection('collaborators-passwords')
-        q = coll.where('password', '==', pw).limit(1)
-        matches = list(q.stream())  # type: ignore
-        if not matches:
+        # Look up password document directly (password is doc ID)
+        doc_ref = db.collection('collaborators-passwords').document(pw)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
             _friendly_err("Invalid password", status.HTTP_400_BAD_REQUEST)
-        owner_uid = (matches[0].to_dict() or {}).get('owner_uid') or matches[0].id
-        # Set unlock flag on the collaborator's profile
+        
+        doc_data = doc.to_dict() or {}
+        owner_uid = doc_data.get('owner_uid')
+        role = doc_data.get('role', 'gallery_manager')
+        
+        if not owner_uid:
+            _friendly_err("Invalid password data", status.HTTP_400_BAD_REQUEST)
+        
+        # Set unlock flag and role on the collaborator's profile
         user_ref = db.collection('users').document(uid)
         user_ref.set({
             'collab_unlocked': True,
+            'collab_role': role,
             'unlockedOwner': owner_uid,
+            'is_collaborator': True,
             'updatedAt': fb_fs.SERVER_TIMESTAMP,
         }, merge=True)
-        return {"ok": True}
+        return {"ok": True, "role": role}
     except HTTPException:
         raise
     except Exception as ex:
