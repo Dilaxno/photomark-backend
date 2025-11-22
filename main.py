@@ -75,6 +75,12 @@ app.include_router(gallery_assistant.router)
 # Color grading (LUT)
 app.include_router(color_grading.router)
 app.include_router(mark.router)
+# Mark agent with function calling
+try:
+    from routers import mark_agent  # noqa: E402
+    app.include_router(mark_agent.router)
+except Exception as _ex:
+    logger.warning(f"mark_agent router not available: {_ex}")
 app.include_router(smart_resize.router)
 app.include_router(shop.router)
 
