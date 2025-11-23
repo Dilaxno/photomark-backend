@@ -53,7 +53,7 @@ class User(Base):
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     
     # Additional metadata as JSON
-    metadata = Column(JSON, default={})
+    extra_metadata = Column(JSON, default={})
     
     def to_dict(self):
         """Convert to dict for API responses"""
@@ -79,7 +79,7 @@ class User(Base):
             "createdAt": self.created_at.isoformat() if self.created_at else None,
             "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
             "lastLoginAt": self.last_login_at.isoformat() if self.last_login_at else None,
-            "metadata": self.metadata or {}
+            "metadata": self.extra_metadata or {}
         }
 
 

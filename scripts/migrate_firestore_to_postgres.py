@@ -16,7 +16,11 @@ from datetime import datetime
 
 def init_firebase():
     """Initialize Firebase Admin SDK"""
-    cred_path = os.getenv("FIREBASE_ADMIN_SDK_PATH", "firebase-adminsdk.json")
+    # Look for Firebase credentials in project root
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))  # backend/scripts -> backend -> Software
+    cred_path = os.path.join(project_root, os.getenv("FIREBASE_ADMIN_SDK_PATH", "firebase-adminsdk.json"))
+    
     if not os.path.exists(cred_path):
         print(f"✗ Firebase credentials not found at {cred_path}")
         sys.exit(1)
@@ -98,12 +102,20 @@ def migrate_users(db: Session, firestore_db):
     docs = users_ref.stream()
     
     count = 0
+    skipped = 0
     for doc in docs:
         data = doc.to_dict()
         
+        # Skip users without valid email
+        email = data.get('email', '').strip()
+        if not email:
+            print(f"  ⚠ Skipping user {doc.id} - no email")
+            skipped += 1
+            continue
+        
         user = User(
             uid=doc.id,
-            email=data.get('email', ''),
+            email=email,
             display_name=data.get('displayName'),
             photo_url=data.get('photoUrl'),
             account_type=data.get('accountType', 'individual'),
@@ -123,7 +135,7 @@ def migrate_users(db: Session, firestore_db):
             created_at=data.get('createdAt') if 'createdAt' in data else datetime.utcnow(),
             updated_at=data.get('updatedAt') if 'updatedAt' in data else datetime.utcnow(),
             last_login_at=data.get('lastLoginAt'),
-            metadata=data.get('metadata', {})
+            extra_metadata=data.get('metadata', {})
         )
         
         existing = db.query(User).filter(User.uid == doc.id).first()
@@ -132,10 +144,16 @@ def migrate_users(db: Session, firestore_db):
         else:
             db.add(user)
         
-        count += 1
+        # Commit each user individually to handle duplicates gracefully
+        try:
+            db.commit()
+            count += 1
+        except Exception as e:
+            db.rollback()
+            print(f"  ⚠ Skipping user {email} - {str(e)[:100]}")
+            skipped += 1
     
-    db.commit()
-    print(f"✓ Migrated {count} users")
+    print(f"✓ Migrated {count} users ({skipped} skipped)")
 
 def main():
     print("=" * 50)

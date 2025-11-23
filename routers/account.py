@@ -1,35 +1,27 @@
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request, Body, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import datetime, timedelta
 import os
 import secrets
 import shutil
+from sqlalchemy.orm import Session
 
 from core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: ignore
 from core.config import logger, STATIC_DIR, s3, R2_BUCKET
+from core.database import get_db
+from models.user import User
 from utils.storage import write_json_key, read_json_key
 from utils.emailing import render_email, send_email_smtp
 
-# Firestore client via centralized helper
-try:
-    from firebase_admin import firestore as fb_fs  # type: ignore
-except Exception:
-    fb_fs = None  # type: ignore
-from core.auth import get_fs_client as _get_fs_client
-
 router = APIRouter(prefix="/api/account", tags=["account"]) 
 
-# Create/update Firestore users/{uid} on signup/login
+# Create/update PostgreSQL users on signup/login
 @router.post("/users/sync")
-async def users_sync(request: Request, payload: Optional[dict] = Body(default=None)):
+async def users_sync(request: Request, payload: Optional[dict] = Body(default=None), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    db = _get_fs_client()
-    if db is None:
-        return JSONResponse({"error": "Firestore unavailable"}, status_code=500)
 
     # Gather name/email from client or Firebase Auth (best-effort)
     name_client = str(((payload or {}).get("name") if payload else "") or "").strip()
@@ -74,42 +66,40 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
         except Exception as ex:
             logger.debug(f"users/sync update display_name skipped for {uid}: {ex}")
 
-    doc_ref = db.collection('users').document(uid)
-
     try:
-        transaction = db.transaction()
-
-        @fb_fs.transactional
-        def _apply_txn(txn):
-            snap = doc_ref.get(transaction=txn)
-            payload = {
-                "uid": uid,
-                "name": name,
-                "email": email,
-                "lastLogin": fb_fs.SERVER_TIMESTAMP,
-                "updatedAt": fb_fs.SERVER_TIMESTAMP,
-            }
-            if snap.exists:
-                # Always update basic identity fields
-                update_payload = dict(payload)
-                # If this was explicitly a collaborator signup and current plan is 'free',
-                # promote to 'collaborator' (server-side only; Admin SDK bypasses client rules)
-                try:
-                    cur = snap.to_dict() or {}
-                    if collab_signup and str(cur.get("plan") or "free").lower() == "free":
-                        update_payload["plan"] = "collaborator"
-                except Exception:
-                    pass
-                txn.update(doc_ref, update_payload)
-            else:
-                # default on create; allow collaborator plan when explicitly requested
-                payload["plan"] = "collaborator" if collab_signup else "free"
-                payload["createdAt"] = fb_fs.SERVER_TIMESTAMP
-                txn.set(doc_ref, payload)
-
-        _apply_txn(transaction)
+        # Check if user exists in PostgreSQL
+        user = db.query(User).filter(User.uid == uid).first()
+        now = datetime.utcnow()
+        
+        if user:
+            # Update existing user
+            user.display_name = name or user.display_name
+            user.email = email or user.email
+            user.last_login_at = now
+            user.updated_at = now
+            
+            # If collaborator signup and current plan is free, upgrade to collaborator
+            if collab_signup and user.plan == "free":
+                user.plan = "collaborator"
+        else:
+            # Create new user
+            user = User(
+                uid=uid,
+                email=email or f"{uid}@temp.invalid",  # Fallback for missing email
+                display_name=name,
+                plan="collaborator" if collab_signup else "free",
+                created_at=now,
+                updated_at=now,
+                last_login_at=now,
+                is_active=True,
+                email_verified=False
+            )
+            db.add(user)
+        
+        db.commit()
         return {"ok": True}
     except Exception as ex:
+        db.rollback()
         logger.exception(f"users/sync failed for {uid}: {ex}")
         return JSONResponse({"error": "Failed to sync user profile"}, status_code=500)
 
@@ -119,7 +109,7 @@ def _entitlement_key(uid: str) -> str:
 
 
 @router.get("/entitlement")
-async def get_entitlement(request: Request):
+async def get_entitlement(request: Request, db: Session = Depends(get_db)):
     """Return whether the current user has an active paid entitlement and plan.
     Anonymous users get { isPaid: false, plan: "free" }.
     """
@@ -127,22 +117,16 @@ async def get_entitlement(request: Request):
     if not uid:
         return {"isPaid": False, "plan": "free"}
     try:
-        plan = "free"
-        rec = read_json_key(_entitlement_key(uid)) or {}
-        is_paid = bool(rec.get("isPaid") or False)
-        plan = str(rec.get("plan") or plan)
-        # Fallback to Firestore mirror if available
-        try:
-            db = _get_fs_client()
-            if db is not None and (not is_paid or plan == "free"):
-                snap = db.collection('users').document(uid).get()
-                if snap.exists:
-                    data = snap.to_dict() or {}
-                    is_paid = bool(data.get('isPaid') or is_paid)
-                    plan = str(data.get('plan') or plan)
-        except Exception:
-            pass
-        return {"isPaid": bool(is_paid), "plan": plan}
+        # Get from PostgreSQL
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return {"isPaid": False, "plan": "free"}
+        
+        # Determine if paid based on plan
+        paid_plans = ["pro", "business", "enterprise", "agencies", "collaborator"]
+        is_paid = user.plan in paid_plans
+        
+        return {"isPaid": is_paid, "plan": user.plan}
     except Exception as ex:
         logger.warning(f"entitlement check failed for {uid}: {ex}")
         return {"isPaid": False, "plan": "free"}
@@ -231,31 +215,42 @@ async def dodo_webhook(request: Request):
         logger.warning("dodo_webhook: missing uid in payment.succeeded payload")
         return JSONResponse({"error": "missing uid"}, status_code=400)
 
-    # Update Firestore and local entitlement mirror
-    db = _get_fs_client()
-    if db is None or fb_fs is None:
-        logger.error("dodo_webhook: Firestore unavailable")
-        return JSONResponse({"error": "Firestore unavailable"}, status_code=500)
-
+    # Update PostgreSQL user
     try:
-        doc_ref = db.collection('users').document(uid)
-        update_payload = {
-            "plan": plan,
-            "isPaid": True,
-            "updatedAt": fb_fs.SERVER_TIMESTAMP,
-            "paidAt": fb_fs.SERVER_TIMESTAMP,
-            "lastPaymentProvider": "dodo",
-        }
-        # Merge update so we don't overwrite other fields
-        doc_ref.set(update_payload, merge=True)
-
-        # Mirror entitlement for fast checks (best-effort)
-        now = datetime.utcnow().isoformat()
-        ent = read_json_key(_entitlement_key(uid)) or {}
-        ent.update({"isPaid": True, "plan": plan, "source": "dodo", "updatedAt": now})
-        write_json_key(_entitlement_key(uid), ent)
-
-        return {"ok": True}
+        # Get database session
+        from core.database import SessionLocal
+        db = SessionLocal()
+        
+        try:
+            user = db.query(User).filter(User.uid == uid).first()
+            if not user:
+                logger.error(f"dodo_webhook: user {uid} not found")
+                return JSONResponse({"error": "user not found"}, status_code=404)
+            
+            # Update plan and payment info
+            now = datetime.utcnow()
+            user.plan = plan
+            user.updated_at = now
+            
+            # Store payment metadata in extra_metadata
+            metadata = user.extra_metadata or {}
+            metadata.update({
+                "isPaid": True,
+                "paidAt": now.isoformat(),
+                "lastPaymentProvider": "dodo"
+            })
+            user.extra_metadata = metadata
+            
+            db.commit()
+            
+            # Mirror entitlement for fast checks (best-effort)
+            ent = read_json_key(_entitlement_key(uid)) or {}
+            ent.update({"isPaid": True, "plan": plan, "source": "dodo", "updatedAt": now.isoformat()})
+            write_json_key(_entitlement_key(uid), ent)
+            
+            return {"ok": True}
+        finally:
+            db.close()
     except Exception as ex:
         logger.exception(f"dodo_webhook: failed to update user {uid} plan: {ex}")
         return JSONResponse({"error": "failed to update plan"}, status_code=500)
@@ -514,7 +509,7 @@ async def password_change_confirm(request: Request, payload: dict = Body(...)):
 
 
 @router.post("/plan/cancel")
-async def cancel_plan(request: Request):
+async def cancel_plan(request: Request, db: Session = Depends(get_db)):
     """
     Cancel the user's current plan and downgrade to free plan.
     Resets isPaid to False and plan to 'free'.
@@ -524,41 +519,45 @@ async def cancel_plan(request: Request):
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    db = _get_fs_client()
-    if db is None or fb_fs is None:
-        return JSONResponse({"error": "Firestore unavailable"}, status_code=500)
-
     try:
-        doc_ref = db.collection('users').document(uid)
-        update_payload = {
-            "plan": "free",
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        now = datetime.utcnow()
+        user.plan = "free"
+        user.updated_at = now
+        
+        # Update metadata
+        metadata = user.extra_metadata or {}
+        metadata.update({
             "isPaid": False,
-            "updatedAt": fb_fs.SERVER_TIMESTAMP,
-            "cancelledAt": fb_fs.SERVER_TIMESTAMP,
-        }
-        # Merge update so we don't overwrite other fields
-        doc_ref.set(update_payload, merge=True)
+            "cancelledAt": now.isoformat()
+        })
+        user.extra_metadata = metadata
+        
+        db.commit()
 
         # Update local entitlement mirror (best-effort)
         try:
-            now = datetime.utcnow().isoformat()
             ent = read_json_key(_entitlement_key(uid)) or {}
-            ent.update({"isPaid": False, "plan": "free", "updatedAt": now, "cancelledAt": now})
+            ent.update({"isPaid": False, "plan": "free", "updatedAt": now.isoformat(), "cancelledAt": now.isoformat()})
             write_json_key(_entitlement_key(uid), ent)
         except Exception as ex:
             logger.warning(f"plan/cancel: failed to update entitlement mirror for {uid}: {ex}")
 
         return {"ok": True}
     except Exception as ex:
+        db.rollback()
         logger.exception(f"plan/cancel failed for {uid}: {ex}")
         return JSONResponse({"error": "Failed to cancel plan"}, status_code=500)
 
 
 @router.post("/delete")
-async def delete_account(request: Request):
+async def delete_account(request: Request, db: Session = Depends(get_db)):
     """
     Delete the authenticated user's data and account, then sign them out client-side.
-    - Deletes Firestore doc(s) owned by user when available (affiliate_profiles/{uid})
+    - Deletes PostgreSQL user record
     - Deletes static files under users/{uid} (local or R2)
     - Deletes Firebase Auth user
     Returns: { ok: true }
@@ -570,13 +569,15 @@ async def delete_account(request: Request):
     if not firebase_enabled or not fb_auth:
         return JSONResponse({"error": "account deletion unavailable"}, status_code=500)
 
-    # 1) Firestore cleanup (best-effort)
+    # 1) PostgreSQL cleanup
     try:
-        db = _get_fs_client()
-        if db is not None:
-            db.collection('affiliate_profiles').document(uid).delete()
+        user = db.query(User).filter(User.uid == uid).first()
+        if user:
+            db.delete(user)
+            db.commit()
     except Exception as ex:
-        logger.warning(f"delete_account: firestore cleanup failed for {uid}: {ex}")
+        db.rollback()
+        logger.warning(f"delete_account: postgres cleanup failed for {uid}: {ex}")
 
     # 2) Static files cleanup (local)
     try:

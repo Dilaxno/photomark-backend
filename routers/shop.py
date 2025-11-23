@@ -1,6 +1,9 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Depends, Body
 from fastapi.responses import JSONResponse
 from core.auth import get_uid_from_request
+from core.database import get_db
+from models.shop import Shop, ShopSlug
+from sqlalchemy.orm import Session
 import os
 import uuid
 import base64
@@ -160,3 +163,217 @@ async def upload_shop_asset(
         print(f"[SHOP UPLOAD] UNEXPECTED ERROR: {str(e)}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.get('/{uid}')
+async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
+    """Get shop data by owner UID"""
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        return shop.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get shop: {str(e)}")
+
+
+@router.get('/slug/{slug}')
+async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
+    """Get shop data by slug (for public viewing)"""
+    try:
+        # Look up UID from slug mapping
+        slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == slug).first()
+        if not slug_mapping:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        
+        # Get shop data
+        shop = db.query(Shop).filter(Shop.uid == slug_mapping.uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        
+        return shop.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get shop: {str(e)}")
+
+
+@router.post('/settings')
+async def save_shop_settings(
+    request: Request,
+    settings: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Save shop settings (name, slug, description, theme)"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        now = datetime.utcnow()
+        
+        if shop:
+            # Update existing shop
+            shop.name = settings.get('name', shop.name)
+            shop.slug = settings.get('slug', shop.slug)
+            shop.description = settings.get('description', shop.description)
+            shop.owner_name = settings.get('ownerName', shop.owner_name)
+            shop.theme = settings.get('theme', shop.theme)
+            shop.updated_at = now
+        else:
+            # Create new shop
+            shop = Shop(
+                uid=uid,
+                name=settings.get('name', 'My Shop'),
+                slug=settings.get('slug', uid),
+                description=settings.get('description', ''),
+                owner_uid=uid,
+                owner_name=settings.get('ownerName'),
+                theme=settings.get('theme', {}),
+                products=[],
+                created_at=now,
+                updated_at=now
+            )
+            db.add(shop)
+        
+        # Update slug mapping
+        slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == shop.slug).first()
+        if slug_mapping:
+            slug_mapping.uid = uid
+            slug_mapping.updated_at = now
+        else:
+            slug_mapping = ShopSlug(slug=shop.slug, uid=uid, updated_at=now)
+            db.add(slug_mapping)
+        
+        db.commit()
+        return {"success": True, "message": "Shop settings saved"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
+
+
+@router.post('/products')
+async def save_shop_products(
+    request: Request,
+    products: list = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Save shop products"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found. Create settings first.")
+        
+        shop.products = products
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return {"success": True, "message": "Products saved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save products: {str(e)}")
+
+
+@router.post('/data')
+async def save_shop_data(
+    request: Request,
+    data: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Save complete shop data (settings + products)"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        settings = data.get('settings', {})
+        products = data.get('products', [])
+        
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        now = datetime.utcnow()
+        
+        if shop:
+            # Update existing shop
+            shop.name = settings.get('name', shop.name)
+            shop.slug = settings.get('slug', shop.slug)
+            shop.description = settings.get('description', shop.description)
+            shop.owner_name = settings.get('ownerName', shop.owner_name)
+            shop.theme = settings.get('theme', shop.theme)
+            shop.products = products
+            shop.updated_at = now
+        else:
+            # Create new shop
+            shop = Shop(
+                uid=uid,
+                name=settings.get('name', 'My Shop'),
+                slug=settings.get('slug', uid),
+                description=settings.get('description', ''),
+                owner_uid=uid,
+                owner_name=settings.get('ownerName'),
+                theme=settings.get('theme', {}),
+                products=products,
+                created_at=now,
+                updated_at=now
+            )
+            db.add(shop)
+        
+        # Update slug mapping
+        slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == shop.slug).first()
+        if slug_mapping:
+            slug_mapping.uid = uid
+            slug_mapping.updated_at = now
+        else:
+            slug_mapping = ShopSlug(slug=shop.slug, uid=uid, updated_at=now)
+            db.add(slug_mapping)
+        
+        db.commit()
+        return {"success": True, "message": "Shop data saved"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save shop data: {str(e)}")
+
+
+@router.post('/slug')
+async def update_slug_mapping(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Update slug mapping for a shop"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    slug = payload.get('slug')
+    if not slug:
+        raise HTTPException(status_code=400, detail="Slug is required")
+    
+    try:
+        # Check if slug is already taken by another user
+        existing = db.query(ShopSlug).filter(ShopSlug.slug == slug).first()
+        if existing and existing.uid != uid:
+            raise HTTPException(status_code=409, detail="Slug already taken")
+        
+        # Update or create slug mapping
+        if existing:
+            existing.updated_at = datetime.utcnow()
+        else:
+            slug_mapping = ShopSlug(slug=slug, uid=uid, updated_at=datetime.utcnow())
+            db.add(slug_mapping)
+        
+        db.commit()
+        return {"success": True, "message": "Slug mapping updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update slug: {str(e)}")
