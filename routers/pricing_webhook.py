@@ -1033,8 +1033,72 @@ async def pricing_webhook(request: Request):
     except Exception:
         pass
 
-    # --- Step 10: Affiliate attribution (unchanged) ---
-    # [keep your affiliate code block here exactly as before]
+    # --- Step 10: Affiliate attribution & commission tracking ---
+    try:
+        # Check if this user was referred by an affiliate
+        attrib_key = f"affiliates/attributions/{uid}.json"
+        attrib = read_json_key(attrib_key) or {}
+        affiliate_uid = attrib.get('affiliate_uid')
+        
+        if affiliate_uid:
+            # Calculate 30% commission from payment amount
+            commission_rate = 0.30
+            commission_cents = int(amount_cents * commission_rate)
+            
+            # Update affiliate stats
+            stats_key = f"affiliates/{affiliate_uid}/stats.json"
+            stats = read_json_key(stats_key) or {}
+            stats['conversions'] = int(stats.get('conversions') or 0) + 1
+            stats['gross_cents'] = int(stats.get('gross_cents') or 0) + amount_cents
+            stats['payout_cents'] = int(stats.get('payout_cents') or 0) + commission_cents
+            stats['currency'] = currency.lower()
+            stats['last_conversion_at'] = datetime.utcnow().isoformat()
+            write_json_key(stats_key, stats)
+            
+            # Mirror to Firestore
+            try:
+                if db and fb_fs:
+                    # Update affiliate stats
+                    db.collection('affiliate_stats').document(affiliate_uid).set({
+                        **stats,
+                        'uid': affiliate_uid,
+                        'updatedAt': fb_fs.SERVER_TIMESTAMP,
+                    }, merge=True)
+                    
+                    # Record conversion event
+                    db.collection('affiliate_conversions').add({
+                        'affiliate_uid': affiliate_uid,
+                        'user_uid': uid,
+                        'plan': plan,
+                        'billing_cycle': billing_cycle,
+                        'amount_cents': amount_cents,
+                        'commission_cents': commission_cents,
+                        'currency': currency,
+                        'conversion_date': fb_fs.SERVER_TIMESTAMP,
+                        'createdAt': fb_fs.SERVER_TIMESTAMP,
+                    })
+                    
+                    # Update user in affiliate's recent_referrals to show 'paid' status
+                    prof_ref = db.collection('affiliate_profiles').document(affiliate_uid)
+                    prof_snap = prof_ref.get()
+                    if prof_snap.exists:
+                        prof = prof_snap.to_dict() or {}
+                        recents = list(prof.get('recent_referrals') or [])
+                        # Update the matching user's status
+                        for ref in recents:
+                            if ref.get('user_uid') == uid:
+                                ref['status'] = 'paid'
+                                ref['plan'] = plan
+                                ref['billing_cycle'] = billing_cycle
+                                ref['conversion_date'] = datetime.utcnow()
+                                break
+                        prof_ref.set({'recent_referrals': recents, 'updatedAt': fb_fs.SERVER_TIMESTAMP}, merge=True)
+                    
+                    logger.info(f"[pricing.webhook] affiliate conversion tracked: affiliate={affiliate_uid} commission=${commission_cents/100:.2f}")
+            except Exception as e:
+                logger.warning(f"[pricing.webhook] failed to mirror affiliate data to Firestore: {e}")
+    except Exception as e:
+        logger.warning(f"[pricing.webhook] affiliate tracking failed: {e}")
 
     logger.info(f"[pricing.webhook] completed upgrade: uid={uid} plan={plan}")
     return {"ok": True, "upgraded": True, "uid": uid, "plan": plan}
