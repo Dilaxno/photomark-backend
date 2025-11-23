@@ -1,19 +1,17 @@
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Request, Depends
 from fastapi.responses import JSONResponse
 from core.auth import firebase_enabled, fb_auth, get_uid_from_request  # type: ignore
 from core.config import logger
 from datetime import datetime
-try:
-    from firebase_admin import firestore as fb_fs  # type: ignore
-except Exception:
-    fb_fs = None  # type: ignore
-from core.auth import get_fs_client
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.user import User
 
 router = APIRouter(prefix="/api/auth/ip", tags=["auth-ip"]) 
 
 
 @router.post("/register-signup")
-async def register_signup(payload: dict = Body(...)):
+async def register_signup(payload: dict = Body(...), db: Session = Depends(get_db)):
     """
     Create a new user via Firebase Admin.
     Expected JSON body: { "email": str, "password": str, "display_name"?: str }
@@ -34,22 +32,22 @@ async def register_signup(payload: dict = Body(...)):
     try:
         user = fb_auth.create_user(email=email, password=password, display_name=display_name)
         uid = getattr(user, "uid", None)
-        # Create/update Firestore user profile
-        try:
-            if firebase_enabled and fb_fs and uid:
-                _fs = fb_fs.client()
-                if _fs:
-                    _fs.collection('users').document(uid).set({
-                        'uid': uid,
-                        'email': email.lower(),
-                        'name': (display_name or '').strip(),
-                        'plan': 'free',
-                        'createdAt': fb_fs.SERVER_TIMESTAMP,
-                        'updatedAt': fb_fs.SERVER_TIMESTAMP,
-                        'lastLogin': None,
-                    }, merge=True)
-        except Exception:
-            pass
+        # Create/update PostgreSQL user profile
+        if uid:
+            existing = db.query(User).filter(User.uid == uid).first()
+            now = datetime.utcnow()
+            if existing:
+                existing.email = email.lower()
+                existing.display_name = (display_name or '').strip() or existing.display_name
+                existing.updated_at = now
+            else:
+                db.add(User(
+                    uid=uid,
+                    email=email.lower(),
+                    display_name=(display_name or '').strip() or None,
+                    plan='free',
+                ))
+            db.commit()
         return {"ok": True, "uid": uid}
     except Exception as ex:
         logger.warning(f"register-signup failed for {email}: {ex}")
@@ -61,7 +59,7 @@ async def register_signup(payload: dict = Body(...)):
 
 
 @router.post("/last-login")
-async def last_login(request: Request):
+async def last_login(request: Request, db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -73,17 +71,16 @@ async def last_login(request: Request):
                 email = (getattr(user, "email", None) or "").lower()
             except Exception:
                 pass
-        if firebase_enabled and fb_fs:
-            _fs = fb_fs.client()
-            if _fs:
-                doc = {
-                    'uid': uid,
-                    'updatedAt': fb_fs.SERVER_TIMESTAMP,
-                    'lastLogin': fb_fs.SERVER_TIMESTAMP,
-                }
+        # Update PostgreSQL user last_login_at and email if we have it
+        try:
+            u = db.query(User).filter(User.uid == uid).first()
+            if u:
                 if email:
-                    doc['email'] = email
-                _fs.collection('users').document(uid).set(doc, merge=True)
+                    u.email = email
+                u.last_login_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            db.rollback()
         return {"ok": True}
     except Exception as ex:
         logger.warning(f"last-login failed for {uid}: {ex}")

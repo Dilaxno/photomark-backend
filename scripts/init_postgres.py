@@ -11,6 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import Base, engine
 from models.shop import Shop, ShopSlug
 from models.user import User, CollaboratorAccess
+from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
+from models.pricing import PricingEvent, Subscription
+from models.replies import Reply
+from models.prelaunch import PrelaunchSignup
 
 def init_database():
     """Create all tables in the database"""
@@ -24,6 +28,13 @@ def init_database():
         print("  - shop_slugs")
         print("  - users")
         print("  - collaborator_access")
+        print("  - affiliate_profiles")
+        print("  - affiliate_attributions")
+        print("  - affiliate_conversions")
+        print("  - pricing_events")
+        print("  - subscriptions")
+        print("  - replies")
+        print("  - prelaunch_signups")
         
     except Exception as e:
         print(f"✗ Error creating tables: {e}")

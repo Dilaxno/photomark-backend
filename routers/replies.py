@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request, Body, Depends
 from fastapi.responses import JSONResponse
 from typing import Any, Dict, List, Optional
 import os
@@ -6,14 +6,11 @@ import time
 
 from core.auth import get_uid_from_request
 from core.config import logger
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.replies import Reply
 
-# Firestore admin via firebase_admin
-try:
-    import firebase_admin
-    from firebase_admin import firestore
-except Exception:
-    firebase_admin = None  # type: ignore
-    firestore = None  # type: ignore
+# Firestore removed in Neon migration
 
 router = APIRouter(prefix="/api/replies", tags=["replies"])  # inbound + list
 
@@ -30,19 +27,13 @@ router = APIRouter(prefix="/api/replies", tags=["replies"])  # inbound + list
 #   "in_reply_to": "<original@id>"
 # }
 @router.post("/inbound")
-async def inbound_email(request: Request, payload: Dict[str, Any] = Body(...)):
+async def inbound_email(request: Request, payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db)):
     provider_token = os.getenv("REPLY_WEBHOOK_TOKEN", "").strip()
     auth = request.headers.get("x-inbound-token", "").strip()
     if provider_token and auth != provider_token:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    if not firebase_admin or not firestore:
-        logger.error("Firestore not initialized; cannot store replies")
-        return JSONResponse({"error": "storage not configured"}, status_code=500)
-
     try:
-        db = firestore.client()
-        col = db.collection("outreach_replies")
         data = {
             "from_email": ((payload.get("from") or {}).get("email") or "").strip(),
             "from_name": ((payload.get("from") or {}).get("name") or "").strip(),
@@ -51,14 +42,26 @@ async def inbound_email(request: Request, payload: Dict[str, Any] = Body(...)):
             "html": (payload.get("html") or "").strip(),
             "message_id": (payload.get("message_id") or "").strip(),
             "in_reply_to": (payload.get("in_reply_to") or "").strip(),
-            "createdAt": firestore.SERVER_TIMESTAMP,
             "ts": int(time.time()),
         }
         # Basic validation
         if not data["from_email"] or not data["text"]:
             return JSONResponse({"error": "missing from_email or text"}, status_code=400)
 
-        col.add(data)
+        # Store in PostgreSQL; replies are not tied to owner_uid here, set to system
+        rec = Reply(
+            owner_uid="system",
+            target_id=data.get("in_reply_to") or data.get("message_id") or "",
+            target_type="email",
+            from_email=data["from_email"],
+            from_name=data.get("from_name"),
+            subject=data.get("subject"),
+            text=data.get("text"),
+            html=data.get("html"),
+            ts=data["ts"],
+        )
+        db.add(rec)
+        db.commit()
         return {"ok": True}
     except Exception as ex:
         logger.exception(f"[replies.inbound] error: {ex}")
@@ -73,39 +76,33 @@ async def list_replies(
     start_ts: Optional[int] = None,
     end_ts: Optional[int] = None,
     q: Optional[str] = None,
+    db: Session = Depends(get_db)
 ):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    if not firebase_admin or not firestore:
-        return JSONResponse({"error": "storage not configured"}, status_code=500)
-
     try:
-        db = firestore.client()
-        qry = db.collection("outreach_replies")
-        # Range filters on ts
+        qlimit = max(1, min(int(limit), 500))
+        query = db.query(Reply)
         if start_ts is not None:
-            qry = qry.where("ts", ">=", int(start_ts))
+            query = query.filter(Reply.ts >= int(start_ts))
         if end_ts is not None:
-            qry = qry.where("ts", "<=", int(end_ts))
+            query = query.filter(Reply.ts <= int(end_ts))
         if before_ts is not None:
-            qry = qry.where("ts", "<", int(before_ts))
-        qry = qry.order_by("ts", direction=firestore.Query.DESCENDING).limit(max(1, min(int(limit), 500)))
-
-        docs = qry.stream()
+            query = query.filter(Reply.ts < int(before_ts))
+        # Order by ts desc for pagination
+        rows = query.order_by(Reply.ts.desc()).limit(qlimit).all()
         items: List[Dict[str, Any]] = []
-        for d in docs:
-            obj = d.to_dict() or {}
-            obj["id"] = d.id
+        for r in rows:
             items.append({
-                "id": obj.get("id"),
-                "from": {"email": obj.get("from_email", ""), "name": obj.get("from_name", "")},
-                "subject": obj.get("subject", ""),
-                "text": obj.get("text", ""),
-                "html": obj.get("html", ""),
-                "ts": int(obj.get("ts") or 0),
-                "createdAt": str(obj.get("createdAt")),
+                "id": r.id,
+                "from": {"email": r.from_email or "", "name": r.from_name or ""},
+                "subject": r.subject or "",
+                "text": r.text or "",
+                "html": r.html or "",
+                "ts": int(r.ts or 0),
+                "createdAt": r.created_at.isoformat() if r.created_at else None,
             })
 
         # In-memory substring filter for subject/sender/body (case-insensitive)
@@ -118,7 +115,7 @@ async def list_replies(
                 (it.get("text") or "").lower().find(ql) >= 0
             )]
 
-        next_cursor = items[-1]["ts"] if len(items) >= max(1, min(int(limit), 500)) else None
+        next_cursor = items[-1]["ts"] if len(items) >= qlimit else None
         return {"ok": True, "items": items, "nextCursor": next_cursor}
     except Exception as ex:
         logger.exception(f"[replies.list] error: {ex}")

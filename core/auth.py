@@ -62,11 +62,7 @@ firebase_enabled = False
 try:
     import firebase_admin
     from firebase_admin import auth as fb_auth, credentials as fb_credentials
-    # Optional Firestore client (import lazily)
-    try:
-        from firebase_admin import firestore as fb_fs  # type: ignore
-    except Exception:
-        fb_fs = None  # type: ignore
+    # Firestore is no longer used for persistence.
 
     FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
     FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
@@ -97,18 +93,7 @@ except Exception as ex:
     fb_fs = None  # type: ignore
 
 
-# Helper to get Firestore client
-def get_fs_client():
-    try:
-        if not firebase_enabled:
-            return None
-        if 'fb_fs' in globals() and fb_fs:
-            return fb_fs.client()  # type: ignore
-        # Lazy import fallback
-        from firebase_admin import firestore as _fb_fs  # type: ignore
-        return _fb_fs.client()
-    except Exception:
-        return None
+# Firestore client helper removed after Neon migration.
 
 
 def _parse_collab_uid(uid: str):

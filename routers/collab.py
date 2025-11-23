@@ -18,15 +18,11 @@ from core.config import (
     COLLAB_RATE_LIMIT_MAX_ACTIONS,
     COLLAB_MAX_RECIPIENTS,
 )
-from core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid, get_fs_client as _get_fs_client
+from core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.storage import upload_bytes, read_json_key, write_json_key, read_bytes_key
 
-# Firestore admin helpers (for server timestamps)
-try:
-    from firebase_admin import firestore as fb_fs  # type: ignore
-except Exception:
-    fb_fs = None  # type: ignore
+# Firestore no longer used; timestamps handled via Python
 
 router = APIRouter(prefix="/api/collab", tags=["collab"]) 
 

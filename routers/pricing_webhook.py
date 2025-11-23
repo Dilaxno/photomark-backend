@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Header, Body
+from fastapi import APIRouter, Request, Header, Body, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional
 import os
@@ -8,20 +8,18 @@ from datetime import datetime
 from core.config import logger
 from standardwebhooks import Webhook, WebhookVerificationError
 from core.auth import (
-    get_fs_client as _get_fs_client,
     get_uid_from_request,
     get_uid_by_email,
     firebase_enabled,
     fb_auth,
 )
-from utils.storage import read_json_key, write_json_key
-from utils.emailing import render_email, send_email_smtp
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.user import User
+from models.pricing import PricingEvent, Subscription
+from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
 
-# Firestore client via centralized helper
-try:
-    from firebase_admin import firestore as fb_fs  # type: ignore
-except Exception:
-    fb_fs = None  # type: ignore
+# Firestore dependency removed in Neon migration
 
 router = APIRouter(prefix="/api/pricing", tags=["pricing"]) 
 
@@ -357,7 +355,7 @@ def _plan_from_products(obj: dict) -> str:
 
 
 @router.get("/user")
-async def pricing_user(request: Request):
+async def pricing_user(request: Request, db: Session = Depends(get_db)):
     """Return authenticated user's uid, email and current plan for the pricing page.
     Response: { uid, email, plan, isPaid }
     """
@@ -370,28 +368,23 @@ async def pricing_user(request: Request):
     plan = "free"
     is_paid = False
 
-    # Prefer Firestore as source of truth
+    # Read from PostgreSQL
     try:
-        db = _get_fs_client()
-        if db and fb_fs:
-            snap = db.collection("users").document(uid).get()
-            if snap.exists:
-                data = snap.to_dict() or {}
-                email = str(data.get("email") or "").strip()
-                plan = str(data.get("plan") or plan)
-                is_paid = bool(data.get("isPaid") or False)
-                logger.info(f"[pricing.user] firestore read ok: uid={uid} email='{email}' plan='{plan}' isPaid={is_paid}")
+        u = db.query(User).filter(User.uid == uid).first()
+        if u:
+            email = (u.email or "").strip()
+            plan = u.plan or plan
     except Exception as ex:
-        logger.debug(f"[pricing.user] firestore read failed for {uid}: {ex}")
+        logger.debug(f"[pricing.user] db read failed for {uid}: {ex}")
 
-    # Fallback to entitlement mirror
+    # Fallback to entitlement mirror for isPaid
     try:
         ent = read_json_key(_entitlement_key(uid)) or {}
         if ent:
-            prev_plan, prev_paid = plan, is_paid
-            plan = str(ent.get("plan") or plan)
-            is_paid = bool(ent.get("isPaid") or is_paid)
-            logger.info(f"[pricing.user] entitlement read: uid={uid} plan '{prev_plan}' -> '{plan}', isPaid {prev_paid} -> {is_paid}")
+            is_paid = bool(ent.get("isPaid") or False)
+            # If plan not set from DB, use mirror
+            if plan == "free":
+                plan = str(ent.get("plan") or plan)
     except Exception:
         pass
 
@@ -408,7 +401,7 @@ async def pricing_user(request: Request):
 
 
 @router.post("/webhook")
-async def pricing_webhook(request: Request):
+async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
     """
     Webhook endpoint to receive payment events for pricing upgrades.
     Security:
@@ -819,284 +812,45 @@ async def pricing_webhook(request: Request):
             "allowed": allowed,
         }
 
-    # --- Step 8: Persist to Firestore ---
-    db = _get_fs_client()
-    if not db or not fb_fs:
-        logger.error(f"[pricing.webhook] Firestore unavailable; cannot persist plan")
-        return {"ok": True, "skipped": True, "reason": "firestore_unavailable"}
-
+    # --- Step 8: Affiliate commission tracking in PostgreSQL ---
     try:
-        # Update user document with plan info
-        update_data = {
-            "uid": uid,
-            "plan": plan,
-            "isPaid": True,
-            "planStatus": "paid",
-            "lastPaymentProvider": "dodo",
-            "updatedAt": fb_fs.SERVER_TIMESTAMP,
-            "paidAt": fb_fs.SERVER_TIMESTAMP,
-        }
-        # Include billing cycle if available
-        if billing_cycle:
-            update_data["billing_cycle"] = billing_cycle
-            update_data["billingCycle"] = billing_cycle  # Duplicate for backward compatibility
-        
-        db.collection("users").document(uid).set(update_data, merge=True)
-        
         # Extract payment details from webhook payload
         amount_cents = 0
         currency = "USD"
-        payment_date = datetime.utcnow().isoformat().split('T')[0]
-        
         try:
-            # Try to extract amount (varies by provider)
             amount_raw = (
-                event_obj.get("amount") or 
-                event_obj.get("total") or 
-                event_obj.get("amount_total") or 
-                event_obj.get("grand_total") or 0
+                event_obj.get("amount") or event_obj.get("total") or event_obj.get("amount_total") or event_obj.get("grand_total") or 0
             )
             amount_cents = int(amount_raw) if amount_raw else 0
-            
-            # Try to extract currency
-            currency_raw = (
-                event_obj.get("currency") or 
-                event_obj.get("currency_code") or 
-                "USD"
-            )
+            currency_raw = (event_obj.get("currency") or event_obj.get("currency_code") or "USD")
             currency = str(currency_raw).upper()
-            
-            # Try to extract date
-            date_raw = (
-                event_obj.get("created_at") or 
-                event_obj.get("paid_at") or 
-                event_obj.get("timestamp") or 
-                datetime.utcnow().isoformat()
-            )
-            if isinstance(date_raw, str):
-                payment_date = date_raw.split('T')[0]
-            elif isinstance(date_raw, (int, float)):
-                payment_date = datetime.fromtimestamp(date_raw).isoformat().split('T')[0]
         except Exception:
             pass
-        
-        # Create invoice document
-        invoice_id = f"INV-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
-        invoice_ref = db.collection("users").document(uid).collection("invoices").document(invoice_id)
-        invoice_ref.set({
-            "date": payment_date,
-            "amount": amount_cents / 100.0,  # Convert cents to dollars
-            "status": "paid",
-            "currency": currency,
-            "plan": plan,
-            "provider": "dodo",
-            "createdAt": fb_fs.SERVER_TIMESTAMP,
-        })
-        logger.info(f"[pricing.webhook] created invoice {invoice_id} for uid={uid}")
-        
-        # Initialize usage stats if not exists
-        stats_ref = db.collection("users").document(uid).collection("stats").document("usage")
-        stats_doc = stats_ref.get()
-        if not stats_doc.exists:
-            stats_ref.set({
-                "photoCount": 0,
-                "storageBytes": 0,
-                "apiCalls": 0,
-                "bandwidthBytes": 0,
-                "createdAt": fb_fs.SERVER_TIMESTAMP,
-                "updatedAt": fb_fs.SERVER_TIMESTAMP,
-            })
-            logger.info(f"[pricing.webhook] initialized usage stats for uid={uid}")
-        
-        # Try to extract and store payment method info (if available)
-        try:
-            payment_method = event_obj.get("payment_method") or {}
-            if isinstance(payment_method, dict):
-                card = payment_method.get("card") or {}
-                if isinstance(card, dict) and card.get("last4"):
-                    # Store payment method
-                    billing_ref = db.collection("users").document(uid).collection("billing").document("payment_methods")
-                    billing_doc = billing_ref.get()
-                    
-                    new_method = {
-                        "id": payment_method.get("id") or invoice_id,
-                        "type": str(card.get("brand", "card")).lower(),
-                        "last4": str(card.get("last4")),
-                        "expiry": f"{card.get('exp_month', '12')}/{str(card.get('exp_year', '2025'))[-2:]}",
-                        "isDefault": True,
-                        "createdAt": datetime.utcnow().isoformat(),
-                    }
-                    
-                    if billing_doc.exists:
-                        # Update existing methods, set others to non-default
-                        data = billing_doc.to_dict() or {}
-                        methods = data.get("methods", [])
-                        for m in methods:
-                            m["isDefault"] = False
-                        methods.append(new_method)
-                        billing_ref.set({"methods": methods})
-                    else:
-                        # Create new
-                        billing_ref.set({"methods": [new_method]})
-                    
-                    logger.info(f"[pricing.webhook] stored payment method for uid={uid}")
-        except Exception as pm_ex:
-            logger.debug(f"[pricing.webhook] could not store payment method: {pm_ex}")
-        
-        # Send thank you email after successful plan change
-        try:
-            # Get user email
-            user_email = email or _get_user_email(uid)
-            if user_email:
-                # Get user name
-                user_doc = db.collection("users").document(uid).get()
-                user_data = user_doc.to_dict() if user_doc.exists else {}
-                user_name = (user_data.get('name') or user_data.get('displayName') or 'there')
-                
-                # Determine plan display name
-                plan_display = {
-                    'individual': 'Individual',
-                    'studios': 'Studios',
-                    'pro': 'Pro'
-                }.get(plan.lower(), plan.capitalize())
-                
-                # Determine if upgrade (assuming any paid plan is an upgrade for now)
-                is_upgrade = True  # Could be enhanced to check previous plan
-                
-                # Get features based on plan
-                features = []
-                if plan.lower() == 'individual':
-                    features = [
-                        'All premium tools unlocked',
-                        'Cloud gallery (up to 100k photos)',
-                        'Priority support',
-                        'All future updates included',
-                        'Batch upload & processing'
-                    ]
-                elif plan.lower() == 'studios':
-                    features = [
-                        'All premium tools unlocked',
-                        'Cloud gallery (unlimited)',
-                        'Collaboration & team features',
-                        'Priority support',
-                        'All future updates included',
-                        'Batch upload & processing'
-                    ]
-                
-                # Format payment amount
-                amount_display = f"${amount_cents / 100:.2f}" if amount_cents > 0 else "your subscription"
-                
-                # Render and send email
-                html_body = render_email(
-                    "plan_change.html",
-                    title=f"Welcome to {plan_display}!" if is_upgrade else f"Plan Updated to {plan_display}",
-                    greeting=f"Hi {user_name},",
-                    plan_name=plan_display,
-                    is_upgrade=is_upgrade,
-                    features=features,
-                    payment_details=f"Your payment of {amount_display} has been processed successfully. A receipt has been sent to {user_email}.",
-                    button_url=f"{os.getenv('FRONTEND_ORIGIN', 'https://photomark.cloud')}/#gallery",
-                    button_label="Start Creating"
-                )
-                
-                send_email_smtp(
-                    to_addr=user_email,
-                    subject=f"🎉 Welcome to {plan_display}!" if is_upgrade else f"Your plan has been updated to {plan_display}",
-                    html=html_body,
-                    from_addr="billing@photomark.cloud",
-                    from_name="Photomark Billing",
-                    reply_to="support@photomark.cloud"
-                )
-                
-                logger.info(f"[pricing.webhook] sent thank you email to {user_email} for plan={plan}")
-        except Exception as email_ex:
-            # Don't fail webhook if email fails
-            logger.warning(f"[pricing.webhook] failed to send thank you email: {email_ex}")
-        
-    except Exception as ex:
-        logger.warning(f"[pricing.webhook] failed to persist plan for {uid}: {ex}")
-        return {"ok": True, "skipped": True, "reason": "firestore_write_failed", "error": str(ex)}
 
-    # --- Step 9: Local entitlement mirror ---
-    try:
-        write_json_key(
-            _entitlement_key(uid),
-            {
-                "isPaid": True,
-                "plan": plan,
-                "updatedAt": event_obj.get("created_at")
-                or event_obj.get("paid_at")
-                or event_obj.get("timestamp")
-                or None,
-            },
-        )
-    except Exception:
-        pass
-
-    # --- Step 10: Affiliate attribution & commission tracking ---
-    try:
-        # Check if this user was referred by an affiliate
-        attrib_key = f"affiliates/attributions/{uid}.json"
-        attrib = read_json_key(attrib_key) or {}
-        affiliate_uid = attrib.get('affiliate_uid')
-        
-        if affiliate_uid:
-            # Calculate 30% commission from payment amount
-            commission_rate = 0.30
+        # Resolve affiliate uid via attribution table
+        aff = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
+        affiliate_uid = aff.affiliate_uid if aff else None
+        if affiliate_uid and amount_cents > 0:
+            commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
             commission_cents = int(amount_cents * commission_rate)
-            
-            # Update affiliate stats
-            stats_key = f"affiliates/{affiliate_uid}/stats.json"
-            stats = read_json_key(stats_key) or {}
-            stats['conversions'] = int(stats.get('conversions') or 0) + 1
-            stats['gross_cents'] = int(stats.get('gross_cents') or 0) + amount_cents
-            stats['payout_cents'] = int(stats.get('payout_cents') or 0) + commission_cents
-            stats['currency'] = currency.lower()
-            stats['last_conversion_at'] = datetime.utcnow().isoformat()
-            write_json_key(stats_key, stats)
-            
-            # Mirror to Firestore
-            try:
-                if db and fb_fs:
-                    # Update affiliate stats
-                    db.collection('affiliate_stats').document(affiliate_uid).set({
-                        **stats,
-                        'uid': affiliate_uid,
-                        'updatedAt': fb_fs.SERVER_TIMESTAMP,
-                    }, merge=True)
-                    
-                    # Record conversion event
-                    db.collection('affiliate_conversions').add({
-                        'affiliate_uid': affiliate_uid,
-                        'user_uid': uid,
-                        'plan': plan,
-                        'billing_cycle': billing_cycle,
-                        'amount_cents': amount_cents,
-                        'commission_cents': commission_cents,
-                        'currency': currency,
-                        'conversion_date': fb_fs.SERVER_TIMESTAMP,
-                        'createdAt': fb_fs.SERVER_TIMESTAMP,
-                    })
-                    
-                    # Update user in affiliate's recent_referrals to show 'paid' status
-                    prof_ref = db.collection('affiliate_profiles').document(affiliate_uid)
-                    prof_snap = prof_ref.get()
-                    if prof_snap.exists:
-                        prof = prof_snap.to_dict() or {}
-                        recents = list(prof.get('recent_referrals') or [])
-                        # Update the matching user's status
-                        for ref in recents:
-                            if ref.get('user_uid') == uid:
-                                ref['status'] = 'paid'
-                                ref['plan'] = plan
-                                ref['billing_cycle'] = billing_cycle
-                                ref['conversion_date'] = datetime.utcnow()
-                                break
-                        prof_ref.set({'recent_referrals': recents, 'updatedAt': fb_fs.SERVER_TIMESTAMP}, merge=True)
-                    
-                    logger.info(f"[pricing.webhook] affiliate conversion tracked: affiliate={affiliate_uid} commission=${commission_cents/100:.2f}")
-            except Exception as e:
-                logger.warning(f"[pricing.webhook] failed to mirror affiliate data to Firestore: {e}")
+
+            # Record conversion
+            db.add(AffiliateConversion(
+                affiliate_uid=affiliate_uid,
+                user_uid=uid,
+                amount_cents=amount_cents,
+                payout_cents=commission_cents,
+                currency=currency.lower(),
+            ))
+
+            # Update profile aggregates
+            prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
+            if prof:
+                prof.conversions_total = int(prof.conversions_total or 0) + 1
+                prof.gross_cents_total = int(prof.gross_cents_total or 0) + amount_cents
+                prof.payout_cents_total = int(prof.payout_cents_total or 0) + commission_cents
+                prof.last_conversion_at = datetime.utcnow()
+            db.commit()
     except Exception as e:
         logger.warning(f"[pricing.webhook] affiliate tracking failed: {e}")
 

@@ -6,16 +6,15 @@ from typing import Optional
 
 from core.config import logger
 from core.auth import (
-    get_fs_client as _get_fs_client,
     get_uid_from_request,
     firebase_enabled,
     fb_auth,
 )
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.user import User
 
-try:
-    from firebase_admin import firestore as fb_fs  # type: ignore
-except Exception:
-    fb_fs = None  # type: ignore
+# Firestore removed in Neon migration
 
 # Reuse normalization/allow-list logic from webhook module
 try:
@@ -56,17 +55,13 @@ def _plan_to_product_id(plan: str) -> str:
     return ""
 
 
-def _get_user_email(uid: str) -> str:
-    # Prefer Firestore document email; fallback to Firebase Auth
+def _get_user_email(uid: str, db: Session | None = None) -> str:
+    # Prefer PostgreSQL user email; fallback to Firebase Auth
     try:
-        db = _get_fs_client()
-        if db and fb_fs:
-            snap = db.collection("users").document(uid).get()
-            if getattr(snap, "exists", False):
-                data = snap.to_dict() or {}
-                email = str(data.get("email") or "").strip()
-                if email:
-                    return email
+        if db is not None:
+            u = db.query(User).filter(User.uid == uid).first()
+            if u and u.email:
+                return u.email.strip()
     except Exception:
         pass
     if firebase_enabled and fb_auth:
@@ -159,7 +154,16 @@ async def create_pricing_link(request: Request):
     }
 
     # Add customer email if available (helps with receipts and receipts)
-    email = _get_user_email(uid)
+    # We don't have DB session here; checkout utility doesn't need strict email if missing
+    email = ""
+    try:
+        # Lazy import to avoid circular deps and session plumbing here not critical
+        from core.database import SessionLocal  # type: ignore
+        with SessionLocal() as session:  # type: ignore
+            email = _get_user_email(uid, session)
+    except Exception:
+        # Fallback to Firebase
+        email = _get_user_email(uid, None)
     if email:
         base_payload["customer"] = {"email": email}
         base_payload["email"] = email

@@ -2,12 +2,14 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Request, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core.config import logger, s3, R2_BUCKET
-from core.auth import get_fs_client
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.user import User
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])  # secure endpoints via ADMIN_SECRET
 
@@ -70,7 +72,7 @@ class BatchUpdatePayload(BaseModel):
     updates: Dict[str, Any]
 
 
-# --- Firestore helpers ---
+# --- User helpers (search fields) ---
 
 _USER_FIELDS_INDEX = (
     "email",
@@ -84,16 +86,27 @@ _USER_FIELDS_INDEX = (
 )
 
 
-def _fetch_all_users(max_count: int = 1000) -> List[Tuple[str, Dict[str, Any]]]:
-    db = get_fs_client()
-    if not db:
-        return []
-    docs = list(db.collection("users").limit(max_count).stream())
+def _fetch_all_users_sql(db: Session, max_count: int = 1000) -> List[Tuple[str, Dict[str, Any]]]:
+    rows = (
+        db.query(User)
+        .order_by(User.created_at.desc())
+        .limit(max(1, min(int(max_count), 5000)))
+        .all()
+    )
     out: List[Tuple[str, Dict[str, Any]]] = []
-    for d in docs:
+    for u in rows:
         try:
-            data = d.to_dict() or {}
-            out.append((d.id, data))
+            data = {
+                "email": u.email,
+                "name": u.display_name,
+                "displayName": u.display_name,
+                "is_active": u.is_active,
+                "plan": u.plan,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "updated_at": u.updated_at.isoformat() if u.updated_at else None,
+                "last_login": u.last_login_at.isoformat() if u.last_login_at else None,
+            }
+            out.append((u.uid, data))
         except Exception:
             continue
     return out
@@ -153,13 +166,13 @@ def _similarity(a: str, b: str) -> float:
 # --- Endpoints ---
 
 @router.get("/users")
-async def admin_users_list(request: Request, secret: Optional[str] = None, limit: Optional[int] = 1000):
+async def admin_users_list(request: Request, secret: Optional[str] = None, limit: Optional[int] = 1000, db: Session = Depends(get_db)):
     sec = _require_admin(request, secret)
     if sec is not None:
         return sec
     try:
         lim = int(limit or 1000)
-        users = _fetch_all_users(max_count=max(1, min(lim, 5000)))
+        users = _fetch_all_users_sql(db, max_count=max(1, min(lim, 5000)))
         out = [
             {
                 "uid": uid,
@@ -184,7 +197,7 @@ async def admin_users_list(request: Request, secret: Optional[str] = None, limit
 
 
 @router.get("/users/search")
-async def admin_users_search(request: Request, q: str, secret: Optional[str] = None, limit: Optional[int] = 200):
+async def admin_users_search(request: Request, q: str, secret: Optional[str] = None, limit: Optional[int] = 200, db: Session = Depends(get_db)):
     sec = _require_admin(request, secret)
     if sec is not None:
         return sec
@@ -192,7 +205,7 @@ async def admin_users_search(request: Request, q: str, secret: Optional[str] = N
     if not query:
         return JSONResponse({"error": "q_required"}, status_code=400)
     try:
-        users = _fetch_all_users(max_count=5000)
+        users = _fetch_all_users_sql(db, max_count=5000)
         qb = query.lower().strip()
         scored: List[Tuple[float, Tuple[str, Dict[str, Any]]]] = []
         for uid, data in users:
@@ -232,7 +245,7 @@ async def admin_users_search(request: Request, q: str, secret: Optional[str] = N
 
 
 @router.post("/users/update")
-async def admin_user_update(request: Request, payload: UpdateUserPayload, secret: Optional[str] = None):
+async def admin_user_update(request: Request, payload: UpdateUserPayload, secret: Optional[str] = None, db: Session = Depends(get_db)):
     sec = _require_admin(request, secret)
     if sec is not None:
         return sec
@@ -243,11 +256,27 @@ async def admin_user_update(request: Request, payload: UpdateUserPayload, secret
     if not updates:
         return JSONResponse({"error": "no_updates"}, status_code=400)
     try:
-        db = get_fs_client()
-        if not db:
-            return JSONResponse({"error": "no_firestore"}, status_code=503)
-        doc_ref = db.collection("users").document(uid)
-        doc_ref.set(updates, merge=True)
+        u = db.query(User).filter(User.uid == uid).first()
+        if not u:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        # Map known fields
+        mapping = {
+            "email": "email",
+            "name": "display_name",
+            "displayName": "display_name",
+            "plan": "plan",
+            "is_active": "is_active",
+            "email_verified": "email_verified",
+        }
+        for k, v in (updates or {}).items():
+            attr = mapping.get(k)
+            if not attr:
+                continue
+            try:
+                setattr(u, attr, v)
+            except Exception:
+                continue
+        db.commit()
         return {"ok": True}
     except Exception as ex:
         logger.warning(f"/api/admin/users/update failed: {ex}")
@@ -255,7 +284,7 @@ async def admin_user_update(request: Request, payload: UpdateUserPayload, secret
 
 
 @router.post("/users/delete")
-async def admin_user_delete(request: Request, payload: DeleteUserPayload, secret: Optional[str] = None):
+async def admin_user_delete(request: Request, payload: DeleteUserPayload, secret: Optional[str] = None, db: Session = Depends(get_db)):
     sec = _require_admin(request, secret)
     if sec is not None:
         return sec
@@ -263,14 +292,14 @@ async def admin_user_delete(request: Request, payload: DeleteUserPayload, secret
     if not uid:
         return JSONResponse({"error": "uid_required"}, status_code=400)
     try:
-        db = get_fs_client()
-        if not db:
-            return JSONResponse({"error": "no_firestore"}, status_code=503)
-        # Delete Firestore doc
+        # Delete user from PostgreSQL
         try:
-            db.collection("users").document(uid).delete()
+            u = db.query(User).filter(User.uid == uid).first()
+            if u:
+                db.delete(u)
+                db.commit()
         except Exception:
-            pass
+            db.rollback()
         # Optionally delete storage under users/{uid}/
         deleted_storage = []
         if payload.delete_storage and s3 and R2_BUCKET:

@@ -1,46 +1,16 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 import os
 from datetime import datetime, timezone
 
 from core.config import logger
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.prelaunch import PrelaunchSignup
 
 
-def _get_firestore():
-    """Init and return Firestore client (firebase_admin), using flexible credential sources."""
-    import json, base64
-    import firebase_admin
-    from firebase_admin import credentials, firestore
-
-    # Reuse existing app if already initialized
-    try:
-        firebase_admin.get_app()
-    except ValueError:
-        cred = None
-        json_inline = (
-            os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-            or os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON")
-            or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-        )
-        b64_creds = os.getenv("GSPREAD_SERVICE_ACCOUNT_BASE64")
-        json_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON_PATH") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-
-        if json_inline:
-            info = json.loads(json_inline)
-            cred = credentials.Certificate(info)
-        elif b64_creds:
-            raw = base64.b64decode(b64_creds)
-            info = json.loads(raw)
-            cred = credentials.Certificate(info)
-        elif json_path and os.path.isfile(json_path):
-            cred = credentials.Certificate(json_path)
-        else:
-            raise RuntimeError("Service account credentials not configured for Firebase")
-
-        firebase_admin.initialize_app(cred)
-
-    return firestore.client()
+# Firestore removed in Neon migration
 
 
 class SubscribePayload(BaseModel):
@@ -52,7 +22,7 @@ router = APIRouter(prefix="/prelaunch", tags=["prelaunch"])  # e.g. POST /prelau
 
 
 @router.post("/subscribe")
-async def subscribe(payload: SubscribePayload, request: Request):
+async def subscribe(payload: SubscribePayload, request: Request, db: Session = Depends(get_db)):
     # Collect useful context
     ts = datetime.now(timezone.utc).isoformat()
     email = payload.email.strip().lower()
@@ -61,17 +31,18 @@ async def subscribe(payload: SubscribePayload, request: Request):
     ua = request.headers.get("user-agent", "")
 
     try:
-        db = _get_firestore()
-        doc = {
-            "timestamp": ts,
-            "email": email,
-            "name": name,
-            "ip": ip or "",
-            "user_agent": ua,
-        }
-        # Use email as doc id to dedupe; last write wins
-        db.collection("pre-launchers").document(email).set(doc)
+        rec = db.query(PrelaunchSignup).filter(PrelaunchSignup.email == email).first()
+        if rec:
+            # Update basic info if changed
+            rec.source = name or rec.source
+            rec.ip = (ip or rec.ip)
+            rec.user_agent = ua or rec.user_agent
+        else:
+            rec = PrelaunchSignup(email=email, source=name or None, ip=ip or None, user_agent=ua)
+            db.add(rec)
+        db.commit()
         return {"ok": True}
-    except Exception:
-        logger.exception("prelaunch subscribe failed (firestore)")
+    except Exception as ex:
+        db.rollback()
+        logger.exception(f"prelaunch subscribe failed: {ex}")
         return JSONResponse({"ok": False, "error": "Failed to save"}, status_code=500)
