@@ -131,6 +131,9 @@ async def upload_shop_asset(
                     f.write(contents)
 
                 static_url = f"/static/shops/{shop_id}/{filename}"
+                static_base = os.getenv('STATIC_PUBLIC_BASE_URL', '').rstrip('/') if os.getenv('STATIC_PUBLIC_BASE_URL') else ''
+                if static_base:
+                    static_url = f"{static_base}{static_url}"
             except Exception as write_err:
                 print(f"[SHOP UPLOAD] WARNING: Failed to persist file to static dir: {write_err}")
 
