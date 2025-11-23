@@ -9,6 +9,9 @@ from core.config import logger
 from utils.emailing import render_email, send_email_smtp
 from utils.storage import write_json_key, read_json_key
 from utils.rate_limit import signup_throttle
+from sqlalchemy.orm import Session
+from core.database import SessionLocal
+from models.user import User
 from utils.validation import validate_signup_data, validate_email, validate_email_mx
 from utils.recaptcha import verify_recaptcha
 
@@ -556,6 +559,20 @@ async def auth_email_verification_confirm(token: str, request: Request):
             fb_auth.update_user(uid, email_verified=True)
         rec["used"] = True
         write_json_key(_email_verification_key(token), rec)
+        # Mirror verification status to Neon (PostgreSQL)
+        try:
+            db: Session = SessionLocal()
+            try:
+                u = db.query(User).filter(User.uid == uid).first()
+                if u:
+                    u.email_verified = True
+                    u.updated_at = datetime.utcnow()
+                    db.commit()
+            finally:
+                db.close()
+        except Exception:
+            # Best-effort: don't block verification on DB failure
+            logger.warning(f"[auth.verify] Failed to mirror email_verified for uid={uid}")
     except Exception as ex:
         logger.exception(f"Set email verified failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
