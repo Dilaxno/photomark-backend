@@ -74,6 +74,7 @@ except Exception:
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 MAIL_FROM = os.getenv("MAIL_FROM", "Your App <no-reply@your-domain.com>")
 SMTP_HOST = os.getenv("SMTP_HOST", "")

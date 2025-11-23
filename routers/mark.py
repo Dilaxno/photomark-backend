@@ -3,12 +3,19 @@ import tempfile
 from typing import Any, Dict, List
 from fastapi import APIRouter, Body, Request, File, UploadFile, Form
 from fastapi.responses import JSONResponse
-import httpx
+import google.generativeai as genai
+from PIL import Image
+import io
+import base64
 
-from core.config import logger, GROQ_API_KEY
+from core.config import logger, GEMINI_API_KEY
 from core.auth import get_uid_from_request, get_fs_client
 
-router = APIRouter(prefix="/api/mark", tags=["mark_assistant"])  # Global Mark chat assistant
+router = APIRouter(prefix="/api/mark", tags=["mark_assistant"])
+
+# Configure Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # Optional Firestore import for server timestamps
 try:
@@ -38,77 +45,93 @@ PHOTOGRAPHY_SYSTEM_PROMPT = (
 )
 
 
-async def _groq_chat(messages: List[Dict[str, str]], image_base64: str = None) -> str:
-    if not GROQ_API_KEY:
-        return "Mark is not configured. Please set GROQ_API_KEY."
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+def _decode_base64_image(base64_str: str) -> Image.Image:
+    """Decode base64 image string to PIL Image"""
+    # Remove data URL prefix if present
+    if ',' in base64_str:
+        base64_str = base64_str.split(',', 1)[1]
     
-    # Use vision model if image is present, otherwise use text model
-    if image_base64:
-        model = "llama-3.2-90b-vision-preview"  # Vision-capable model
-    else:
-        model = os.getenv("GROQ_MODEL_MARK", "llama-3.1-8b-instant")
+    image_data = base64.b64decode(base64_str)
+    return Image.open(io.BytesIO(image_data))
+
+
+async def _gemini_chat(messages: List[Dict[str, str]], image_base64: str = None) -> str:
+    """Chat with Gemini, supports text, images, and will handle audio in the same flow"""
+    if not GEMINI_API_KEY:
+        return "Mark is not configured. Please set GEMINI_API_KEY in your environment."
     
-    # Format messages for vision model if image present
-    formatted_messages = [{"role": "system", "content": PHOTOGRAPHY_SYSTEM_PROMPT}]
-    
-    for i, msg in enumerate(messages):
-        # Only add image to the LAST user message
-        is_last_user_msg = (i == len(messages) - 1 and msg.get("role") == "user")
-        
-        if image_base64 and is_last_user_msg:
-            # For the last user message with image, use vision format
-            formatted_messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": msg["content"]},
-                    {"type": "image_url", "image_url": {"url": image_base64}}
-                ]
-            })
-        else:
-            formatted_messages.append(msg)
-    
-    payload = {
-        "model": model,
-        "messages": formatted_messages,
-        "temperature": 0.3,
-        "max_tokens": 1500,
-    }
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            content = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
-            return content or ""
+        # Use Gemini 1.5 Pro which supports text, images, and audio
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        
+        # Build conversation history
+        chat_history = []
+        
+        # Add system prompt as first user message (Gemini doesn't have system role)
+        chat_history.append({
+            "role": "user",
+            "parts": [PHOTOGRAPHY_SYSTEM_PROMPT]
+        })
+        chat_history.append({
+            "role": "model",
+            "parts": ["Understood. I'm Mark, your photography expert. I'll provide precise, technical guidance on all aspects of photography."]
+        })
+        
+        # Add message history
+        for msg in messages:
+            role = "model" if msg.get("role") == "assistant" else "user"
+            chat_history.append({
+                "role": role,
+                "parts": [msg["content"]]
+            })
+        
+        # Start chat with history
+        chat = model.start_chat(history=chat_history[:-1])  # Exclude last message
+        
+        # Prepare the final message (potentially with image)
+        final_parts = []
+        
+        if messages:
+            final_parts.append(messages[-1]["content"])
+        
+        # Add image if present
+        if image_base64:
+            try:
+                pil_image = _decode_base64_image(image_base64)
+                final_parts.append(pil_image)
+            except Exception as img_ex:
+                logger.warning(f"Failed to decode image: {img_ex}")
+        
+        # Send message
+        response = chat.send_message(final_parts)
+        return response.text
+        
     except Exception as ex:
-        logger.warning(f"Groq request failed: {ex}")
-        return "I couldn't reach the assistant service. Please try again in a moment."
+        logger.warning(f"Gemini request failed: {ex}")
+        return "I couldn't process that. Please try again in a moment."
 
 
-async def _transcribe_audio(audio_file_path: str) -> str:
-    """Transcribe audio using Groq's Whisper API"""
-    if not GROQ_API_KEY:
+async def _transcribe_audio_gemini(audio_file_path: str) -> str:
+    """Transcribe audio using Gemini's native audio support"""
+    if not GEMINI_API_KEY:
         return "[Audio transcription unavailable]"
     
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    
     try:
-        with open(audio_file_path, 'rb') as f:
-            files = {'file': ('audio.webm', f, 'audio/webm')}
-            data = {
-                'model': 'whisper-large-v3',
-                'language': 'en',
-                'response_format': 'json'
-            }
-            
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(url, headers=headers, files=files, data=data)
-                r.raise_for_status()
-                result = r.json()
-                return result.get('text', '').strip()
+        # Upload audio file to Gemini
+        audio_file = genai.upload_file(audio_file_path)
+        
+        # Use Gemini to transcribe
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        response = model.generate_content([
+            "Please transcribe this audio exactly as spoken. Only provide the transcription, no additional commentary.",
+            audio_file
+        ])
+        
+        # Delete the uploaded file
+        audio_file.delete()
+        
+        return response.text.strip()
+        
     except Exception as ex:
         logger.warning(f"Audio transcription failed: {ex}")
         return "[Could not transcribe audio]"
@@ -149,7 +172,7 @@ async def mark_chat(request: Request, body: Dict[str, Any] = Body(...)):
         return JSONResponse({"error": "no valid messages"}, status_code=400)
 
     # Pass image to chat function if present
-    reply = await _groq_chat(safe_msgs, image_base64=image_data)
+    reply = await _gemini_chat(safe_msgs, image_base64=image_data)
     return {"reply": reply}
 
 
@@ -178,7 +201,7 @@ async def mark_chat_audio(
             tmp.write(content)
         
         # Transcribe audio
-        transcription = await _transcribe_audio(temp_file)
+        transcription = await _transcribe_audio_gemini(temp_file)
         
         if not transcription or transcription.startswith('['):
             return JSONResponse({"error": "transcription_failed"}, status_code=500)
@@ -198,7 +221,7 @@ async def mark_chat_audio(
         safe_msgs.append({"role": "user", "content": transcription})
         
         # Get AI response
-        reply = await _groq_chat(safe_msgs)
+        reply = await _gemini_chat(safe_msgs)
         
         return {
             "reply": reply,
