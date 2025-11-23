@@ -482,24 +482,123 @@ async def affiliates_policy():
     }
 
 @router.get("/stats")
-async def affiliates_stats(request: Request):
-    """Return aggregated stats for the authenticated affiliate."""
+async def affiliates_stats(request: Request, range: str = "all"):
+    """Return aggregated stats for the authenticated affiliate, optionally filtered by date range."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
-        stats = read_json_key(_stats_key(uid)) or {}
-        # Fill defaults so the dashboard can render cleanly
+        from datetime import timedelta
+        
+        # Map range values to days
+        range_to_days = {
+            '7d': 7,
+            '30d': 30,
+            '90d': 90,
+            'all': None
+        }
+        
+        days = range_to_days.get(range, None)
+        
+        # If 'all' or invalid range, return all-time stats from JSON
+        if days is None:
+            stats = read_json_key(_stats_key(uid)) or {}
+            return {
+                "clicks": int(stats.get("clicks") or 0),
+                "signups": int(stats.get("signups") or 0),
+                "conversions": int(stats.get("conversions") or 0),
+                "gross_cents": int(stats.get("gross_cents") or 0),
+                "payout_cents": int(stats.get("payout_cents") or 0),
+                "currency": (stats.get("currency") or "usd").lower(),
+                "last_click_at": stats.get("last_click_at"),
+                "last_signup_at": stats.get("last_signup_at"),
+                "last_conversion_at": stats.get("last_conversion_at"),
+            }
+        
+        # For specific ranges, query Firestore for date-filtered data
+        _fs = _get_fs_client()
+        if not _fs:
+            # Fallback to all-time stats if Firestore unavailable
+            stats = read_json_key(_stats_key(uid)) or {}
+            return {
+                "clicks": int(stats.get("clicks") or 0),
+                "signups": int(stats.get("signups") or 0),
+                "conversions": int(stats.get("conversions") or 0),
+                "gross_cents": int(stats.get("gross_cents") or 0),
+                "payout_cents": int(stats.get("payout_cents") or 0),
+                "currency": "usd",
+            }
+        
+        # Calculate cutoff date
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        
+        # Initialize stats
+        signups_count = 0
+        conversions_count = 0
+        gross_cents = 0
+        payout_cents = 0
+        last_signup_at = None
+        last_conversion_at = None
+        
+        # Get signups from affiliate_attributions
+        try:
+            attrs_ref = _fs.collection('affiliate_attributions')\
+                .where('affiliate_uid', '==', uid)\
+                .where('verified', '==', True)\
+                .where('attributed_at', '>=', cutoff)\
+                .stream()
+            
+            for doc in attrs_ref:
+                signups_count += 1
+                data = doc.to_dict()
+                verified_at = data.get('verified_at') or data.get('attributed_at')
+                if verified_at:
+                    if hasattr(verified_at, 'seconds'):
+                        verified_at = datetime.fromtimestamp(verified_at.seconds)
+                    elif isinstance(verified_at, str):
+                        verified_at = datetime.fromisoformat(verified_at.replace('Z', '+00:00'))
+                    if not last_signup_at or verified_at > last_signup_at:
+                        last_signup_at = verified_at
+        except Exception as e:
+            logger.warning(f"[affiliates.stats] failed to fetch signups: {e}")
+        
+        # Get conversions from affiliate_conversions
+        try:
+            convs_ref = _fs.collection('affiliate_conversions')\
+                .where('affiliate_uid', '==', uid)\
+                .where('createdAt', '>=', cutoff)\
+                .stream()
+            
+            for doc in convs_ref:
+                conversions_count += 1
+                data = doc.to_dict()
+                gross_cents += int(data.get('amount_cents') or 0)
+                payout_cents += int(data.get('payout_cents') or 0)
+                
+                conv_date = data.get('conversion_date') or data.get('createdAt')
+                if conv_date:
+                    if hasattr(conv_date, 'seconds'):
+                        conv_date = datetime.fromtimestamp(conv_date.seconds)
+                    elif isinstance(conv_date, str):
+                        conv_date = datetime.fromisoformat(conv_date.replace('Z', '+00:00'))
+                    if not last_conversion_at or conv_date > last_conversion_at:
+                        last_conversion_at = conv_date
+        except Exception as e:
+            logger.warning(f"[affiliates.stats] failed to fetch conversions: {e}")
+        
+        # Note: Clicks aren't stored with timestamps in Firestore, so we show all-time clicks
+        all_time_stats = read_json_key(_stats_key(uid)) or {}
+        clicks_count = int(all_time_stats.get("clicks") or 0)
+        
         return {
-            "clicks": int(stats.get("clicks") or 0),
-            "signups": int(stats.get("signups") or 0),
-            "conversions": int(stats.get("conversions") or 0),
-            "gross_cents": int(stats.get("gross_cents") or 0),
-            "payout_cents": int(stats.get("payout_cents") or 0),
-            "currency": (stats.get("currency") or "usd").lower(),
-            "last_click_at": stats.get("last_click_at"),
-            "last_signup_at": stats.get("last_signup_at"),
-            "last_conversion_at": stats.get("last_conversion_at"),
+            "clicks": clicks_count,  # All-time clicks (no date filtering available)
+            "signups": signups_count,
+            "conversions": conversions_count,
+            "gross_cents": gross_cents,
+            "payout_cents": payout_cents,
+            "currency": "usd",
+            "last_signup_at": last_signup_at.isoformat() if last_signup_at else None,
+            "last_conversion_at": last_conversion_at.isoformat() if last_conversion_at else None,
         }
     except Exception as ex:
         logger.exception(f"[affiliates.stats] {ex}")

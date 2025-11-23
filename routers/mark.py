@@ -1,6 +1,7 @@
 import os
+import tempfile
 from typing import Any, Dict, List
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Request, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 import httpx
 
@@ -37,20 +38,45 @@ PHOTOGRAPHY_SYSTEM_PROMPT = (
 )
 
 
-async def _groq_chat(messages: List[Dict[str, str]]) -> str:
+async def _groq_chat(messages: List[Dict[str, str]], image_base64: str = None) -> str:
     if not GROQ_API_KEY:
         return "Mark is not configured. Please set GROQ_API_KEY."
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    model = os.getenv("GROQ_MODEL_MARK", "llama-3.1-8b-instant")
+    
+    # Use vision model if image is present, otherwise use text model
+    if image_base64:
+        model = "llama-3.2-90b-vision-preview"  # Vision-capable model
+    else:
+        model = os.getenv("GROQ_MODEL_MARK", "llama-3.1-8b-instant")
+    
+    # Format messages for vision model if image present
+    formatted_messages = [{"role": "system", "content": PHOTOGRAPHY_SYSTEM_PROMPT}]
+    
+    for i, msg in enumerate(messages):
+        # Only add image to the LAST user message
+        is_last_user_msg = (i == len(messages) - 1 and msg.get("role") == "user")
+        
+        if image_base64 and is_last_user_msg:
+            # For the last user message with image, use vision format
+            formatted_messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": msg["content"]},
+                    {"type": "image_url", "image_url": {"url": image_base64}}
+                ]
+            })
+        else:
+            formatted_messages.append(msg)
+    
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": PHOTOGRAPHY_SYSTEM_PROMPT}] + messages,
+        "messages": formatted_messages,
         "temperature": 0.3,
-        "max_tokens": 1200,
+        "max_tokens": 1500,
     }
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=90) as client:
             r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
             data = r.json()
@@ -61,27 +87,135 @@ async def _groq_chat(messages: List[Dict[str, str]]) -> str:
         return "I couldn't reach the assistant service. Please try again in a moment."
 
 
+async def _transcribe_audio(audio_file_path: str) -> str:
+    """Transcribe audio using Groq's Whisper API"""
+    if not GROQ_API_KEY:
+        return "[Audio transcription unavailable]"
+    
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    
+    try:
+        with open(audio_file_path, 'rb') as f:
+            files = {'file': ('audio.webm', f, 'audio/webm')}
+            data = {
+                'model': 'whisper-large-v3',
+                'language': 'en',
+                'response_format': 'json'
+            }
+            
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(url, headers=headers, files=files, data=data)
+                r.raise_for_status()
+                result = r.json()
+                return result.get('text', '').strip()
+    except Exception as ex:
+        logger.warning(f"Audio transcription failed: {ex}")
+        return "[Could not transcribe audio]"
+
+
 @router.post("/chat")
 async def mark_chat(request: Request, body: Dict[str, Any] = Body(...)):
     raw_msgs = body.get("messages")
+    image_data = body.get("image")  # base64 image if present
+    
     if not isinstance(raw_msgs, list) or not raw_msgs:
         return JSONResponse({"error": "messages required"}, status_code=400)
 
-    # messages format: [{ role: 'user'|'assistant'|'system', content: string }]
+    # messages format: [{ role: 'user'|'assistant'|'system', content: string, image?: string }]
     safe_msgs: List[Dict[str, str]] = []
+    has_image_in_history = False
+    
     for m in raw_msgs:
         try:
             role = str(m.get("role") or "").strip()
             content = str(m.get("content") or "").strip()
+            img = m.get("image")
+            
             if role in ("user", "assistant") and content:
+                # If there's an image, add context about it
+                if img and role == "user":
+                    has_image_in_history = True
+                    # Add note about image for context
+                    if "[Image]" in content or "📷" in content:
+                        content = content.replace("📷 [Image]", "I've shared an image. ")
+                    content = f"[User shared a photography image] {content}"
+                
                 safe_msgs.append({"role": role, "content": content})
         except Exception:
             continue
+    
     if not safe_msgs:
         return JSONResponse({"error": "no valid messages"}, status_code=400)
 
-    reply = await _groq_chat(safe_msgs)
+    # Pass image to chat function if present
+    reply = await _groq_chat(safe_msgs, image_base64=image_data)
     return {"reply": reply}
+
+
+@router.post("/chat-audio")
+async def mark_chat_audio(
+    request: Request,
+    audio: UploadFile = File(...),
+    messages: str = Form(...)
+):
+    """Handle audio messages - transcribe and respond"""
+    
+    # Parse messages JSON
+    import json
+    try:
+        raw_msgs = json.loads(messages)
+    except Exception:
+        return JSONResponse({"error": "invalid messages format"}, status_code=400)
+    
+    # Save audio to temporary file
+    temp_file = None
+    try:
+        # Create temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp:
+            temp_file = tmp.name
+            content = await audio.read()
+            tmp.write(content)
+        
+        # Transcribe audio
+        transcription = await _transcribe_audio(temp_file)
+        
+        if not transcription or transcription.startswith('['):
+            return JSONResponse({"error": "transcription_failed"}, status_code=500)
+        
+        # Build message history with transcribed text
+        safe_msgs: List[Dict[str, str]] = []
+        for m in raw_msgs:
+            try:
+                role = str(m.get("role") or "").strip()
+                content = str(m.get("content") or "").strip()
+                if role in ("user", "assistant") and content:
+                    safe_msgs.append({"role": role, "content": content})
+            except Exception:
+                continue
+        
+        # Add transcribed message
+        safe_msgs.append({"role": "user", "content": transcription})
+        
+        # Get AI response
+        reply = await _groq_chat(safe_msgs)
+        
+        return {
+            "reply": reply,
+            "transcription": transcription
+        }
+        
+    except Exception as ex:
+        logger.warning(f"Audio chat failed: {ex}")
+        return JSONResponse({"error": "processing_failed"}, status_code=500)
+    
+    finally:
+        # Clean up temp file
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.unlink(temp_file)
+            except Exception:
+                pass
 
 
 # ---------------- Chat persistence (Firestore) ----------------
