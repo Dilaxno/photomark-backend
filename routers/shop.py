@@ -5,6 +5,8 @@ import os
 import uuid
 import base64
 from datetime import datetime
+import boto3
+from botocore.client import Config
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
 
@@ -80,32 +82,67 @@ async def upload_shop_asset(
         unique_id = str(uuid.uuid4())[:8]
         filename = f"{type}_{timestamp}_{unique_id}.{file_extension}"
 
-        # Save the file to static directory for persistent URL
-        # Path: static/shops/<shop_id>/<filename>
+        # Try to upload to Cloudflare R2 (S3-compatible)
+        r2_url = None
         try:
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            static_dir = os.path.join(base_dir, 'static')
-            target_dir = os.path.join(static_dir, 'shops', shop_id)
-            os.makedirs(target_dir, exist_ok=True)
+            R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID', '').strip()
+            R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID', '').strip()
+            R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY', '').strip()
+            R2_BUCKET = os.getenv('R2_BUCKET', '').strip()
+            R2_PUBLIC_BASE_URL = os.getenv('R2_PUBLIC_BASE_URL', '').rstrip('/') if os.getenv('R2_PUBLIC_BASE_URL') else ''
 
-            file_path = os.path.join(target_dir, filename)
-            with open(file_path, 'wb') as f:
-                f.write(contents)
+            if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_BUCKET and R2_PUBLIC_BASE_URL:
+                endpoint_url = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+                s3 = boto3.client(
+                    's3',
+                    aws_access_key_id=R2_ACCESS_KEY_ID,
+                    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+                    endpoint_url=endpoint_url,
+                    config=Config(signature_version='s3v4'),
+                    region_name='auto'
+                )
 
-            static_url = f"/static/shops/{shop_id}/{filename}"
-        except Exception as write_err:
-            print(f"[SHOP UPLOAD] WARNING: Failed to persist file to static dir: {write_err}")
-            static_url = None
+                object_key = f"shops/{shop_id}/{filename}"
+                s3.put_object(
+                    Bucket=R2_BUCKET,
+                    Key=object_key,
+                    Body=contents,
+                    ContentType=file.content_type,
+                )
+                r2_url = f"{R2_PUBLIC_BASE_URL}/{object_key}"
+                print(f"[SHOP UPLOAD] Uploaded to R2: {r2_url}")
+            else:
+                print("[SHOP UPLOAD] R2 env vars missing; skipping R2 upload.")
+        except Exception as r2_err:
+            print(f"[SHOP UPLOAD] WARNING: R2 upload failed: {r2_err}")
+
+        # Fallback: save the file to static directory for persistent URL
+        # Path: static/shops/<shop_id>/<filename>
+        static_url = None
+        if not r2_url:
+            try:
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                static_dir = os.path.join(base_dir, 'static')
+                target_dir = os.path.join(static_dir, 'shops', shop_id)
+                os.makedirs(target_dir, exist_ok=True)
+
+                file_path = os.path.join(target_dir, filename)
+                with open(file_path, 'wb') as f:
+                    f.write(contents)
+
+                static_url = f"/static/shops/{shop_id}/{filename}"
+            except Exception as write_err:
+                print(f"[SHOP UPLOAD] WARNING: Failed to persist file to static dir: {write_err}")
 
         # Generate base64 data URL for immediate preview (do not store in DB)
         base64_data = base64.b64encode(contents).decode('utf-8')
         data_url = f"data:{file.content_type};base64,{base64_data}"
 
-        print(f"[SHOP UPLOAD] Success - Generated: {filename} (static: {bool(static_url)})")
+        print(f"[SHOP UPLOAD] Success - Generated: {filename} (r2: {bool(r2_url)}, static: {bool(static_url)})")
 
         return JSONResponse({
             'success': True,
-            'url': static_url or data_url,  # prefer static URL to keep Firestore docs small
+            'url': r2_url or static_url or data_url,  # prefer R2 URL to keep Firestore docs small
             'preview_url': data_url,
             'filename': filename,
             'type': type,
