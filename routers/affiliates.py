@@ -22,11 +22,24 @@ def _update_affiliate_profile_fs(affiliate_uid: str, stats: dict):
         if not _fs or not affiliate_uid:
             return
         front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        
+        # Fetch actual referral code from affiliate profile
+        referral_code = affiliate_uid  # default to uid
+        referral_link = f"{front}/?ref={affiliate_uid}"
+        try:
+            aff_doc = _fs.collection('affiliate_profiles').document(affiliate_uid).get()
+            if aff_doc.exists:
+                aff_data = aff_doc.to_dict()
+                referral_code = aff_data.get('referralCode') or affiliate_uid
+                referral_link = aff_data.get('referralLink') or f"{front}/?ref={referral_code}"
+        except Exception:
+            pass
+        
         profile = {
             'affiliate': {
                 'uid': affiliate_uid,
-                'referralCode': affiliate_uid,  # default to uid; can be replaced with slug-uid if available
-                'referralLink': f"{front}/?ref={affiliate_uid}",
+                'referralCode': referral_code,
+                'referralLink': referral_link,
                 'stats': {
                     'clicks': int(stats.get('clicks') or 0),
                     'signups': int(stats.get('signups') or 0),
