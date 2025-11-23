@@ -571,7 +571,8 @@ async def auth_email_verification_confirm(token: str, request: Request):
 
     fe = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
     if custom_jwt:
-        return RedirectResponse(url=f"{fe}/#verify-success?ct={custom_jwt}", status_code=302)
+        # Use path-based route instead of hash so clients that strip '#' still work
+        return RedirectResponse(url=f"{fe}/verify-success?ct={custom_jwt}", status_code=302)
 
     # Fallback success page
     body = "<h1>Email verified</h1><p>Your email has been verified successfully.</p>"
