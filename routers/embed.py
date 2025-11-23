@@ -4,6 +4,7 @@ import json, os
 from datetime import datetime
 from routers.photos import _build_manifest
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
+from typing import Tuple
 
 router = APIRouter(prefix="/embed", tags=["embed"])
 
@@ -214,4 +215,88 @@ def embed_myuploads(
             except:
                 n = 10
             photos = photos_all[:max(1, n)]
-    return _html_page(_render_html({"photos": photos}, theme, bg, "Photomark My Uploads"))            
+    return _html_page(_render_html({"photos": photos}, theme, bg, "Photomark My Uploads"))
+
+
+def _vault_key(uid: str, vault: str) -> Tuple[str, str]:
+    safe = "".join(c for c in vault if c.isalnum() or c in ("-", "_", " ")).strip().replace(" ", "_")
+    if not safe:
+        raise ValueError("invalid vault name")
+    return f"users/{uid}/vaults/{safe}.json", safe
+
+
+def _read_vault(uid: str, vault: str) -> list[str]:
+    key, _ = _vault_key(uid, vault)
+    try:
+        if s3 and R2_BUCKET:
+            obj = s3.Object(R2_BUCKET, key)
+            data = obj.get()["Body"].read()
+            doc = json.loads(data.decode("utf-8"))
+            return doc.get("keys") or []
+        else:
+            path = os.path.join(static_dir, key)
+            if not os.path.exists(path):
+                return []
+            with open(path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+                return doc.get("keys") or []
+    except Exception:
+        return []
+
+
+def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
+    if R2_PUBLIC_BASE_URL:
+        return f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+    if R2_CUSTOM_DOMAIN and s3_presign_client:
+        return s3_presign_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": R2_BUCKET, "Key": key},
+            ExpiresIn=expires_in,
+        )
+    if s3:
+        return s3.meta.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": R2_BUCKET, "Key": key},
+            ExpiresIn=expires_in,
+        )
+    return ""
+
+
+@router.get("/vault")
+def embed_vault(
+    uid: str = Query(..., min_length=3, max_length=64),
+    vault: str = Query(..., min_length=1, max_length=128),
+    limit: str = Query("all"),
+    theme: str = Query("dark"),
+    bg: str | None = Query(None, min_length=1, max_length=32),
+    view: str = Query("grid"),
+):
+    """Embed a vault by name"""
+    try:
+        keys = _read_vault(uid, vault)
+        items: list[dict] = []
+        
+        for key in keys:
+            try:
+                if key.lower().endswith('.json'):
+                    continue
+                url = _get_url_for_key(key, expires_in=60 * 60)
+                name = os.path.basename(key)
+                items.append({"key": key, "url": url, "name": name})
+            except Exception:
+                continue
+        
+        photos_all = [{"url": it["url"], "name": it["name"], "key": it["key"]} for it in items]
+        
+        if limit.lower() == "all":
+            photos = photos_all
+        else:
+            try:
+                n = int(limit)
+            except:
+                n = 10
+            photos = photos_all[:max(1, n)]
+        
+        return _html_page(_render_html({"photos": photos}, theme, bg, f"Photomark - {vault}"))
+    except Exception as ex:
+        return HTMLResponse(content=f"<!doctype html><html><body><p>Error loading vault: {str(ex)}</p></body></html>", status_code=500)
