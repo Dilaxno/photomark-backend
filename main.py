@@ -17,7 +17,7 @@ warnings.filterwarnings(
 # Routers
 from routers import (
     images, photos, auth, convert, vaults, voice, collab,
-    gallery_assistant, color_grading, admin, mark, smart_resize,
+    gallery_assistant, color_grading, admin, smart_resize,
     shop,
 )  # type: ignore
 
@@ -74,8 +74,7 @@ app.include_router(collab.router)
 app.include_router(gallery_assistant.router)
 # Color grading (LUT)
 app.include_router(color_grading.router)
-app.include_router(mark.router)
-# Mark agent with function calling
+# Mark agent with function calling and vision support
 try:
     from routers import mark_agent  # noqa: E402
     app.include_router(mark_agent.router)

@@ -4,13 +4,20 @@ Uses Groq API with llama-3.3-70b-versatile for natural language understanding
 """
 import os
 import json
+import io
+import base64
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Request, UploadFile, File
 from fastapi.responses import JSONResponse
-import httpx
+import google.generativeai as genai
+from PIL import Image
 
-from core.config import logger, GROQ_API_KEY
+from core.config import logger, GEMINI_API_KEY
 from core.auth import get_uid_from_request, resolve_workspace_uid
+
+# Configure Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 router = APIRouter(prefix="/api/mark/agent", tags=["mark_agent"])
 
@@ -180,54 +187,93 @@ CONTEXT AWARENESS:
 Be helpful, concise, and ALWAYS prioritize safety for destructive actions."""
 
 
-async def _groq_function_call(messages: List[Dict[str, str]], functions: List[Dict]) -> Dict[str, Any]:
-    """Call Groq API with function calling support"""
-    if not GROQ_API_KEY:
-        return {"type": "error", "message": "Agent is not configured. Please set GROQ_API_KEY."}
-    
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    model = os.getenv("GROQ_MODEL_AGENT", "llama-3.3-70b-versatile")
-    
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": AGENT_SYSTEM_PROMPT}] + messages,
-        "tools": functions,
-        "tool_choice": "auto",
-        "temperature": 0.1,  # Low temperature for more predictable function calling
-        "max_tokens": 800,
-    }
+def _decode_base64_image(base64_str: str) -> Image.Image:
+    """Decode base64 image string to PIL Image"""
+    if ',' in base64_str:
+        base64_str = base64_str.split(',', 1)[1]
+    image_data = base64.b64decode(base64_str)
+    return Image.open(io.BytesIO(image_data))
+
+
+async def _gemini_function_call(messages: List[Dict[str, str]], functions: List[Dict], image_base64: str = None) -> Dict[str, Any]:
+    """Call Gemini API with function calling support and image analysis"""
+    if not GEMINI_API_KEY:
+        return {"type": "error", "message": "Agent is not configured. Please set GEMINI_API_KEY."}
     
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            
-            # Check if model wants to call a function
-            tool_calls = message.get("tool_calls")
-            if tool_calls and len(tool_calls) > 0:
-                tool_call = tool_calls[0]
-                function_data = tool_call.get("function", {})
-                return {
-                    "type": "function_call",
-                    "function_name": function_data.get("name"),
-                    "arguments": json.loads(function_data.get("arguments", "{}")),
-                    "tool_call_id": tool_call.get("id")
-                }
-            
-            # Regular text response
-            content = message.get("content", "")
-            return {
-                "type": "message",
-                "content": content or "I'm not sure how to help with that."
-            }
-            
+        # Convert function definitions to Gemini format
+        gemini_tools = []
+        for func in functions:
+            func_def = func["function"]
+            gemini_tools.append(genai.protos.Tool(
+                function_declarations=[
+                    genai.protos.FunctionDeclaration(
+                        name=func_def["name"],
+                        description=func_def["description"],
+                        parameters=genai.protos.Schema(
+                            type=genai.protos.Type.OBJECT,
+                            properties={
+                                k: genai.protos.Schema(
+                                    type=genai.protos.Type.STRING if v.get("type") == "string" else genai.protos.Type.BOOLEAN,
+                                    description=v.get("description", ""),
+                                    enum=v.get("enum", [])
+                                )
+                                for k, v in func_def["parameters"]["properties"].items()
+                            },
+                            required=func_def["parameters"].get("required", [])
+                        )
+                    )
+                ]
+            ))
+        
+        model = genai.GenerativeModel('gemini-1.5-pro', tools=gemini_tools)
+        
+        # Build conversation with system prompt
+        chat_history = []
+        chat_history.append({"role": "user", "parts": [AGENT_SYSTEM_PROMPT]})
+        chat_history.append({"role": "model", "parts": ["Understood. I'm Mark, your AI assistant. I can help with app navigation and actions."]})
+        
+        # Add message history
+        for msg in messages:
+            role = "model" if msg.get("role") == "assistant" else "user"
+            chat_history.append({"role": role, "parts": [msg["content"]]})
+        
+        # Start chat
+        chat = model.start_chat(history=chat_history[:-1])
+        
+        # Prepare final message with optional image
+        final_parts = []
+        if messages:
+            final_parts.append(messages[-1]["content"])
+        
+        # Add image if present
+        if image_base64:
+            try:
+                pil_image = _decode_base64_image(image_base64)
+                final_parts.append(pil_image)
+            except Exception as img_ex:
+                logger.warning(f"Failed to decode image: {img_ex}")
+        
+        # Send message
+        response = chat.send_message(final_parts)
+        
+        # Check for function call
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    fc = part.function_call
+                    return {
+                        "type": "function_call",
+                        "function_name": fc.name,
+                        "arguments": dict(fc.args)
+                    }
+        
+        # Regular text response
+        content = response.text if response.text else "I'm not sure how to help with that."
+        return {"type": "message", "content": content}
+        
     except Exception as ex:
-        logger.error(f"Groq function call failed: {ex}")
+        logger.error(f"Gemini function call failed: {ex}")
         return {"type": "error", "message": "I couldn't process your request. Please try again."}
 
 
@@ -278,8 +324,10 @@ async def agent_chat(request: Request, body: Dict[str, Any] = Body(...)):
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    # Parse messages
+    # Parse messages and image
     raw_msgs = body.get("messages")
+    image_data = body.get("image")  # base64 image if present
+    
     if not isinstance(raw_msgs, list) or not raw_msgs:
         return JSONResponse({"error": "messages required"}, status_code=400)
     
@@ -296,8 +344,8 @@ async def agent_chat(request: Request, body: Dict[str, Any] = Body(...)):
     if not safe_msgs:
         return JSONResponse({"error": "no valid messages"}, status_code=400)
     
-    # Call LLM with function calling
-    result = await _groq_function_call(safe_msgs, AGENT_FUNCTIONS)
+    # Call LLM with function calling and optional image
+    result = await _gemini_function_call(safe_msgs, AGENT_FUNCTIONS, image_base64=image_data)
     
     if result["type"] == "error":
         return {"type": "error", "message": result["message"]}
@@ -341,3 +389,61 @@ async def agent_chat(request: Request, body: Dict[str, Any] = Body(...)):
         }
     
     return {"type": "error", "message": "Unexpected response from agent"}
+
+
+@router.post("/chat-audio")
+async def agent_chat_audio(
+    request: Request,
+    audio: UploadFile = File(...),
+    messages: str = Body(...)
+):
+    """Transcribe audio using Gemini and add as a user message"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "Gemini not configured"}, status_code=503)
+    
+    # Parse messages
+    try:
+        msgs = json.loads(messages) if isinstance(messages, str) else messages
+    except Exception:
+        msgs = []
+    
+    # Save audio file temporarily
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+        content = await audio.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+    
+    try:
+        # Upload and transcribe with Gemini
+        audio_file = genai.upload_file(tmp_path)
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        response = model.generate_content([
+            "Transcribe this audio exactly as spoken. Only output the transcription, nothing else.",
+            audio_file
+        ])
+        
+        transcription = response.text.strip()
+        
+        # Clean up
+        try:
+            genai.delete_file(audio_file.name)
+        except Exception:
+            pass
+        
+        return {"transcription": transcription or "[Could not transcribe]"}
+        
+    except Exception as ex:
+        logger.error(f"Audio transcription failed: {ex}")
+        return JSONResponse({"error": "Transcription failed"}, status_code=500)
+    
+    finally:
+        # Delete temp file
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
