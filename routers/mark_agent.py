@@ -1,6 +1,6 @@
 """
 Mark Agent - LLM-powered function-calling agent for app actions
-Uses Groq API with llama-3.3-70b-versatile for natural language understanding
+Uses Google Gemini 2.0 Flash with vision, audio, and function calling support
 """
 import os
 import json
@@ -226,7 +226,7 @@ async def _gemini_function_call(messages: List[Dict[str, str]], functions: List[
                 ]
             ))
         
-        model = genai.GenerativeModel('gemini-1.5-flash-latest', tools=gemini_tools)
+        model = genai.GenerativeModel('gemini-2.0-flash', tools=gemini_tools)
         
         # Build conversation with system prompt
         chat_history = []
@@ -421,7 +421,7 @@ async def agent_chat_audio(
     try:
         # Upload and transcribe with Gemini
         audio_file = genai.upload_file(tmp_path)
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         response = model.generate_content([
             "Transcribe this audio exactly as spoken. Only output the transcription, nothing else.",
             audio_file
