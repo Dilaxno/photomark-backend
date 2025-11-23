@@ -491,3 +491,91 @@ async def affiliates_stats(request: Request):
     except Exception as ex:
         logger.exception(f"[affiliates.stats] {ex}")
         return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.get("/stats/daily")
+async def affiliates_stats_daily(request: Request, days: int = 30):
+    """Return daily breakdown of affiliate stats for the last N days."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        days = max(1, min(days, 90))  # Limit between 1 and 90 days
+        
+        # Initialize daily buckets
+        from datetime import datetime, timedelta
+        daily_stats = {}
+        today = datetime.utcnow().date()
+        
+        for i in range(days):
+            date = today - timedelta(days=i)
+            date_str = date.isoformat()
+            daily_stats[date_str] = {
+                'date': date_str,
+                'clicks': 0,
+                'signups': 0,
+                'conversions': 0,
+                'gross_cents': 0
+            }
+        
+        # Try to get data from Firestore if available
+        _fs = _get_fs_client()
+        if _fs:
+            # Get conversions from affiliate_conversions collection
+            try:
+                cutoff = datetime.utcnow() - timedelta(days=days)
+                conversions_ref = _fs.collection('affiliate_conversions')\
+                    .where('affiliate_uid', '==', uid)\
+                    .where('createdAt', '>=', cutoff)\
+                    .stream()
+                
+                for doc in conversions_ref:
+                    data = doc.to_dict()
+                    conv_date = data.get('conversion_date') or data.get('createdAt')
+                    if conv_date:
+                        # Handle Firestore timestamp
+                        if hasattr(conv_date, 'seconds'):
+                            conv_date = datetime.fromtimestamp(conv_date.seconds)
+                        elif isinstance(conv_date, str):
+                            conv_date = datetime.fromisoformat(conv_date.replace('Z', '+00:00'))
+                        
+                        date_str = conv_date.date().isoformat()
+                        if date_str in daily_stats:
+                            daily_stats[date_str]['conversions'] += 1
+                            daily_stats[date_str]['gross_cents'] += int(data.get('amount_cents') or 0)
+            except Exception as e:
+                logger.warning(f"[affiliates.stats.daily] failed to fetch conversions: {e}")
+            
+            # Get signups from affiliate_attributions collection
+            try:
+                cutoff = datetime.utcnow() - timedelta(days=days)
+                attrs_ref = _fs.collection('affiliate_attributions')\
+                    .where('affiliate_uid', '==', uid)\
+                    .where('verified', '==', True)\
+                    .where('attributed_at', '>=', cutoff)\
+                    .stream()
+                
+                for doc in attrs_ref:
+                    data = doc.to_dict()
+                    attr_date = data.get('verified_at') or data.get('attributed_at')
+                    if attr_date:
+                        # Handle Firestore timestamp
+                        if hasattr(attr_date, 'seconds'):
+                            attr_date = datetime.fromtimestamp(attr_date.seconds)
+                        elif isinstance(attr_date, str):
+                            attr_date = datetime.fromisoformat(attr_date.replace('Z', '+00:00'))
+                        
+                        date_str = attr_date.date().isoformat()
+                        if date_str in daily_stats:
+                            daily_stats[date_str]['signups'] += 1
+            except Exception as e:
+                logger.warning(f"[affiliates.stats.daily] failed to fetch signups: {e}")
+        
+        # Note: Clicks are not tracked daily in Firestore, so we can't provide historical click data
+        # Return sorted by date (oldest first)
+        result = sorted(daily_stats.values(), key=lambda x: x['date'])
+        return {"daily_stats": result}
+        
+    except Exception as ex:
+        logger.exception(f"[affiliates.stats.daily] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
