@@ -2,6 +2,7 @@
 Mark Agent - LLM-powered function-calling agent for app actions
 Uses Google Gemini 2.0 Flash with vision, audio, and function calling support
 """
+
 import os
 import json
 import io
