@@ -74,22 +74,39 @@ async def upload_shop_asset(
                 detail=f"File too large. Maximum size is {max_mb}MB"
             )
         
-        # Generate base64 data URL for immediate use
-        # This allows instant preview without cloud storage
-        base64_data = base64.b64encode(contents).decode('utf-8')
-        data_url = f"data:{file.content_type};base64,{base64_data}"
-        
         # Generate a unique filename for reference
         file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         unique_id = str(uuid.uuid4())[:8]
         filename = f"{type}_{timestamp}_{unique_id}.{file_extension}"
-        
-        print(f"[SHOP UPLOAD] Success - Generated: {filename}")
-        
+
+        # Save the file to static directory for persistent URL
+        # Path: static/shops/<shop_id>/<filename>
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            static_dir = os.path.join(base_dir, 'static')
+            target_dir = os.path.join(static_dir, 'shops', shop_id)
+            os.makedirs(target_dir, exist_ok=True)
+
+            file_path = os.path.join(target_dir, filename)
+            with open(file_path, 'wb') as f:
+                f.write(contents)
+
+            static_url = f"/static/shops/{shop_id}/{filename}"
+        except Exception as write_err:
+            print(f"[SHOP UPLOAD] WARNING: Failed to persist file to static dir: {write_err}")
+            static_url = None
+
+        # Generate base64 data URL for immediate preview (do not store in DB)
+        base64_data = base64.b64encode(contents).decode('utf-8')
+        data_url = f"data:{file.content_type};base64,{base64_data}"
+
+        print(f"[SHOP UPLOAD] Success - Generated: {filename} (static: {bool(static_url)})")
+
         return JSONResponse({
             'success': True,
-            'url': data_url,
+            'url': static_url or data_url,  # prefer static URL to keep Firestore docs small
+            'preview_url': data_url,
             'filename': filename,
             'type': type,
             'size': file_size,
