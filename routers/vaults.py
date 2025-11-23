@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
-from core.auth import get_uid_from_request, get_user_email_from_uid, get_fs_client
+from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
 
