@@ -131,6 +131,23 @@ async def get_entitlement(request: Request, db: Session = Depends(get_db)):
         logger.warning(f"entitlement check failed for {uid}: {ex}")
         return {"isPaid": False, "plan": "free"}
 
+@router.get("/subscription")
+async def get_subscription(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "NotFound"}, status_code=404)
+        return {
+            "subscription_id": user.subscription_id or "",
+            "status": (user.subscription_status or user.plan or "inactive")
+        }
+    except Exception as ex:
+        logger.warning(f"subscription read failed for {uid}: {ex}")
+        return JSONResponse({"error": "ServerError"}, status_code=500)
+
 
 @router.post("/webhooks/dodo")
 async def dodo_webhook(request: Request):
