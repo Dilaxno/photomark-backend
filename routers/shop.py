@@ -464,6 +464,35 @@ async def remove_custom_domain(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to remove domain: {str(e)}")
 
 
+@router.post('/domain/enable')
+async def enable_custom_domain(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        dom = dict(shop.domain or {})
+        hostname = str(dom.get('hostname') or '').strip().lower()
+        if not hostname:
+            raise HTTPException(status_code=400, detail="No hostname configured")
+        dns_ok = bool(dom.get('dnsVerified'))
+        ssl_ok = str(dom.get('sslStatus') or '').strip().lower() == 'active'
+        if not (dns_ok and ssl_ok):
+            raise HTTPException(status_code=412, detail="domain_not_ready")
+        dom['enabled'] = True
+        shop.domain = dom
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "domain": shop.domain}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to enable domain: {str(e)}")
+
+
 @router.get('/domain/status')
 async def get_domain_status(
     request: Request,
