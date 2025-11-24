@@ -11,6 +11,7 @@ from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_
 from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
 from PIL import Image
+import mimetypes
 
 router = APIRouter(prefix="/api", tags=["photos"])
 
@@ -1132,6 +1133,56 @@ async def api_photos_download(request: Request, key: str):
         if not os.path.isfile(path):
             return JSONResponse({"error": "Not found"}, status_code=404)
         return FileResponse(path, filename=name, media_type="application/octet-stream")
+
+
+@router.get("/photos/presign/{key:path}")
+async def api_photos_presign(request: Request, key: str):
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+    key = (key or '').strip().lstrip('/')
+    if not key.startswith(f"users/{uid}/"):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    try:
+        url = _get_url_for_key(key, expires_in=3600)
+        if not url:
+            return JSONResponse({"error": "Unavailable"}, status_code=503)
+        return JSONResponse({"url": url})
+    except Exception as ex:
+        logger.exception(f"Presign error for {key}: {ex}")
+        return JSONResponse({"error": "Failed"}, status_code=500)
+
+
+@router.get("/photos/meta/{key:path}")
+async def api_photos_meta(request: Request, key: str):
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+    key = (key or '').strip().lstrip('/')
+    if not key.startswith(f"users/{uid}/"):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    if s3 and R2_BUCKET:
+        try:
+            head = s3.meta.client.head_object(Bucket=R2_BUCKET, Key=key)
+            ct = head.get('ContentType') or 'application/octet-stream'
+            size = int(head.get('ContentLength') or 0)
+            return JSONResponse({"type": ct, "size": size})
+        except Exception as ex:
+            logger.exception(f"Head error for {key}: {ex}")
+            return JSONResponse({"error": "Not found"}, status_code=404)
+    else:
+        path = os.path.join(static_dir, key)
+        if not os.path.isfile(path):
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        size = os.path.getsize(path)
+        ct, _ = mimetypes.guess_type(path)
+        return JSONResponse({"type": ct or 'application/octet-stream', "size": int(size)})
 
 
 
