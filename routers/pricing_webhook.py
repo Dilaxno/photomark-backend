@@ -826,6 +826,17 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             "allowed": allowed,
         }
 
+    # Cache the resolved plan against subscription/customer/email for future events that omit product details
+    try:
+        if sub_id:
+            write_json_key(f"pricing/cache/subscriptions/{sub_id}.json", {"uid": uid, "plan": plan, "email": ctx.get("email")})
+        if customer_id:
+            write_json_key(f"pricing/cache/customers/{customer_id}.json", {"uid": uid, "plan": plan, "email": ctx.get("email")})
+        if ctx.get("email"):
+            write_json_key(f"pricing/cache/emails/{(ctx.get('email') or '').lower()}", {"uid": uid, "plan": plan})
+    except Exception:
+        pass
+
     # --- Step 8: Persist plan to Neon (PostgreSQL) ---
     try:
         user = db.query(User).filter(User.uid == uid).first()
