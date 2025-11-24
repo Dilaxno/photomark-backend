@@ -151,8 +151,8 @@ async def smart_resize_upload(
     preset_quality: Optional[str] = Form(None),
 ):
     """
-    Process and upload resized outputs to storage per user at
-    users/{uid}/resized/YYYY/MM/DD/<base>-<stamp>-<preset>.jpg
+    Process and upload resized outputs into the user's gallery.
+    Writes to users/{uid}/watermarked/YYYY/MM/DD/<base>-<stamp>-<preset>-sr-o<orig>.jpg
     Returns list of uploaded file keys and URLs.
     """
     eff_uid, req_uid = resolve_workspace_uid(request)
@@ -180,6 +180,10 @@ async def smart_resize_upload(
                 continue
             img = _safe_open_image(raw)
             base = os.path.splitext(os.path.basename(uf.filename or 'image'))[0] or 'image'
+            orig_ext = (os.path.splitext(uf.filename or '')[1] or '.jpg').lower()
+            if orig_ext not in ('.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff'):
+                orig_ext = orig_ext if len(orig_ext) <= 6 and orig_ext.startswith('.') else '.bin'
+            oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
 
             for name, (w, h) in prs:
                 out_img = _cropper.crop_and_resize(img, w, h)
@@ -187,7 +191,7 @@ async def smart_resize_upload(
                 q_use = int(q_map.get(name, q_global))
                 out_img.convert("RGB").save(buf, format="JPEG", quality=q_use, subsampling=0, progressive=True, optimize=True)
                 buf.seek(0)
-                key = f"users/{uid}/resized/{date_prefix}/{base}-{stamp}-{name}.jpg"
+                key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-{name}-sr-o{oext_token}.jpg"
                 url = upload_bytes(key, buf.getvalue(), content_type='image/jpeg')
                 uploaded.append({"key": key, "url": url, "preset": name})
         except Exception as ex:
