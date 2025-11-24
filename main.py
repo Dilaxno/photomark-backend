@@ -181,7 +181,7 @@ app.include_router(replies.router)
 # product updates (changelog + email broadcast)
 try:
     from routers import updates  # noqa: E402
-app.include_router(updates.router)
+    app.include_router(updates.router)
 except Exception as _ex:
     logger.warning(f"updates router not available: {_ex}")
 
