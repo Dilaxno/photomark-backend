@@ -21,6 +21,7 @@ from core.config import (
 from core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from core.database import get_db
 from models.user import CollaboratorAccess, User
 from utils.storage import upload_bytes, read_json_key, write_json_key, read_bytes_key
@@ -1016,14 +1017,17 @@ async def collab_session(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/access/list")
-async def list_collaborator_access(request: Request, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+async def list_collaborator_access(request: Request, limit: int = 50, offset: int = 0, q: str | None = None, db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
     try:
-        q = db.query(CollaboratorAccess).filter(CollaboratorAccess.owner_uid == uid)
-        total = q.count()
-        rows = q.order_by(CollaboratorAccess.created_at.desc()).offset(max(0, offset)).limit(max(1, min(200, limit))).all()
+        base_q = db.query(CollaboratorAccess).filter(CollaboratorAccess.owner_uid == uid)
+        if q:
+            qq = f"%{q.strip()}%"
+            base_q = base_q.filter(or_(CollaboratorAccess.email.ilike(qq), CollaboratorAccess.role.ilike(qq)))
+        total = base_q.count()
+        rows = base_q.order_by(CollaboratorAccess.created_at.desc()).offset(max(0, offset)).limit(max(1, min(200, limit))).all()
         out = []
         for r in rows:
             out.append({
