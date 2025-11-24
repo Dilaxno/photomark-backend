@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Form, UploadFile, File, HTTPException, status, Depends
+from fastapi import APIRouter, Request, Form, UploadFile, File, HTTPException, status, Depends, Body
 from typing import Optional, List, Dict, Any, Tuple
 import io
 import os
@@ -984,6 +984,11 @@ async def verify_collaborator_password(request: Request, db: Session = Depends(g
             "collabOwnerUid": owner_uid,
         })
         u.extra_metadata = meta
+        try:
+            rec.last_used_at = _dt.utcnow()
+            rec.email = u.email or rec.email
+        except Exception:
+            pass
         db.commit()
         return {"ok": True, "role": role, "ownerUid": owner_uid}
     except HTTPException:
@@ -1008,3 +1013,81 @@ async def collab_session(request: Request, db: Session = Depends(get_db)):
         }
     except Exception:
         return {"isCollaborator": False, "collaboratorRole": None, "ownerUid": None}
+
+
+@router.get("/access/list")
+async def list_collaborator_access(request: Request, limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    try:
+        q = db.query(CollaboratorAccess).filter(CollaboratorAccess.owner_uid == uid)
+        total = q.count()
+        rows = q.order_by(CollaboratorAccess.created_at.desc()).offset(max(0, offset)).limit(max(1, min(200, limit))).all()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r.id,
+                "email": r.email,
+                "role": r.role,
+                "is_active": bool(r.is_active),
+                "created_at": (r.created_at.isoformat() if r.created_at else None),
+                "last_used_at": (r.last_used_at.isoformat() if r.last_used_at else None),
+            })
+        return {"ok": True, "access": out, "total": total}
+    except Exception as ex:
+        logger.exception(f"collab.access.list failed: {ex}")
+        _friendly_err("Failed to list access", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@router.post("/access/set_active")
+async def set_collaborator_access_active(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    try:
+        rid = int(payload.get("id") or 0)
+        active = bool(payload.get("active"))
+    except Exception:
+        _friendly_err("Invalid payload")
+    try:
+        rec = db.query(CollaboratorAccess).filter(CollaboratorAccess.id == rid).first()
+        if not rec:
+            _friendly_err("Not found", status.HTTP_404_NOT_FOUND)
+        if rec.owner_uid != uid:
+            _friendly_err("Forbidden", status.HTTP_403_FORBIDDEN)
+        rec.is_active = active
+        db.commit()
+        return {"ok": True, "id": rid, "is_active": bool(rec.is_active)}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        db.rollback()
+        logger.exception(f"collab.access.set_active failed: {ex}")
+        _friendly_err("Failed to update", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@router.post("/access/delete")
+async def delete_collaborator_access(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    try:
+        rid = int(payload.get("id") or 0)
+    except Exception:
+        _friendly_err("Invalid payload")
+    try:
+        rec = db.query(CollaboratorAccess).filter(CollaboratorAccess.id == rid).first()
+        if not rec:
+            _friendly_err("Not found", status.HTTP_404_NOT_FOUND)
+        if rec.owner_uid != uid:
+            _friendly_err("Forbidden", status.HTTP_403_FORBIDDEN)
+        db.delete(rec)
+        db.commit()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        db.rollback()
+        logger.exception(f"collab.access.delete failed: {ex}")
+        _friendly_err("Failed to delete", status.HTTP_500_INTERNAL_SERVER_ERROR)
