@@ -156,21 +156,24 @@ def _plan_from_products(obj: dict) -> str:
     one of the allowed internal slugs: 'individual' or 'studios'.
     """
     allowed = _allowed_plans()
-    # Try new env vars first, fallback to old ones for backward compatibility
-    pid_individual = (
-        os.getenv("DODO_INDIVIDUAL_PRODUCT_ID")
-        or os.getenv("VITE_DODO_INDIVIDUAL_PRODUCT_ID")
-        or os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID")
-        or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID")
-        or ""
-    ).strip()
-    pid_studios = (
-        os.getenv("DODO_STUDIOS_PRODUCT_ID")
-        or os.getenv("VITE_DODO_STUDIOS_PRODUCT_ID")
-        or os.getenv("DODO_AGENCIES_PRODUCT_ID")
-        or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID")
-        or ""
-    ).strip()
+    ids_individual: set[str] = set(
+        s.strip() for s in (
+            os.getenv("DODO_INDIVIDUAL_PRODUCT_ID") or "",
+            os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or "",
+            os.getenv("DODO_INDIVIDUAL_MONTHLY_PRODUCT_ID") or "",
+            os.getenv("DODO_INDIVIDUAL_YEARLY_PRODUCT_ID") or "",
+        )
+        if s and s.strip()
+    )
+    ids_studios: set[str] = set(
+        s.strip() for s in (
+            os.getenv("DODO_STUDIOS_PRODUCT_ID") or "",
+            os.getenv("DODO_AGENCIES_PRODUCT_ID") or "",
+            os.getenv("DODO_STUDIOS_MONTHLY_PRODUCT_ID") or "",
+            os.getenv("DODO_STUDIOS_YEARLY_PRODUCT_ID") or "",
+        )
+        if s and s.strip()
+    )
     found_studios = False
     found_individual = False
     names: list[str] = []
@@ -214,9 +217,9 @@ def _plan_from_products(obj: dict) -> str:
                     pid = pid or str((pr.get("id") or pr.get("price_id") or "")).strip()
 
                 # Compare ids against configured product ids
-                if pid_studios and pid and pid == pid_studios:
+                if pid and pid in ids_studios:
                     found_studios = True
-                if pid_individual and pid and pid == pid_individual:
+                if pid and pid in ids_individual:
                     found_individual = True
                 if name:
                     names.append(name)
@@ -226,9 +229,9 @@ def _plan_from_products(obj: dict) -> str:
             p = obj.get("product") or {}
             pid = str((p.get("id") or p.get("product_id") or "")).strip()
             name = str((p.get("name") or p.get("title") or "")).strip()
-            if pid_studios and pid and pid == pid_studios:
+            if pid and pid in ids_studios:
                 found_studios = True
-            if pid_individual and pid and pid == pid_individual:
+            if pid and pid in ids_individual:
                 found_individual = True
             if name:
                 names.append(name)
@@ -254,9 +257,9 @@ def _plan_from_products(obj: dict) -> str:
                             if isinstance(it, dict):
                                 _scan_ids(it, depth + 1)
             _scan_ids(obj)
-            if pid_studios and pid_studios in seen_ids:
+            if ids_studios and any(x in seen_ids for x in ids_studios):
                 found_studios = True
-            if pid_individual and pid_individual in seen_ids:
+            if ids_individual and any(x in seen_ids for x in ids_individual):
                 found_individual = True
 
         try:
@@ -758,13 +761,26 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             product_id = str((event_obj.get("product_id") or "")).strip()
             if not product_id:
                 product_id = _deep_find_first(event_obj, ("product_id", "productId"))
-            # Try new env vars first, fallback to old ones
-            pid_individual = (os.getenv("DODO_INDIVIDUAL_PRODUCT_ID") or os.getenv("VITE_DODO_INDIVIDUAL_PRODUCT_ID") or os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or os.getenv("VITE_DODO_PHOTOGRAPHERS_PRODUCT_ID") or "").strip()
-            pid_studios = (os.getenv("DODO_STUDIOS_PRODUCT_ID") or os.getenv("VITE_DODO_STUDIOS_PRODUCT_ID") or os.getenv("DODO_AGENCIES_PRODUCT_ID") or os.getenv("VITE_DODO_AGENCIES_PRODUCT_ID") or "").strip()
+            ids_individual: set[str] = set(
+                s.strip() for s in (
+                    os.getenv("DODO_INDIVIDUAL_PRODUCT_ID") or "",
+                    os.getenv("DODO_PHOTOGRAPHERS_PRODUCT_ID") or "",
+                    os.getenv("DODO_INDIVIDUAL_MONTHLY_PRODUCT_ID") or "",
+                    os.getenv("DODO_INDIVIDUAL_YEARLY_PRODUCT_ID") or "",
+                ) if s and s.strip()
+            )
+            ids_studios: set[str] = set(
+                s.strip() for s in (
+                    os.getenv("DODO_STUDIOS_PRODUCT_ID") or "",
+                    os.getenv("DODO_AGENCIES_PRODUCT_ID") or "",
+                    os.getenv("DODO_STUDIOS_MONTHLY_PRODUCT_ID") or "",
+                    os.getenv("DODO_STUDIOS_YEARLY_PRODUCT_ID") or "",
+                ) if s and s.strip()
+            )
             if product_id:
-                if pid_studios and product_id == pid_studios:
+                if ids_studios and product_id in ids_studios:
                     plan = "studios"
-                elif pid_individual and product_id == pid_individual:
+                elif ids_individual and product_id in ids_individual:
                     plan = "individual"
         except Exception:
             pass
@@ -791,8 +807,8 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         sid = sub_id.strip()
         sid_phot_old = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
         sid_ag_old = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
-        sid_individual = (os.getenv("DODO_INDIVIDUAL_SUBSCRIPTION_ID") or os.getenv("VITE_DODO_INDIVIDUAL_SUBSCRIPTION_ID") or "").strip()
-        sid_studios = (os.getenv("DODO_STUDIOS_SUBSCRIPTION_ID") or os.getenv("VITE_DODO_STUDIOS_SUBSCRIPTION_ID") or "").strip()
+        sid_individual = (os.getenv("DODO_INDIVIDUAL_SUBSCRIPTION_ID") or "").strip()
+        sid_studios = (os.getenv("DODO_STUDIOS_SUBSCRIPTION_ID") or "").strip()
         if sid and (sid_studios and sid == sid_studios or sid_ag_old and sid == sid_ag_old):
             plan = "studios"
         elif sid and (sid_individual and sid == sid_individual or sid_phot_old and sid == sid_phot_old):
