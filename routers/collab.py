@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Form, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, Request, Form, UploadFile, File, HTTPException, status, Depends
 from typing import Optional, List, Dict, Any, Tuple
 import io
 import os
@@ -20,6 +20,9 @@ from core.config import (
 )
 from core.auth import get_uid_from_request, get_uid_by_email, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.user import CollaboratorAccess, User
 from utils.storage import upload_bytes, read_json_key, write_json_key, read_bytes_key
 
 # Firestore no longer used; timestamps handled via Python
@@ -894,7 +897,7 @@ async def retouch_send_back(
 # ----------------------
 
 @router.post("/password/generate")
-async def generate_collaborator_password(request: Request):
+async def generate_collaborator_password(request: Request, db: Session = Depends(get_db)):
     """
     Generate or rotate the collaborator password for the owner (current user).
     Stores it under Firestore collection 'collaborators-passwords/{password_id}' with role assignment.
@@ -924,28 +927,28 @@ async def generate_collaborator_password(request: Request):
     if role not in valid_roles:
         _friendly_err(f"Invalid role. Must be one of: {', '.join(valid_roles)}")
     
-    db = _get_fs_client()
-    if db is None or fb_fs is None:
-        _friendly_err("Firestore unavailable", status.HTTP_500_INTERNAL_SERVER_ERROR)
     try:
         pw = secrets.token_urlsafe(10)
-        # Use password as document ID to allow easy lookup by password
-        doc_ref = db.collection('collaborators-passwords').document(pw)
-        doc_ref.set({
-            "owner_uid": uid,
-            "password": pw,
-            "role": role,
-            "updatedAt": fb_fs.SERVER_TIMESTAMP,
-            "createdAt": fb_fs.SERVER_TIMESTAMP,
-        }, merge=False)
+        import hashlib
+        pw_hash = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+        rec = CollaboratorAccess(
+            email="",
+            password_hash=pw_hash,
+            owner_uid=uid,
+            role=role,
+            is_active=True,
+        )
+        db.add(rec)
+        db.commit()
         return {"ok": True, "password": pw}
     except Exception as ex:
-        logger.exception(f"generate_collaborator_password failed: {ex}")
+        db.rollback()
+        logger.exception(f"generate_collaborator_password failed (sql): {ex}")
         _friendly_err("Failed to generate password", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @router.post("/password/verify")
-async def verify_collaborator_password(request: Request):
+async def verify_collaborator_password(request: Request, db: Session = Depends(get_db)):
     """
     Verify a collaborator password and unlock tools for the current user if valid.
     Body: { password: string }
@@ -962,37 +965,46 @@ async def verify_collaborator_password(request: Request):
     if not pw:
         _friendly_err("Password required")
 
-    db = _get_fs_client()
-    if db is None or fb_fs is None:
-        _friendly_err("Firestore unavailable", status.HTTP_500_INTERNAL_SERVER_ERROR)
-
     try:
-        # Look up password document directly (password is doc ID)
-        doc_ref = db.collection('collaborators-passwords').document(pw)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
+        import hashlib
+        pw_hash = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+        rec = db.query(CollaboratorAccess).filter(CollaboratorAccess.password_hash == pw_hash, CollaboratorAccess.is_active == True).first()
+        if not rec:
             _friendly_err("Invalid password", status.HTTP_400_BAD_REQUEST)
-        
-        doc_data = doc.to_dict() or {}
-        owner_uid = doc_data.get('owner_uid')
-        role = doc_data.get('role', 'gallery_manager')
-        
-        if not owner_uid:
-            _friendly_err("Invalid password data", status.HTTP_400_BAD_REQUEST)
-        
-        # Set unlock flag and role on the collaborator's profile
-        user_ref = db.collection('users').document(uid)
-        user_ref.set({
-            'collab_unlocked': True,
-            'collab_role': role,
-            'unlockedOwner': owner_uid,
-            'is_collaborator': True,
-            'updatedAt': fb_fs.SERVER_TIMESTAMP,
-        }, merge=True)
-        return {"ok": True, "role": role}
+        owner_uid = rec.owner_uid
+        role = rec.role or "gallery_manager"
+        # Update current user to mark collaborator session via extra_metadata
+        u = db.query(User).filter(User.uid == uid).first()
+        if not u:
+            _friendly_err("User not found", status.HTTP_404_NOT_FOUND)
+        meta = u.extra_metadata or {}
+        meta.update({
+            "isCollaborator": True,
+            "collaboratorRole": role,
+            "collabOwnerUid": owner_uid,
+        })
+        u.extra_metadata = meta
+        db.commit()
+        return {"ok": True, "role": role, "ownerUid": owner_uid}
     except HTTPException:
         raise
     except Exception as ex:
-        logger.exception(f"verify_collaborator_password failed: {ex}")
+        db.rollback()
+        logger.exception(f"verify_collaborator_password failed (sql): {ex}")
         _friendly_err("Verification failed", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@router.get("/session")
+async def collab_session(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return {"isCollaborator": False, "collaboratorRole": None, "ownerUid": None}
+    try:
+        u = db.query(User).filter(User.uid == uid).first()
+        meta = (u.extra_metadata or {}) if u else {}
+        return {
+            "isCollaborator": bool(meta.get("isCollaborator")),
+            "collaboratorRole": meta.get("collaboratorRole"),
+            "ownerUid": meta.get("collabOwnerUid"),
+        }
+    except Exception:
+        return {"isCollaborator": False, "collaboratorRole": None, "ownerUid": None}

@@ -369,6 +369,40 @@ async def affiliates_policy():
         "notes": "Minimum payout is $100. Remaining balances roll over to next cycle."
     }
 
+
+@router.get("/profile")
+async def affiliates_profile(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return {"profile": None}
+    try:
+        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
+        if not prof:
+            return {"profile": None}
+        stats_json = read_json_key(_stats_key(uid)) or {}
+        stats = {
+            "clicks": int((stats_json.get("clicks") or 0)),
+            "signups": int(prof.signups_total or 0),
+            "conversions": int(prof.conversions_total or 0),
+            "gross_cents": int(prof.gross_cents_total or 0),
+            "payout_cents": int(prof.payout_cents_total or 0),
+            "currency": "usd",
+        }
+        return {
+            "uid": prof.uid,
+            "role": "affiliate",
+            "platform": prof.platform,
+            "channel": prof.channel,
+            "referralCode": prof.referral_code,
+            "referralLink": prof.referral_link,
+            "email": prof.email,
+            "name": prof.name,
+            "stats": stats,
+        }
+    except Exception as ex:
+        logger.exception(f"[affiliates.profile] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
+
 @router.get("/stats")
 async def affiliates_stats(request: Request, range: str = "all", db: Session = Depends(get_db)):
     """Return aggregated stats for the authenticated affiliate, optionally filtered by date range."""
