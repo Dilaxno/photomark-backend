@@ -267,34 +267,35 @@ async def _domain_check_once():
                 continue
             prev_dns = bool(dom.get("dnsVerified"))
             prev_ssl = str(dom.get("sslStatus") or "")
-            res = await _check_domain(hostname)
-            changed = (prev_dns != res["dnsVerified"]) or (prev_ssl != res["sslStatus"])
-            s.domain = {
-                "hostname": hostname,
-                "dnsTarget": "api.photomark.cloud",
-                "dnsVerified": res["dnsVerified"],
-                "sslStatus": res["sslStatus"],
-                "lastChecked": _now_iso(),
-                "cnameObserved": res["cnameObserved"],
-                "error": res["error"],
-            }
-            s.updated_at = _now()
-            if changed:
-                try:
-                    email = get_user_email_from_uid(s.owner_uid) or ""
-                    if email:
-                        subject = "Domain status updated"
-                        html = render_email(
-                            "email_basic.html",
-                            title="Domain status",
-                            intro=f"{hostname}: DNS={res['dnsVerified']}, SSL={res['sslStatus']}",
-                            button_label="Open shop",
-                            button_url=f"https://{hostname}",
-                        )
-                        text = f"{hostname} DNS={res['dnsVerified']} SSL={res['sslStatus']}"
-                        send_email_smtp(email, subject, html, text)
-                except Exception:
-                    pass
+        res = await _check_domain(hostname)
+        changed = (prev_dns != res["dnsVerified"]) or (prev_ssl != res["sslStatus"])
+        s.domain = {
+            "hostname": hostname,
+            "dnsTarget": "api.photomark.cloud",
+            "dnsVerified": res["dnsVerified"],
+            "sslStatus": res["sslStatus"],
+            "lastChecked": _now_iso(),
+            "cnameObserved": res["cnameObserved"],
+            "error": res["error"],
+            "enabled": bool(dom.get("enabled") or False),
+        }
+        s.updated_at = _now()
+        if changed:
+            try:
+                email = get_user_email_from_uid(s.owner_uid) or ""
+                if email:
+                    subject = "Domain status updated"
+                    html = render_email(
+                        "email_basic.html",
+                        title="Domain status",
+                        intro=f"{hostname}: DNS={res['dnsVerified']}, SSL={res['sslStatus']}",
+                        button_label="Open shop",
+                        button_url=f"https://{hostname}",
+                    )
+                    text = f"{hostname} DNS={res['dnsVerified']} SSL={res['sslStatus']}"
+                    send_email_smtp(email, subject, html, text)
+            except Exception:
+                pass
         db.commit()
     finally:
         db.close()
