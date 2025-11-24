@@ -46,6 +46,7 @@ async def upload(
     tile_scale: Optional[float] = Form(None),
     # Single-layout background box flag
     wm_bg_box: Optional[str] = Form(None),  # '1' to enable background box on single watermark
+    wm_logo_size: Optional[int] = Form(None),
     artist: Optional[str] = Form(None),
     invisible: Optional[str] = Form(None),  # '1' to embed invisible signature
     # Destination options
@@ -114,7 +115,8 @@ async def upload(
                         img,
                         sig,
                         wm_pos,
-                        bg_box=((wm_bg_box or '').strip() == '1')
+                        bg_box=((wm_bg_box or '').strip() == '1'),
+                        target_w_override=int(wm_logo_size) if wm_logo_size is not None else None
                     )
             else:
                 if layout == 'tiled':
@@ -289,6 +291,7 @@ async def process_watermark_zip(
     tile_spacing: Optional[float] = Form(None),
     tile_scale: Optional[float] = Form(None),
     wm_bg_box: Optional[str] = Form(None),
+    wm_logo_size: Optional[int] = Form(None),
     artist: Optional[str] = Form(None),
     invisible: Optional[str] = Form(None),
 ):
@@ -334,7 +337,8 @@ async def process_watermark_zip(
                         img,
                         sig,
                         wm_pos,
-                        bg_box=((wm_bg_box or '').strip() == '1')
+                        bg_box=((wm_bg_box or '').strip() == '1'),
+                        target_w_override=int(wm_logo_size) if wm_logo_size is not None else None
                     )
             else:
                 if layout == 'tiled':

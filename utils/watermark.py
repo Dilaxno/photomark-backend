@@ -238,7 +238,8 @@ def add_signature_watermark(
     img: Image.Image,
     signature_rgba: Image.Image,
     position: str = 'bottom-right',
-    bg_box: bool = False) -> Image.Image:
+    bg_box: bool = False,
+    target_w_override: Optional[int] = None) -> Image.Image:
     """Overlay a signature PNG with alpha using Torch composition; scales to ~30% width, optional bg box and shadow via Kornia blur."""
     # Prepare base and logo tensors
     base_rgba = img.convert('RGBA')
@@ -250,7 +251,7 @@ def add_signature_watermark(
         W, H = base_bgr.shape[1], base_bgr.shape[0]
         sig_rgba = signature_rgba.convert('RGBA')
         sw, sh = sig_rgba.size
-        target_w = max(64, int(W * 0.30))
+        target_w = max(64, int(target_w_override or int(W * 0.30)))
         scale = target_w / float(sw)
         target_h = max(1, int(round(sh * scale)))
         sig_bgra = _pil_to_cv_rgba(sig_rgba)
@@ -286,7 +287,7 @@ def add_signature_watermark(
         base = base_rgba.copy()
         width, height = base.size
         sig = signature_rgba.convert("RGBA")
-        target_w = max(64, int(width * 0.30))
+        target_w = max(64, int(target_w_override or int(width * 0.30)))
         scale = target_w / sig.width
         target_h = int(sig.height * scale)
         sig_resized = sig.resize((target_w, target_h), Image.LANCZOS)
@@ -323,7 +324,7 @@ def add_signature_watermark(
     logo = _pil_to_tensor_rgba(sig_rgba, device=device)
 
     # Resize logo to ~30% of width
-    target_w = max(64, int(W * 0.30))
+    target_w = max(64, int(target_w_override or int(W * 0.30)))
     scale = target_w / float(sw)
     target_h = max(1, int(round(sh * scale)))
     logo = KG.resize(logo.unsqueeze(0), (target_h, target_w), interpolation='bilinear', align_corners=False).squeeze(0)
