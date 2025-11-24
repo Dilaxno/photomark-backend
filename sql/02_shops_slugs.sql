@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS public.shops (
 
   products JSONB NOT NULL DEFAULT '[]'::jsonb,
 
+  domain JSONB NOT NULL DEFAULT '{}'::jsonb,
+
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

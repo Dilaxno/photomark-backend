@@ -33,6 +33,9 @@ class Shop(Base):
     
     # Products stored as JSON array
     products = Column(JSON, nullable=False, default=[])
+
+    # Custom domain configuration and status
+    domain = Column(JSON, nullable=False, default={})
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -48,6 +51,7 @@ class Shop(Base):
                 "ownerUid": self.owner_uid,
                 "ownerName": self.owner_name,
                 "theme": self.theme,
+                "domain": self.domain or {},
                 "createdAt": self.created_at.isoformat() if self.created_at else None,
                 "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
             },

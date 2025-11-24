@@ -8,6 +8,8 @@ import os
 import uuid
 import base64
 from datetime import datetime
+import re
+import httpx
 import boto3
 from botocore.client import Config
 
@@ -377,3 +379,149 @@ async def update_slug_mapping(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update slug: {str(e)}")
+
+
+@router.post('/domain')
+async def set_custom_domain(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Configure a custom domain/subdomain for the user's shop.
+    Stores desired hostname and initializes status tracking.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    hostname = (payload.get('hostname') or '').strip().lower()
+    if not hostname:
+        raise HTTPException(status_code=400, detail="hostname is required")
+
+    # Basic hostname validation
+    if len(hostname) > 255 or not re.match(r'^[a-z0-9.-]+$', hostname):
+        raise HTTPException(status_code=400, detail="invalid hostname")
+
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+
+        now = datetime.utcnow().isoformat()
+        shop.domain = {
+            "hostname": hostname,
+            "dnsTarget": "api.photomark.cloud",
+            "dnsVerified": False,
+            "sslStatus": "unknown",
+            "lastChecked": now,
+        }
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+
+        instructions = {
+            "recordType": "CNAME",
+            "name": hostname,
+            "value": "api.photomark.cloud",
+            "ttl": 300
+        }
+
+        return {
+            "success": True,
+            "message": "Custom domain saved. Create the CNAME record and check status.",
+            "instructions": instructions,
+            "domain": shop.domain
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to set custom domain: {str(e)}")
+
+
+@router.get('/domain/status')
+async def get_domain_status(
+    request: Request,
+    hostname: str | None = None,
+    db: Session = Depends(get_db)
+):
+    """Check DNS CNAME and TLS status for a custom domain.
+    Uses DNS over HTTPS (Cloudflare) to avoid extra dependencies.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Resolve hostname: from query or from saved shop config
+    hostname = (hostname or '').strip().lower()
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        if not hostname:
+            hostname = (shop.domain or {}).get('hostname') or ''
+        if not hostname:
+            raise HTTPException(status_code=400, detail="No hostname configured")
+
+        dns_verified = False
+        cname_target = None
+        cf_url = f"https://cloudflare-dns.com/dns-query?name={hostname}&type=CNAME"
+        headers = {"Accept": "application/dns-json"}
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(cf_url, headers=headers)
+                data = resp.json()
+                answers = data.get('Answer') or []
+                for ans in answers:
+                    if (ans.get('type') == 5) and ans.get('data'):
+                        cname_target = (ans['data'] or '').strip('.').lower()
+                        if cname_target == 'api.photomark.cloud':
+                            dns_verified = True
+                            break
+        except Exception:
+            dns_verified = False
+
+        ssl_status = 'unknown'
+        ssl_error = None
+        if dns_verified:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    r = await client.head(f"https://{hostname}", follow_redirects=True)
+                    if r.status_code < 400:
+                        ssl_status = 'active'
+                    else:
+                        ssl_status = 'pending'
+            except Exception as e:
+                ssl_error = str(e)
+                ssl_status = 'pending'
+        else:
+            ssl_status = 'blocked'
+
+        shop.domain = {
+            "hostname": hostname,
+            "dnsTarget": "api.photomark.cloud",
+            "dnsVerified": dns_verified,
+            "sslStatus": ssl_status,
+            "lastChecked": datetime.utcnow().isoformat(),
+            "cnameObserved": cname_target,
+            "error": ssl_error
+        }
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "hostname": hostname,
+            "dnsVerified": dns_verified,
+            "sslStatus": ssl_status,
+            "cnameObserved": cname_target,
+            "instructions": {
+                "recordType": "CNAME",
+                "name": hostname,
+                "value": "api.photomark.cloud",
+                "ttl": 300
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to check domain status: {str(e)}")

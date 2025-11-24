@@ -181,12 +181,30 @@ app.include_router(replies.router)
 # product updates (changelog + email broadcast)
 try:
     from routers import updates  # noqa: E402
-    app.include_router(updates.router)
+app.include_router(updates.router)
 except Exception as _ex:
     logger.warning(f"updates router not available: {_ex}")
 
 
 
+@app.get("/api/allow-domain")
+async def allow_domain(request: Request):
+    # Caddy on_demand_tls ask endpoint: returns 200 if domain is allowed
+    from core.database import get_db  # lazy import to avoid circulars
+    from sqlalchemy.orm import Session
+    from models.shop import Shop
+
+    domain = (request.query_params.get("domain") or request.query_params.get("host") or "").strip().lower()
+    if not domain:
+        return {"allow": False}
+    try:
+        db: Session = next(get_db())
+        shop = db.query(Shop).filter(Shop.domain['hostname'].astext == domain).first()  # type: ignore
+        if shop:
+            return {"allow": True}
+    except Exception as _ex:
+        logger.warning(f"allow-domain check failed: {_ex}")
+    return {"allow": False}
 @app.get("/")
 def root():
     return {"ok": True}
