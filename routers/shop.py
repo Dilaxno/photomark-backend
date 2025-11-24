@@ -407,6 +407,11 @@ async def set_custom_domain(
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
 
+        existing = (shop.domain or {})
+        current_host = str((existing.get('hostname') or '')).strip().lower()
+        if current_host and current_host != hostname:
+            raise HTTPException(status_code=409, detail="domain_already_set")
+
         now = datetime.utcnow().isoformat()
         shop.domain = {
             "hostname": hostname,
@@ -414,6 +419,7 @@ async def set_custom_domain(
             "dnsVerified": False,
             "sslStatus": "unknown",
             "lastChecked": now,
+            "enabled": False,
         }
         shop.updated_at = datetime.utcnow()
         db.commit()
@@ -436,6 +442,26 @@ async def set_custom_domain(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to set custom domain: {str(e)}")
+
+
+@router.post('/domain/remove')
+async def remove_custom_domain(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        shop.domain = {}
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to remove domain: {str(e)}")
 
 
 @router.get('/domain/status')
@@ -503,7 +529,8 @@ async def get_domain_status(
             "sslStatus": ssl_status,
             "lastChecked": datetime.utcnow().isoformat(),
             "cnameObserved": cname_target,
-            "error": ssl_error
+            "error": ssl_error,
+            "enabled": bool((shop.domain or {}).get('enabled') or False)
         }
         shop.updated_at = datetime.utcnow()
         db.commit()

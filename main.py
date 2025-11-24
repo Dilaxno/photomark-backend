@@ -204,7 +204,12 @@ async def allow_domain(request: Request):
         db: Session = next(get_db())
         shop = db.query(Shop).filter(Shop.domain['hostname'].astext == domain).first()  # type: ignore
         if shop:
-            return {"allow": True}
+            try:
+                enabled = bool((shop.domain or {}).get('enabled') or False)
+            except Exception:
+                enabled = False
+            if enabled:
+                return {"allow": True}
     except Exception as _ex:
         logger.warning(f"allow-domain check failed: {_ex}")
     return {"allow": False}
