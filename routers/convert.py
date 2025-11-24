@@ -105,45 +105,85 @@ def parse_ratio(r: str) -> Optional[float]:
 
 
 def letterbox_embed_raw(raw: bytes, ratio_str: str, bg_hex: str = '#000000', x_center: Optional[float] = None, y_center: Optional[float] = None) -> Optional[bytes]:
-    if not WAND_AVAILABLE:
-        raise RuntimeError('ImageMagick/Wand not available on server')
     ar = parse_ratio(ratio_str)
     if not ar:
         raise ValueError(f'invalid ratio: {ratio_str}')
 
-    # Fill frame by cropping; allow user-controlled crop center (relative 0..1)
-    with WandImage(blob=raw) as img:
-        w, h = int(img.width), int(img.height)
-        if w <= 0 or h <= 0:
-            raise ValueError('invalid image size')
-        cur_ar = w / h if h else 1.0
+    if WAND_AVAILABLE:
+        # Original Wand implementation
+        with WandImage(blob=raw) as img:
+            w, h = int(img.width), int(img.height)
+            if w <= 0 or h <= 0:
+                raise ValueError('invalid image size')
+            cur_ar = w / h if h else 1.0
 
-        if abs(cur_ar - ar) < 1e-6:
+            if abs(cur_ar - ar) < 1e-6:
+                return img.make_blob('png')
+
+            if cur_ar > ar:
+                crop_w = int(round(h * ar))
+                crop_h = h
+            else:
+                crop_w = w
+                crop_h = int(round(w / ar))
+
+            cx = w / 2.0
+            cy = h / 2.0
+            if isinstance(x_center, float) and 0.0 <= x_center <= 1.0:
+                cx = x_center * w
+            if isinstance(y_center, float) and 0.0 <= y_center <= 1.0:
+                cy = y_center * h
+
+            left = int(round(cx - crop_w / 2.0))
+            top = int(round(cy - crop_h / 2.0))
+            left = max(0, min(left, w - crop_w))
+            top = max(0, min(top, h - crop_h))
+
+            img.crop(left=left, top=top, width=crop_w, height=crop_h)
             return img.make_blob('png')
+    else:
+        # PIL fallback
+        try:
+            base = Image.open(io.BytesIO(raw))
+            w, h = base.size
+            if w <= 0 or h <= 0:
+                raise ValueError('invalid image size')
+            cur_ar = w / h if h else 1.0
 
-        if cur_ar > ar:
-            crop_w = int(round(h * ar))
-            crop_h = h
-        else:
-            crop_w = w
-            crop_h = int(round(w / ar))
+            if abs(cur_ar - ar) < 1e-6:
+                buf = io.BytesIO()
+                base.save(buf, format='PNG', optimize=True)
+                buf.seek(0)
+                return buf.read()
 
-        # Default center = image center
-        cx = w / 2.0
-        cy = h / 2.0
-        if isinstance(x_center, float) and 0.0 <= x_center <= 1.0:
-            cx = x_center * w
-        if isinstance(y_center, float) and 0.0 <= y_center <= 1.0:
-            cy = y_center * h
+            if cur_ar > ar:
+                crop_w = int(round(h * ar))
+                crop_h = h
+            else:
+                crop_w = w
+                crop_h = int(round(w / ar))
 
-        left = int(round(cx - crop_w / 2.0))
-        top = int(round(cy - crop_h / 2.0))
-        # Clamp inside image
-        left = max(0, min(left, w - crop_w))
-        top = max(0, min(top, h - crop_h))
+            cx = w / 2.0
+            cy = h / 2.0
+            if isinstance(x_center, float) and 0.0 <= x_center <= 1.0:
+                cx = x_center * w
+            if isinstance(y_center, float) and 0.0 <= y_center <= 1.0:
+                cy = y_center * h
 
-        img.crop(left=left, top=top, width=crop_w, height=crop_h)
-        return img.make_blob('png')
+            left = int(round(cx - crop_w / 2.0))
+            top = int(round(cy - crop_h / 2.0))
+            left = max(0, min(left, w - crop_w))
+            top = max(0, min(top, h - crop_h))
+
+            box = (left, top, left + crop_w, top + crop_h)
+            cropped = base.crop(box)
+            buf = io.BytesIO()
+            cropped.save(buf, format='PNG', optimize=True)
+            buf.seek(0)
+            return buf.read()
+        except Exception as _ex:
+            logger.error(f"letterbox PIL fallback failed: {_ex}")
+            return None
 
 # For executor mapping
 def _letterbox_unpack(args):
@@ -154,31 +194,61 @@ def _letterbox_unpack(args):
 # ==========================
 def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -> tuple[str, Optional[bytes]]:
     try:
-        # Load image with Wand
-        with WandImage(blob=raw) as img:
-            if len(img.sequence) > 1:
-                with WandImage(image=img.sequence[0]) as first:
-                    img = first.clone()
-
-            out_blob = None
-            with WandImage(image=img) as out:
-                out_ext = target
-                if target in ('svg', 'eps'):
-                    try:
+        out_blob = None
+        out_ext = target
+        if WAND_AVAILABLE:
+            # Wand path
+            with WandImage(blob=raw) as img:
+                if len(img.sequence) > 1:
+                    with WandImage(image=img.sequence[0]) as first:
+                        img = first.clone()
+                with WandImage(image=img) as out:
+                    if target in ('svg', 'eps'):
+                        try:
+                            out.format = target
+                            out_blob = out.make_blob()
+                            out_ext = target
+                        except Exception:
+                            out.format = 'pdf'
+                            out_blob = out.make_blob()
+                            out_ext = 'pdf'
+                    else:
                         out.format = target
                         out_blob = out.make_blob()
                         out_ext = target
-                    except Exception:
-                        out.format = 'pdf'
-                        out_blob = out.make_blob()
-                        out_ext = 'pdf'
-                else:
-                    out.format = target
-                    out_blob = out.make_blob()
-                    out_ext = target
+        else:
+            # PIL fallback for common raster formats
+            im = Image.open(io.BytesIO(raw))
+            fmt = target.lower().strip()
+            if fmt == 'jpg':
+                fmt = 'jpeg'
+            if fmt in ('jpeg', 'png', 'tiff', 'gif'):
+                buf = io.BytesIO()
+                if fmt == 'jpeg':
+                    im = im.convert('RGB')
+                    im.save(buf, format='JPEG', quality=95, subsampling=0, optimize=True)
+                elif fmt == 'png':
+                    if im.mode not in ('RGBA', 'RGB'):
+                        im = im.convert('RGBA')
+                    im.save(buf, format='PNG', optimize=True)
+                elif fmt == 'tiff':
+                    im.save(buf, format='TIFF', compression='tiff_deflate')
+                elif fmt == 'gif':
+                    im = im.convert('P')
+                    im.save(buf, format='GIF')
+                out_blob = buf.getvalue()
+                out_ext = fmt
+            else:
+                # Unsupported without Wand: fall back to PNG
+                buf = io.BytesIO()
+                if im.mode not in ('RGBA', 'RGB'):
+                    im = im.convert('RGBA')
+                im.save(buf, format='PNG', optimize=True)
+                out_blob = buf.getvalue()
+                out_ext = 'png'
 
         # Embed metadata
-        if artist and out_ext in ("jpeg", "jpg"):
+        if artist and out_blob and out_ext in ("jpeg", "jpg"):
             _im = Image.open(io.BytesIO(out_blob)).convert("RGB")
             if PIEXIF_AVAILABLE:
                 try:
@@ -191,7 +261,7 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
                     out_blob = buf.getvalue()
                 except Exception:
                     pass
-        elif artist and out_ext == "png":
+        elif artist and out_blob and out_ext == "png":
             _im = Image.open(io.BytesIO(out_blob)).convert("RGBA")
             pnginfo = PngInfo()
             pnginfo.add_text("Artist", artist)
@@ -238,8 +308,7 @@ async def convert_bulk(
                 "message": "You have used your free generation. Upgrade to continue.",
             }, status_code=402)
 
-    if not WAND_AVAILABLE:
-        return JSONResponse({"error": "ImageMagick/Wand not available on server"}, status_code=500)
+    # Proceed even if Wand is unavailable; PIL fallback will handle raster formats
 
     t = target.lower().strip()
     if t == 'jpg':
@@ -359,8 +428,7 @@ async def aspect_batch(
                 "message": "You have used your free generation. Upgrade to continue.",
             }, status_code=402)
 
-    if not WAND_AVAILABLE:
-        return JSONResponse({"error": "ImageMagick/Wand not available on server"}, status_code=500)
+    # Proceed even if Wand is unavailable; letterbox uses PIL fallback when needed
 
     # sanitize ratios
     ratios_clean = []
