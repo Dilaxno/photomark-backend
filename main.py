@@ -333,6 +333,7 @@ def root(request: Request):
             from core.database import get_db
             from sqlalchemy.orm import Session
             from models.shop import Shop
+            from models.user import User
             db: Session = next(get_db())
             try:
                 shop = db.query(Shop).filter(Shop.domain['hostname'].astext == host).first()  # type: ignore
@@ -340,7 +341,12 @@ def root(request: Request):
                     enabled = bool((shop.domain or {}).get('enabled') or False)
                     if enabled:
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-                        url = f"{front}/{shop.slug}"
+                        user = db.query(User).filter(User.uid == shop.owner_uid).first()
+                        sub_id = (user.subscription_id if user and user.subscription_id else "")
+                        status = (user.subscription_status if user and user.subscription_status else (user.plan if user and user.plan else "inactive"))
+                        from urllib.parse import urlencode
+                        qs = urlencode({"subscription_id": sub_id, "status": status})
+                        url = f"{front}/public-shop?{qs}"
                         return RedirectResponse(url)
             finally:
                 try:
