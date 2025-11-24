@@ -344,9 +344,8 @@ def root(request: Request):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         sub_id = (user.subscription_id if user and user.subscription_id else "")
                         status = (user.subscription_status if user and user.subscription_status else (user.plan if user and user.plan else "inactive"))
-                        from urllib.parse import urlencode
-                        qs = urlencode({"subscription_id": sub_id, "status": status})
-                        url = f"{front}/public-shop?{qs}"
+                        slug = (shop.slug or "").strip()
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
                         return RedirectResponse(url)
             finally:
                 try:
