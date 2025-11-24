@@ -106,3 +106,31 @@ class CollaboratorAccess(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     
     is_active = Column(Boolean, default=True)
+
+
+class CollaboratorMember(Base):
+    """
+    Collaborator membership profile
+    Stores collaborator's uid, email, owner uid, and role
+    """
+    __tablename__ = "collaborator_members"
+
+    # Collaborator Firebase UID
+    uid = Column(String(128), primary_key=True, index=True)
+
+    email = Column(String(255), index=True, nullable=False)
+    owner_uid = Column(String(128), index=True, nullable=False)
+    role = Column(String(50), default="collaborator")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+    def to_dict(self):
+        return {
+            "uid": self.uid,
+            "email": self.email,
+            "owner_uid": self.owner_uid,
+            "role": self.role,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+        }
