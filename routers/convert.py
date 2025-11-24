@@ -209,9 +209,23 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
                             out_blob = out.make_blob()
                             out_ext = target
                         except Exception:
-                            out.format = 'pdf'
-                            out_blob = out.make_blob()
-                            out_ext = 'pdf'
+                            if target == 'svg':
+                                # Fallback: build an SVG wrapper with embedded PNG
+                                base_im = Image.open(io.BytesIO(raw))
+                                png_buf = io.BytesIO()
+                                if base_im.mode not in ('RGBA', 'RGB'):
+                                    base_im = base_im.convert('RGBA')
+                                base_im.save(png_buf, format='PNG', optimize=True)
+                                w, h = base_im.size
+                                import base64 as _b64
+                                b64 = _b64.b64encode(png_buf.getvalue()).decode('ascii')
+                                svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><image href="data:image/png;base64,{b64}" width="{w}" height="{h}"/></svg>'
+                                out_blob = svg.encode('utf-8')
+                                out_ext = 'svg'
+                            else:
+                                out.format = 'pdf'
+                                out_blob = out.make_blob()
+                                out_ext = 'pdf'
                     else:
                         out.format = target
                         out_blob = out.make_blob()
@@ -222,7 +236,7 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
             fmt = target.lower().strip()
             if fmt == 'jpg':
                 fmt = 'jpeg'
-            if fmt in ('jpeg', 'png', 'tiff', 'gif'):
+            if fmt in ('jpeg', 'png', 'tiff', 'gif', 'pdf', 'eps', 'svg'):
                 buf = io.BytesIO()
                 if fmt == 'jpeg':
                     im = im.convert('RGB')
@@ -236,6 +250,23 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
                 elif fmt == 'gif':
                     im = im.convert('P')
                     im.save(buf, format='GIF')
+                elif fmt == 'pdf':
+                    im = im.convert('RGB')
+                    im.save(buf, format='PDF')
+                elif fmt == 'eps':
+                    im = im.convert('RGB')
+                    im.save(buf, format='EPS')
+                elif fmt == 'svg':
+                    # Build an SVG wrapper with embedded PNG
+                    tmp = io.BytesIO()
+                    if im.mode not in ('RGBA', 'RGB'):
+                        im = im.convert('RGBA')
+                    im.save(tmp, format='PNG', optimize=True)
+                    w, h = im.size
+                    import base64 as _b64
+                    b64 = _b64.b64encode(tmp.getvalue()).decode('ascii')
+                    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><image href="data:image/png;base64,{b64}" width="{w}" height="{h}"/></svg>'
+                    buf.write(svg.encode('utf-8'))
                 out_blob = buf.getvalue()
                 out_ext = fmt
             else:
