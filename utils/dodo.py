@@ -129,3 +129,56 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
                     except Exception as ex:
                         last_error = {"exception": str(ex), "endpoint": url, "payload_keys": list(payload.keys())}
     return None, last_error
+
+
+def _build_subscription_endpoints(subscription_id: str) -> list[str]:
+    """
+    Try common PATCH endpoints for updating/cancelling a subscription.
+    """
+    base = (DODO_API_BASE or "https://api.dodopayments.com").rstrip("/")
+    sid = subscription_id.strip()
+    return [
+        f"{base}/v1/subscriptions/{sid}",
+        f"{base}/subscriptions/{sid}",
+        f"{base}/api/subscriptions/{sid}",
+    ]
+
+
+async def cancel_subscription_immediately(subscription_id: str) -> Tuple[bool, Optional[dict]]:
+    """
+    Attempt to cancel a Dodo subscription immediately (no period-end grace).
+    Returns (ok, last_error). Idempotent: already-cancelled treated as ok.
+    """
+    if not subscription_id:
+        return False, {"error": "missing_subscription_id"}
+
+    payload_variants = [
+        {"status": "cancelled"},
+        {"status": "cancelled", "cancel_at_next_billing_date": False},
+        {"cancel_at_next_billing_date": False, "status": "cancelled"},
+    ]
+    headers_list = build_headers_list()
+    endpoints = _build_subscription_endpoints(subscription_id)
+
+    last_error: Optional[dict] = None
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for url in endpoints:
+            for headers in headers_list:
+                for body in payload_variants:
+                    try:
+                        logger.info(f"[dodo] cancelling subscription {subscription_id} via {url}")
+                        resp = await client.patch(url, headers=headers, json=body)
+                        if resp.status_code in (200, 204):
+                            return True, None
+                        # Treat already-cancelled or not-active as success
+                        try:
+                            text = resp.text or ""
+                        except Exception:
+                            text = ""
+                        low = text.lower()
+                        if any(x in low for x in ("already cancelled", "already_cancell", "status\":\"cancelled", "status\": \"cancelled")):
+                            return True, None
+                        last_error = {"status": resp.status_code, "endpoint": url, "body": text[:2000]}
+                    except Exception as ex:
+                        last_error = {"exception": str(ex), "endpoint": url}
+    return False, last_error

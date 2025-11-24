@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 
 from core.config import logger
+from utils.storage import read_json_key, write_json_key
 from standardwebhooks import Webhook, WebhookVerificationError
 from core.auth import (
     get_uid_from_request,
@@ -777,11 +778,13 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
 
         # Try mapping subscription_id to plan via env; otherwise use metadata plan or product mapping
         sid = sub_id.strip()
-        sid_phot = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
-        sid_ag = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
-        if sid and sid_ag and sid == sid_ag:
+        sid_phot_old = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
+        sid_ag_old = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
+        sid_individual = (os.getenv("DODO_INDIVIDUAL_SUBSCRIPTION_ID") or os.getenv("VITE_DODO_INDIVIDUAL_SUBSCRIPTION_ID") or "").strip()
+        sid_studios = (os.getenv("DODO_STUDIOS_SUBSCRIPTION_ID") or os.getenv("VITE_DODO_STUDIOS_SUBSCRIPTION_ID") or "").strip()
+        if sid and (sid_studios and sid == sid_studios or sid_ag_old and sid == sid_ag_old):
             plan = "studios"
-        elif sid and sid_phot and sid == sid_phot:
+        elif sid and (sid_individual and sid == sid_individual or sid_phot_old and sid == sid_phot_old):
             plan = "individual"
         else:
             # Prefer explicit plan from metadata/query params
@@ -812,7 +815,37 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             "allowed": allowed,
         }
 
-    # --- Step 8: Affiliate commission tracking in PostgreSQL ---
+    # --- Step 8: Persist plan to Neon (PostgreSQL) ---
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return {"ok": True, "skipped": True, "reason": "user_not_found"}
+        now = datetime.utcnow()
+        user.plan = plan
+        try:
+            status = str((event_obj.get("status") or "")).strip().lower()
+        except Exception:
+            status = ""
+        if sub_id:
+            user.subscription_id = sub_id
+        if status:
+            user.subscription_status = status
+        user.updated_at = now
+        meta = user.extra_metadata or {}
+        meta.update({
+            "isPaid": True,
+            "paidAt": now.isoformat(),
+            "lastPaymentProvider": "dodo",
+            "billingCycle": billing_cycle or None,
+        })
+        user.extra_metadata = meta
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        logger.warning(f"[pricing.webhook] failed to persist plan for {uid}: {ex}")
+        return {"ok": True, "skipped": True, "reason": "db_write_failed"}
+
+    # --- Step 9: Affiliate commission tracking in PostgreSQL ---
     try:
         # Extract payment details from webhook payload
         amount_cents = 0
@@ -853,6 +886,21 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             db.commit()
     except Exception as e:
         logger.warning(f"[pricing.webhook] affiliate tracking failed: {e}")
+
+    # --- Step 10: Local entitlement mirror ---
+    try:
+        write_json_key(
+            _entitlement_key(uid),
+            {
+                "isPaid": True,
+                "plan": plan,
+                "updatedAt": event_obj.get("created_at")
+                    or event_obj.get("paid_at")
+                    or datetime.utcnow().isoformat(),
+            },
+        )
+    except Exception:
+        pass
 
     logger.info(f"[pricing.webhook] completed upgrade: uid={uid} plan={plan}")
     return {"ok": True, "upgraded": True, "uid": uid, "plan": plan}
