@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
@@ -324,5 +325,27 @@ async def _init_postgres_schema():
     except Exception as _ex:
         logger.warning(f"init_db failed: {_ex}")
 @app.get("/")
-def root():
+def root(request: Request):
+    try:
+        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
+        if host:
+            from core.database import get_db
+            from sqlalchemy.orm import Session
+            from models.shop import Shop
+            db: Session = next(get_db())
+            try:
+                shop = db.query(Shop).filter(Shop.domain['hostname'].astext == host).first()  # type: ignore
+                if shop:
+                    enabled = bool((shop.domain or {}).get('enabled') or False)
+                    if enabled:
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        url = f"{front}/{shop.slug}"
+                        return RedirectResponse(url)
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return {"ok": True}
