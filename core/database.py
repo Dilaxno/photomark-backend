@@ -3,7 +3,7 @@ PostgreSQL database connection and setup for Neon
 Replaces Firestore as primary data store
 """
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
@@ -53,3 +53,10 @@ def init_db():
     Call this on application startup
     """
     Base.metadata.create_all(bind=engine)
+    try:
+        with engine.connect() as conn:
+            chk = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shops' AND column_name='domain'"))
+            if not chk.first():
+                conn.execute(text("ALTER TABLE public.shops ADD COLUMN domain JSONB NOT NULL DEFAULT '{}'::jsonb"))
+    except Exception:
+        pass
