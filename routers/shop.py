@@ -540,6 +540,7 @@ async def get_domain_status(
             "dnsVerified": dns_verified,
             "sslStatus": ssl_status,
             "cnameObserved": cname_target,
+            "enabled": bool((shop.domain or {}).get('enabled') or False),
             "instructions": {
                 "recordType": "CNAME",
                 "name": hostname,

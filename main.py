@@ -315,6 +315,14 @@ async def _start_domain_scheduler():
     flag = (os.getenv("RUN_DOMAIN_SCHEDULER") or "0").strip()
     if flag == "1":
         asyncio.create_task(_domain_scheduler_loop())
+
+@app.on_event("startup")
+async def _init_postgres_schema():
+    try:
+        from core.database import init_db
+        init_db()
+    except Exception as _ex:
+        logger.warning(f"init_db failed: {_ex}")
 @app.get("/")
 def root():
     return {"ok": True}
