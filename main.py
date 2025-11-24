@@ -5,6 +5,9 @@ import os
 import warnings
 
 from core.config import logger  # type: ignore
+import asyncio
+import os
+import httpx
 
 # Silence a noisy Kornia FutureWarning (does not affect our watermark pipeline)
 warnings.filterwarnings(
@@ -181,7 +184,7 @@ app.include_router(replies.router)
 # product updates (changelog + email broadcast)
 try:
     from routers import updates  # noqa: E402
-    app.include_router(updates.router)
+app.include_router(updates.router)
 except Exception as _ex:
     logger.warning(f"updates router not available: {_ex}")
 
@@ -205,6 +208,108 @@ async def allow_domain(request: Request):
     except Exception as _ex:
         logger.warning(f"allow-domain check failed: {_ex}")
     return {"allow": False}
+async def _check_domain(hostname: str):
+    dns_verified = False
+    cname_target = None
+    ssl_error = None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                f"https://cloudflare-dns.com/dns-query?name={hostname}&type=CNAME",
+                headers={"Accept": "application/dns-json"}
+            )
+            data = r.json()
+            answers = data.get("Answer") or []
+            for ans in answers:
+                if (ans.get("type") == 5) and ans.get("data"):
+                    cname_target = (ans["data"] or "").strip(".").lower()
+                    if cname_target == "api.photomark.cloud":
+                        dns_verified = True
+                        break
+    except Exception:
+        dns_verified = False
+    ssl_status = "unknown"
+    if dns_verified:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                h = await client.head(f"https://{hostname}", follow_redirects=True)
+                ssl_status = "active" if h.status_code < 400 else "pending"
+        except Exception as e:
+            ssl_error = str(e)
+            ssl_status = "pending"
+    else:
+        ssl_status = "blocked"
+    return {
+        "dnsVerified": dns_verified,
+        "sslStatus": ssl_status,
+        "cnameObserved": cname_target,
+        "error": ssl_error,
+    }
+async def _domain_check_once():
+    from sqlalchemy.orm import Session
+    from models.shop import Shop
+    from core.database import get_db
+    from core.auth import get_user_email_from_uid
+    from utils.emailing import render_email, send_email_smtp
+    db: Session = next(get_db())
+    try:
+        shops = db.query(Shop).all()
+        for s in shops:
+            dom = s.domain or {}
+            hostname = (dom.get("hostname") or "").strip().lower()
+            if not hostname:
+                continue
+            prev_dns = bool(dom.get("dnsVerified"))
+            prev_ssl = str(dom.get("sslStatus") or "")
+            res = await _check_domain(hostname)
+            changed = (prev_dns != res["dnsVerified"]) or (prev_ssl != res["sslStatus"])
+            s.domain = {
+                "hostname": hostname,
+                "dnsTarget": "api.photomark.cloud",
+                "dnsVerified": res["dnsVerified"],
+                "sslStatus": res["sslStatus"],
+                "lastChecked": _now_iso(),
+                "cnameObserved": res["cnameObserved"],
+                "error": res["error"],
+            }
+            s.updated_at = _now()
+            if changed:
+                try:
+                    email = get_user_email_from_uid(s.owner_uid) or ""
+                    if email:
+                        subject = "Domain status updated"
+                        html = render_email(
+                            "email_basic.html",
+                            title="Domain status",
+                            intro=f"{hostname}: DNS={res['dnsVerified']}, SSL={res['sslStatus']}",
+                            button_label="Open shop",
+                            button_url=f"https://{hostname}",
+                        )
+                        text = f"{hostname} DNS={res['dnsVerified']} SSL={res['sslStatus']}"
+                        send_email_smtp(email, subject, html, text)
+                except Exception:
+                    pass
+        db.commit()
+    finally:
+        db.close()
+def _now():
+    from datetime import datetime
+    return datetime.utcnow()
+def _now_iso():
+    return _now().isoformat()
+async def _domain_scheduler_loop():
+    interval = int((os.getenv("DOMAIN_CHECK_INTERVAL_SEC") or "600").strip() or "600")
+    while True:
+        try:
+            await _domain_check_once()
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
+@app.on_event("startup")
+async def _start_domain_scheduler():
+    flag = (os.getenv("RUN_DOMAIN_SCHEDULER") or "0").strip()
+    if flag == "1":
+        asyncio.create_task(_domain_scheduler_loop())
 @app.get("/")
 def root():
     return {"ok": True}
