@@ -33,7 +33,9 @@ def build_headers_list() -> list[dict]:
 
 
 def build_endpoints() -> list[str]:
-    base = (DODO_API_BASE or "https://api.dodopayments.com").rstrip("/")
+    # Default to Dodo test base if env not set; override via DODO_API_BASE
+    # Valid bases: https://test.dodopayments.com (sandbox), https://live.dodopayments.com (production)
+    base = (DODO_API_BASE or "https://test.dodopayments.com").rstrip("/")
     path = (DODO_CHECKOUT_PATH or "/v1/payment-links").strip()
     if not path.startswith("/"):
         path = "/" + path
@@ -128,6 +130,8 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
                         last_error = {"status": resp.status_code, "endpoint": url, "payload_keys": list(payload.keys()), "body": body_text[:2000]}
                     except Exception as ex:
                         last_error = {"exception": str(ex), "endpoint": url, "payload_keys": list(payload.keys())}
+    if last_error:
+        logger.warning(f"[dodo] checkout link creation failed: {last_error}")
     return None, last_error
 
 
