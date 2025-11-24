@@ -201,6 +201,24 @@ async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get shop: {str(e)}")
 
+@router.get('/subscription/{sub_id}')
+async def get_shop_by_subscription(sub_id: str, db: Session = Depends(get_db)):
+    try:
+        from models.user import User
+        u = db.query(User).filter(User.subscription_id == sub_id).first()
+        if not u:
+            raise HTTPException(status_code=404, detail="Owner not found")
+        shop = db.query(Shop).filter(Shop.uid == u.uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == u.uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        return shop.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get shop: {str(e)}")
+
 
 @router.post('/settings')
 async def save_shop_settings(
