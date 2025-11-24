@@ -46,6 +46,8 @@ async def upload(
     tile_scale: Optional[float] = Form(None),
     # Single-layout background box flag
     wm_bg_box: Optional[str] = Form(None),  # '1' to enable background box on single watermark
+    wm_text_rel: Optional[float] = Form(None),
+    wm_logo_rel: Optional[float] = Form(None),
     wm_logo_size: Optional[int] = Form(None),
     artist: Optional[str] = Form(None),
     invisible: Optional[str] = Form(None),  # '1' to embed invisible signature
@@ -116,7 +118,8 @@ async def upload(
                         sig,
                         wm_pos,
                         bg_box=((wm_bg_box or '').strip() == '1'),
-                        target_w_override=int(wm_logo_size) if wm_logo_size is not None else None
+                        target_w_override=int(wm_logo_size) if wm_logo_size is not None else None,
+                        rel_w=float(wm_logo_rel) if wm_logo_rel is not None else None
                     )
             else:
                 if layout == 'tiled':
@@ -136,7 +139,8 @@ async def upload(
                         wm_pos,
                         color=wm_color or None,
                         opacity=wm_opacity if wm_opacity is not None else None,
-                        bg_box=((wm_bg_box or '').strip() == '1')
+                        bg_box=((wm_bg_box or '').strip() == '1'),
+                        base_size_rel=float(wm_text_rel) if wm_text_rel is not None else None
                     )
 
             # Optionally embed invisible signature linked to the account uid
@@ -291,6 +295,8 @@ async def process_watermark_zip(
     tile_spacing: Optional[float] = Form(None),
     tile_scale: Optional[float] = Form(None),
     wm_bg_box: Optional[str] = Form(None),
+    wm_text_rel: Optional[float] = Form(None),
+    wm_logo_rel: Optional[float] = Form(None),
     wm_logo_size: Optional[int] = Form(None),
     artist: Optional[str] = Form(None),
     invisible: Optional[str] = Form(None),
@@ -338,7 +344,8 @@ async def process_watermark_zip(
                         sig,
                         wm_pos,
                         bg_box=((wm_bg_box or '').strip() == '1'),
-                        target_w_override=int(wm_logo_size) if wm_logo_size is not None else None
+                        target_w_override=int(wm_logo_size) if wm_logo_size is not None else None,
+                        rel_w=float(wm_logo_rel) if wm_logo_rel is not None else None
                     )
             else:
                 if layout == 'tiled':
@@ -358,7 +365,8 @@ async def process_watermark_zip(
                         wm_pos,
                         color=wm_color or None,
                         opacity=wm_opacity if wm_opacity is not None else None,
-                        bg_box=((wm_bg_box or '').strip() == '1')
+                        bg_box=((wm_bg_box or '').strip() == '1'),
+                        base_size_rel=float(wm_text_rel) if wm_text_rel is not None else None
                     )
 
             # Optional invisible signature
