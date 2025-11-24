@@ -15,7 +15,7 @@ from core.auth import (
     fb_auth,
 )
 from sqlalchemy.orm import Session
-from core.database import get_db
+from core.database import get_db, SessionLocal
 from models.user import User
 from models.pricing import PricingEvent, Subscription
 from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
@@ -475,6 +475,17 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         event_obj = payload
     event_obj = event_obj if isinstance(event_obj, dict) else {}
 
+    # Ensure db session when called directly without FastAPI DI
+    try:
+        _is_session = hasattr(db, "query")
+    except Exception:
+        _is_session = False
+    if not _is_session:
+        try:
+            db = SessionLocal()
+        except Exception:
+            pass
+
     # --- Diagnostics: summarize payload structure to debug missing products ---
     try:
         def _summarize_list(lst):
@@ -841,7 +852,11 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         user.extra_metadata = meta
         db.commit()
     except Exception as ex:
-        db.rollback()
+        try:
+            if hasattr(db, "rollback"):
+                db.rollback()
+        except Exception:
+            pass
         logger.warning(f"[pricing.webhook] failed to persist plan for {uid}: {ex}")
         return {"ok": True, "skipped": True, "reason": "db_write_failed"}
 
