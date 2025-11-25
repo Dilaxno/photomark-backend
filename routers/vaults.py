@@ -20,6 +20,10 @@ from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
+from core.database import get_db
+from models.vaults import Vault
+from sqlalchemy.orm import Session
+from sqlalchemy import and_
 
 router = APIRouter(prefix="/api", tags=["vaults"])
 
@@ -313,14 +317,98 @@ def _delete_vault(uid: str, vault: str) -> bool:
 _unlocked_vaults: dict[str, set[str]] = {}
 
 def _read_vault_meta(uid: str, vault: str) -> dict:
-    key = _vault_meta_key(uid, vault)
-    meta = _read_json_key(key)
-    return meta or {}
+    """Read vault metadata from PostgreSQL (Neon)"""
+    from core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        vault_obj = db.query(Vault).filter(
+            and_(Vault.uid == uid, Vault.vault_name == vault)
+        ).first()
+        
+        if not vault_obj:
+            return {}
+        
+        # Convert database model to dict format matching old JSON structure
+        return {
+            "display_name": vault_obj.display_name,
+            "share_logo_url": vault_obj.logo_url,
+            "welcome_message": vault_obj.welcome_message,
+            "protected": vault_obj.protected,
+            "hash": vault_obj.password_hash,
+            "share_hide_ui": vault_obj.share_hide_ui,
+            "share_color": vault_obj.share_color,
+            "share_layout": vault_obj.share_layout,
+            "license_price_cents": vault_obj.license_price_cents,
+            "license_currency": vault_obj.license_currency,
+            "channel_url": vault_obj.channel_url,
+            "descriptions": (vault_obj.metadata or {}).get("descriptions", {}),
+            "slideshow": (vault_obj.metadata or {}).get("slideshow", []),
+            "order": (vault_obj.metadata or {}).get("order", []),
+            "system_vault": (vault_obj.metadata or {}).get("system_vault"),
+        }
+    finally:
+        db.close()
 
 
 def _write_vault_meta(uid: str, vault: str, meta: dict):
-    key = _vault_meta_key(uid, vault)
-    _write_json_key(key, meta or {})
+    """Write vault metadata to PostgreSQL (Neon)"""
+    from core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        vault_obj = db.query(Vault).filter(
+            and_(Vault.uid == uid, Vault.vault_name == vault)
+        ).first()
+        
+        if not vault_obj:
+            # Create new vault record
+            vault_obj = Vault(
+                uid=uid,
+                vault_name=vault
+            )
+            db.add(vault_obj)
+        
+        # Update fields from meta dict
+        if "display_name" in meta:
+            vault_obj.display_name = meta["display_name"]
+        if "share_logo_url" in meta:
+            vault_obj.logo_url = meta["share_logo_url"]
+        if "welcome_message" in meta:
+            vault_obj.welcome_message = meta["welcome_message"]
+        if "protected" in meta:
+            vault_obj.protected = meta["protected"]
+        if "hash" in meta:
+            vault_obj.password_hash = meta["hash"]
+        if "share_hide_ui" in meta:
+            vault_obj.share_hide_ui = meta["share_hide_ui"]
+        if "share_color" in meta:
+            vault_obj.share_color = meta["share_color"]
+        if "share_layout" in meta:
+            vault_obj.share_layout = meta["share_layout"]
+        if "license_price_cents" in meta:
+            vault_obj.license_price_cents = meta["license_price_cents"]
+        if "license_currency" in meta:
+            vault_obj.license_currency = meta["license_currency"]
+        if "channel_url" in meta:
+            vault_obj.channel_url = meta["channel_url"]
+        
+        # Update JSON metadata fields (descriptions, slideshow, order, system_vault)
+        current_metadata = vault_obj.metadata or {}
+        if "descriptions" in meta:
+            current_metadata["descriptions"] = meta["descriptions"]
+        if "slideshow" in meta:
+            current_metadata["slideshow"] = meta["slideshow"]
+        if "order" in meta:
+            current_metadata["order"] = meta["order"]
+        if "system_vault" in meta:
+            current_metadata["system_vault"] = meta["system_vault"]
+        vault_obj.metadata = current_metadata
+        
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        raise ex
+    finally:
+        db.close()
 
 
 def _vault_salt(uid: str, vault: str) -> str:
@@ -1758,6 +1846,24 @@ async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True)
     except Exception as ex:
         logger.warning(f"share logo upload failed: {ex}")
         return JSONResponse({"error": "upload failed"}, status_code=500)
+
+@router.post("/vaults/welcome")
+async def update_vault_welcome_message(request: Request, vault: str = Body(..., embed=True), welcome_message: str = Body(..., embed=True)):
+    """Update vault welcome message displayed to clients"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        meta["welcome_message"] = str(welcome_message).strip()
+        _write_vault_meta(uid, safe_vault, meta)
+        return {"ok": True, "welcome_message": meta["welcome_message"]}
+    except Exception as ex:
+        logger.warning(f"welcome message update failed: {ex}")
+        return JSONResponse({"error": "update failed"}, status_code=500)
 
 @router.get("/vaults/shared/photos")
 async def vaults_shared_photos(token: str, password: Optional[str] = None):
