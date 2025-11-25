@@ -32,7 +32,7 @@ def _merge_mertens(images: List[np.ndarray], cw: float, sw: float, ew: float) ->
     bgrs = [cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR) for img in images]
     # MergeMertens requires float inputs in [0,1]
     bgrs_f = [im.astype(np.float32) / 255.0 for im in bgrs]
-    merge = cv2.createMergeMertens(contrast_weight=float(cw), saturation_weight=float(sw), exposedness_weight=float(ew))
+    merge = cv2.createMergeMertens(contrast_weight=float(cw), saturation_weight=float(sw), exposure_weight=float(ew))
     fusion = merge.process(bgrs_f)  # float32 BGR [0,1]
     rgb = cv2.cvtColor((fusion * 255.0).astype(np.uint8), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     return rgb
