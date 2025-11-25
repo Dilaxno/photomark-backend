@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from io import BytesIO
 from typing import List, Optional
 
@@ -13,6 +14,9 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import cv2
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -45,6 +49,7 @@ def _load_dncnn(weights_path: Optional[str]) -> Optional[DnCNN]:
     try:
         model = DnCNN()
         if weights_path and os.path.isfile(weights_path):
+            logger.info(f"Loading DnCNN model from: {weights_path}")
             state = torch.load(weights_path, map_location="cpu")
             # Support both plain state_dict and wrapped dict
             if isinstance(state, dict) and "state_dict" in state:
@@ -52,12 +57,14 @@ def _load_dncnn(weights_path: Optional[str]) -> Optional[DnCNN]:
             # Handle keys with 'module.' prefix
             new_state = {k.replace("module.", ""): v for k, v in state.items()}
             model.load_state_dict(new_state, strict=False)
+            logger.info("DnCNN model loaded successfully")
         else:
-            # No weights provided -> return None to trigger fallback
+            logger.warning(f"DnCNN weights not found at: {weights_path}")
             return None
         model.eval()
         return model
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to load DnCNN model: {e}")
         return None
 
 
@@ -115,6 +122,7 @@ async def denoise_images(
 
     # Try to load DnCNN model from environment variable
     weights = os.getenv("DNCNN_WEIGHTS", "/home/ubuntu/models/dncnn.pth")
+    logger.info(f"Attempting to load DnCNN model from: {weights}")
     model = _load_dncnn(weights)
 
     outputs: List[tuple[str, bytes, str]] = []
@@ -126,8 +134,10 @@ async def denoise_images(
             data = await up.read()
             rgb, alpha = _read_image_keep_alpha(data)
             if model is not None:
+                logger.info(f"Using DnCNN model for denoising {name}")
                 out_rgb = _denoise_dncnn(rgb, float(max(0.0, min(1.0, strength))), model)
             else:
+                logger.info(f"Using OpenCV fallback for denoising {name}")
                 out_rgb = _denoise_cv2(rgb, float(max(0.0, min(1.0, strength))))
 
             out_img = _merge_alpha(out_rgb, alpha)
