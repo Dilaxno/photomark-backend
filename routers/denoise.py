@@ -9,77 +9,64 @@ import numpy as np
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
 from PIL import Image
-
-# Optional heavy deps
-import torch
-import torch.nn as nn
 import cv2
 
-# Set up logging
-logger = logging.getLogger(__name__)
+# Try to import Aydin for advanced denoising
+try:
+    from aydin import Denoise
+    AYDIN_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("Aydin library loaded successfully")
+except ImportError:
+    AYDIN_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("Aydin library not available, falling back to OpenCV")
 
 router = APIRouter()
 
 
-class DnCNN(nn.Module):
-    def __init__(self, depth: int = 17, n_channels: int = 64, image_channels: int = 3):
-        super().__init__()
-        kernel_size = 3
-        padding = 1
-        layers = [
-            nn.Conv2d(in_channels=image_channels, out_channels=n_channels, kernel_size=kernel_size, padding=padding, bias=True),
-            nn.ReLU(inplace=True),
-        ]
-        for _ in range(depth - 2):
-            layers += [
-                nn.Conv2d(n_channels, n_channels, kernel_size, padding=padding, bias=False),
-                nn.BatchNorm2d(n_channels),
-                nn.ReLU(inplace=True),
-            ]
-        layers += [nn.Conv2d(in_channels=n_channels, out_channels=image_channels, kernel_size=kernel_size, padding=padding, bias=False)]
-        self.dncnn = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Residual learning: output is predicted noise
-        noise = self.dncnn(x)
-        return x - noise
-
-
-def _load_dncnn(weights_path: Optional[str]) -> Optional[DnCNN]:
+def _denoise_aydin(img: np.ndarray, strength: float) -> np.ndarray:
+    """Denoise using Aydin library with automatic method selection."""
     try:
-        model = DnCNN()
-        if weights_path and os.path.isfile(weights_path):
-            logger.info(f"Loading DnCNN model from: {weights_path}")
-            state = torch.load(weights_path, map_location="cpu")
-            # Support both plain state_dict and wrapped dict
-            if isinstance(state, dict) and "state_dict" in state:
-                state = state["state_dict"]
-            # Handle keys with 'module.' prefix
-            new_state = {k.replace("module.", ""): v for k, v in state.items()}
-            model.load_state_dict(new_state, strict=False)
-            logger.info("DnCNN model loaded successfully")
+        # Convert RGB to grayscale for Aydin (it works better with single channel)
+        if img.ndim == 3 and img.shape[2] == 3:
+            # Process each channel separately for better results
+            denoised_channels = []
+            for channel in range(3):
+                channel_img = img[:, :, channel].astype(np.float32)
+                
+                # Create Aydin denoiser
+                denoiser = Denoise()
+                
+                # Aydin automatically selects the best method
+                denoised_channel = denoiser.denoise(channel_img)
+                
+                # Apply strength blending
+                if 0.0 <= strength <= 1.0:
+                    denoised_channel = (1 - strength) * channel_img + strength * denoised_channel
+                
+                denoised_channels.append(denoised_channel)
+            
+            # Combine channels back
+            denoised = np.stack(denoised_channels, axis=2)
         else:
-            logger.warning(f"DnCNN weights not found at: {weights_path}")
-            return None
-        model.eval()
-        return model
+            # Single channel image
+            img_float = img.astype(np.float32)
+            denoiser = Denoise()
+            denoised = denoiser.denoise(img_float)
+            
+            # Apply strength blending
+            if 0.0 <= strength <= 1.0:
+                denoised = (1 - strength) * img_float + strength * denoised
+        
+        # Convert back to uint8
+        denoised = np.clip(denoised, 0, 255).astype(np.uint8)
+        return denoised
+        
     except Exception as e:
-        logger.error(f"Failed to load DnCNN model: {e}")
-        return None
-
-
-def _denoise_dncnn(img: np.ndarray, strength: float, model: DnCNN) -> np.ndarray:
-    # img: HxWxC in RGB [0..255]
-    im = img.astype(np.float32) / 255.0
-    # Scale input by strength using simple trick: blend with mild noise estimate
-    x = torch.from_numpy(im.transpose(2, 0, 1)).unsqueeze(0)
-    with torch.no_grad():
-        out = model(x).clamp(0.0, 1.0)
-        out_np = out.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-    if 0.0 <= strength <= 1.0:
-        out_np = (1 - strength) * im + strength * out_np
-    out_np = np.clip(out_np * 255.0 + 0.5, 0, 255).astype(np.uint8)
-    return out_np
+        logger.error(f"Aydin denoising failed: {e}")
+        # Fallback to OpenCV if Aydin fails
+        return _denoise_cv2(img, strength)
 
 
 def _denoise_cv2(img: np.ndarray, strength: float) -> np.ndarray:
@@ -120,11 +107,6 @@ async def denoise_images(
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
 
-    # Try to load DnCNN model from environment variable
-    weights = os.getenv("DNCNN_WEIGHTS", "/home/ubuntu/models/dncnn.pth")
-    logger.info(f"Attempting to load DnCNN model from: {weights}")
-    model = _load_dncnn(weights)
-
     outputs: List[tuple[str, bytes, str]] = []
 
     for up in files:
@@ -133,9 +115,11 @@ async def denoise_images(
             ext = os.path.splitext(name)[1].lower() or ".jpg"
             data = await up.read()
             rgb, alpha = _read_image_keep_alpha(data)
-            if model is not None:
-                logger.info(f"Using DnCNN model for denoising {name}")
-                out_rgb = _denoise_dncnn(rgb, float(max(0.0, min(1.0, strength))), model)
+            
+            # Use Aydin if available, otherwise fallback to OpenCV
+            if AYDIN_AVAILABLE:
+                logger.info(f"Using Aydin library for denoising {name}")
+                out_rgb = _denoise_aydin(rgb, float(max(0.0, min(1.0, strength))))
             else:
                 logger.info(f"Using OpenCV fallback for denoising {name}")
                 out_rgb = _denoise_cv2(rgb, float(max(0.0, min(1.0, strength))))
