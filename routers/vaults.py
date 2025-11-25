@@ -899,6 +899,31 @@ async def vaults_set_meta(request: Request, payload: VaultMetaUpdate, db: Sessio
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+@router.post("/vaults/customize")
+async def vaults_customize(request: Request, vault: str = Body(..., embed=True), db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    v = (vault or '').strip()
+    if not v:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    try:
+        safe_vault = _vault_key(uid, v)[1]
+        mmeta = _pg_read_vault_meta(db, uid, safe_vault) or _read_vault_meta(uid, safe_vault) or {}
+        share = {
+            "hide_ui": bool(mmeta.get("share_hide_ui")),
+            "color": str(mmeta.get("share_color") or ""),
+            "layout": str(mmeta.get("share_layout") or "grid"),
+            "logo_url": str(mmeta.get("share_logo_url") or ""),
+            "welcome_message": str(mmeta.get("welcome_message") or ""),
+            "bg_color": str(mmeta.get("share_bg_color") or ""),
+        }
+        return {"ok": True, "vault": safe_vault, "display_name": str(mmeta.get("display_name") or safe_vault), "share": share}
+    except Exception as ex:
+        logger.warning(f"/vaults/customize failed: {ex}")
+        return JSONResponse({"error": "load_failed"}, status_code=500)
+
+
 @router.post("/vaults/unlock")
 async def vaults_unlock(request: Request, vault: str = Body(..., embed=True), password: str = Body(..., embed=True)):
     uid = get_uid_from_request(request)
