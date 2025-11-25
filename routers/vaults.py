@@ -1812,7 +1812,14 @@ async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True)
         return {"ok": True, "logo_url": url}
     except Exception as ex:
         logger.warning(f"share logo upload failed: {ex}")
-        return JSONResponse({"error": "upload failed"}, status_code=500)
+        # Provide additional diagnostics to the client
+        hint = ""
+        try:
+            from core.config import R2_PUBLIC_BASE_URL, R2_BUCKET
+            hint = f"Check R2 env and bucket. R2_PUBLIC_BASE_URL={R2_PUBLIC_BASE_URL} bucket={R2_BUCKET}"
+        except Exception:
+            pass
+        return JSONResponse({"error": "upload failed", "hint": hint}, status_code=500)
 
 @router.post("/vaults/welcome")
 async def update_vault_welcome_message(request: Request, vault: str = Body(..., embed=True), welcome_message: str = Body(..., embed=True), db: Session = Depends(get_db)):

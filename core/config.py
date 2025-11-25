@@ -18,8 +18,8 @@ R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
 R2_BUCKET = os.getenv("R2_BUCKET", "")
-R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "")  # Deprecated: use R2_CUSTOM_DOMAIN for private signed URLs
-R2_CUSTOM_DOMAIN = os.getenv("R2_CUSTOM_DOMAIN", "")  # Custom domain for presigned URLs (e.g., gallery.photomark.cloud)
+R2_PUBLIC_BASE_URL = (os.getenv("R2_PUBLIC_BASE_URL", "") or "").strip().strip('"').strip("'").strip('`')  # Deprecated: use R2_CUSTOM_DOMAIN for private signed URLs
+R2_CUSTOM_DOMAIN = (os.getenv("R2_CUSTOM_DOMAIN", "") or "").strip().strip('"').strip("'").strip('`')  # Custom domain for presigned URLs (e.g., gallery.photomark.cloud)
 
 MAX_FILES = int(os.getenv("MAX_FILES", "100"))
 
@@ -134,10 +134,12 @@ if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
     )
     
     # Separate client for generating presigned URLs with custom domain
-    if R2_CUSTOM_DOMAIN:
+    # Normalize custom domain to remove protocol if mistakenly included
+    _CUSTOM = R2_CUSTOM_DOMAIN.replace("https://", "").replace("http://", "") if R2_CUSTOM_DOMAIN else ""
+    if _CUSTOM:
         s3_presign_client = boto3.client(
             "s3",
-            endpoint_url=f"https://{R2_CUSTOM_DOMAIN}",
+            endpoint_url=f"https://{_CUSTOM}",
             aws_access_key_id=R2_ACCESS_KEY_ID,
             aws_secret_access_key=R2_SECRET_ACCESS_KEY,
             config=BotoConfig(signature_version="s3v4"),
