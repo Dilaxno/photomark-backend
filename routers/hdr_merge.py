@@ -18,6 +18,29 @@ def _read_image_rgb_float32(data: bytes) -> np.ndarray:
     return arr
 
 
+def _resize_images_to_common_size(images: List[np.ndarray]) -> List[np.ndarray]:
+    """Resize all images to the smallest common dimensions to ensure compatibility."""
+    if not images:
+        return images
+    
+    # Find the minimum dimensions across all images
+    min_height = min(img.shape[0] for img in images)
+    min_width = min(img.shape[1] for img in images)
+    
+    resized_images = []
+    for img in images:
+        if img.shape[0] != min_height or img.shape[1] != min_width:
+            # Convert to uint8 for OpenCV resize, then back to float32
+            img_uint8 = (img * 255).astype(np.uint8)
+            resized_uint8 = cv2.resize(img_uint8, (min_width, min_height), interpolation=cv2.INTER_LANCZOS4)
+            resized_float = resized_uint8.astype(np.float32) / 255.0
+            resized_images.append(resized_float)
+        else:
+            resized_images.append(img)
+    
+    return resized_images
+
+
 def _align_images(images: List[np.ndarray]) -> List[np.ndarray]:
     # OpenCV AlignMTB works on 8-bit images in BGR
     bgrs = [cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR) for img in images]
@@ -74,6 +97,9 @@ async def hdr_merge(
             names.append(f.filename or "img")
             data = await f.read()
             imgs.append(_read_image_rgb_float32(data))
+
+        # Resize images to common dimensions (required by OpenCV HDR functions)
+        imgs = _resize_images_to_common_size(imgs)
 
         # Align slight motion between frames if requested
         if align:

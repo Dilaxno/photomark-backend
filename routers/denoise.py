@@ -113,8 +113,8 @@ async def denoise_images(
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
 
-    # Try to load DnCNN model
-    weights = os.getenv("DNCNN_WEIGHTS", "./models/dncnn.pth")
+    # Try to load DnCNN model from environment variable
+    weights = os.getenv("DNCNN_WEIGHTS", "/home/ubuntu/models/dncnn.pth")
     model = _load_dncnn(weights)
 
     outputs: List[tuple[str, bytes, str]] = []
