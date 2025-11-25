@@ -40,12 +40,13 @@ class Vault(Base):
     # Channel and communication
     channel_url = Column(Text, nullable=True)
     
-    # Additional metadata stored as JSON
+    # Additional metadata stored as JSON (column name 'metadata')
     # - descriptions: dict of photo_key -> description
     # - slideshow: list of slideshow items
     # - order: custom photo ordering
     # - system_vault: special vault type (e.g., "favorites")
-    metadata = Column(JSON, default={})
+    # Note: attribute name cannot be 'metadata' because it's reserved by SQLAlchemy
+    meta = Column('metadata', JSON, default={})
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -68,7 +69,7 @@ class Vault(Base):
             "license_price_cents": self.license_price_cents,
             "license_currency": self.license_currency,
             "channel_url": self.channel_url,
-            "metadata": self.metadata or {},
+            "metadata": self.meta or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
