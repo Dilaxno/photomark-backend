@@ -23,7 +23,7 @@ from utils.invisible_mark import embed_signature as embed_invisible, build_paylo
 from routers.vaults import (
     _read_vault, _write_vault, _vault_key,
     _read_vault_meta, _write_vault_meta, _unlock_vault,
-    _vault_salt, _hash_password
+    _vault_salt, _hash_password_bcrypt
 )
 
 router = APIRouter(prefix="", tags=["upload"])  # no prefix to serve /upload
@@ -197,8 +197,7 @@ async def upload(
                 _write_vault(uid, name, keys_now)
                 prot = (vault_protect or '').strip() == '1'
                 if prot and (vault_password or '').strip():
-                    salt = _vault_salt(uid, name)
-                    _write_vault_meta(uid, name, {"protected": True, "hash": _hash_password(vault_password or '', salt)})
+                    _write_vault_meta(uid, name, {"protected": True, "password_hash": _hash_password_bcrypt(vault_password or '')})
                 final_vault = _vault_key(uid, name)[1]
     except Exception as ex:
         logger.warning(f"vault update failed: {ex}")
