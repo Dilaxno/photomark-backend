@@ -1165,11 +1165,29 @@ async def vaults_get_preview(token: str):
         meta = _read_vault_meta(uid, vault)
         display_name = meta.get("display_name") if meta else None
         
+        # Get slideshow data
+        slideshow_items = []
+        if meta and "slideshow" in meta:
+            slideshow_data = meta["slideshow"]
+            for slide in slideshow_data:
+                # Find the photo in items to get the URL
+                photo_key = slide.get("key")
+                if photo_key:
+                    matching_photo = next((item for item in items if item["key"] == photo_key), None)
+                    if matching_photo:
+                        slideshow_items.append({
+                            "key": photo_key,
+                            "url": matching_photo["url"],
+                            "name": matching_photo["name"],
+                            "title": slide.get("title", "")
+                        })
+        
         return {
             "vault": vault,
             "display_name": display_name or vault.replace("_", " "),
             "photos": items,
-            "photo_count": len(items)
+            "photo_count": len(items),
+            "slideshows": slideshow_items
         }
     except Exception as ex:
         logger.error(f"Failed to get preview: {ex}")
