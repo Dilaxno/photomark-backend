@@ -45,7 +45,4 @@ redis==5.0.1
 # Google Gemini AI
 google-generativeai==0.8.3
 
-# Aydin for advanced image denoising
-aydin
-
 wand>=0.6.11
