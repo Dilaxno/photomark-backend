@@ -17,7 +17,7 @@ from routers.vaults import (
     _read_vault_meta,
     _write_vault_meta,
     _vault_salt,
-    _hash_password,
+    _hash_password_bcrypt,
     _vault_key,
     _delete_vault,
 )
@@ -336,8 +336,7 @@ async def chat(request: Request, body: Dict[str, Any]):
                         keys = _read_vault(eff_uid, name)
                         _write_vault(eff_uid, name, keys)
                         if protect and password:
-                            salt = _vault_salt(eff_uid, name)
-                            _write_vault_meta(eff_uid, name, {"protected": True, "hash": _hash_password(password, salt)})
+                            _write_vault_meta(eff_uid, name, {"protected": True, "password_hash": _hash_password_bcrypt(password)})
                         executed["vault"] = {"name": _vault_key(eff_uid, name)[1], "count": len(keys)}
                     except Exception as ex:
                         executed["errors"] = list(set(list(executed.get("errors", [])) + [str(ex)]))
