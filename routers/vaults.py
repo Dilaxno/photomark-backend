@@ -1917,6 +1917,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
             "color": str(mmeta.get("share_color") or ""),
             "layout": str(mmeta.get("share_layout") or "grid"),
             "logo_url": str(mmeta.get("share_logo_url") or ""),
+            "welcome_message": str(mmeta.get("welcome_message") or ""),
         }
         dmap = mmeta.get("descriptions") or {}
         if isinstance(dmap, dict):
