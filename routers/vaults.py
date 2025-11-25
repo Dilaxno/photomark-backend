@@ -806,6 +806,16 @@ class VaultMetaUpdate(BaseModel):
     descriptions: Optional[dict[str, str]] | None = None
 
 
+class SlideshowItem(BaseModel):
+    key: str
+    title: Optional[str] = None
+
+
+class SlideshowUpdatePayload(BaseModel):
+    vault: str
+    slideshow: List[SlideshowItem]
+
+
 @router.post("/vaults/meta")
 async def vaults_set_meta(request: Request, payload: VaultMetaUpdate):
     uid = get_uid_from_request(request)
@@ -3037,5 +3047,75 @@ async def licenses_verify(doc: LicenseDoc):
             return JSONResponse({"ok": False, "error": "invalid signature"}, status_code=400)
 
         return JSONResponse({"ok": False, "error": "unknown algo"}, status_code=400)
+
+
+@router.get("/vaults/slideshow")
+async def get_vault_slideshow(request: Request, vault: str):
+    """Get slideshow configuration for a vault"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        slideshow = meta.get("slideshow", [])
+        
+        # Validate slideshow items still exist in vault
+        vault_keys = set(_read_vault(uid, safe_vault))
+        valid_slideshow = []
+        
+        for item in slideshow:
+            if isinstance(item, dict) and item.get("key") in vault_keys:
+                valid_slideshow.append({
+                    "key": item["key"],
+                    "title": item.get("title"),
+                    "url": _get_url_for_key(item["key"], expires_in=3600),
+                    "name": os.path.basename(item["key"])
+                })
+        
+        return {"slideshow": valid_slideshow}
     except Exception as ex:
-        return JSONResponse({"ok": False, "error": str(ex)}, status_code=400)
+        logger.error(f"Failed to get vault slideshow: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
+@router.post("/vaults/slideshow")
+async def update_vault_slideshow(request: Request, payload: SlideshowUpdatePayload):
+    """Update slideshow configuration for a vault"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    v = (payload.vault or '').strip()
+    if not v:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    
+    try:
+        safe_vault = _vault_key(uid, v)[1]
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        
+        # Validate that all slideshow keys exist in the vault
+        vault_keys = set(_read_vault(uid, safe_vault))
+        valid_slideshow = []
+        
+        for item in payload.slideshow:
+            if item.key in vault_keys:
+                valid_slideshow.append({
+                    "key": item.key,
+                    "title": item.title
+                })
+            else:
+                logger.warning(f"Slideshow item key {item.key} not found in vault {safe_vault}")
+        
+        meta["slideshow"] = valid_slideshow
+        _write_vault_meta(uid, safe_vault, meta)
+        
+        return {
+            "ok": True,
+            "vault": safe_vault,
+            "slideshow_count": len(valid_slideshow)
+        }
+    except Exception as ex:
+        logger.error(f"Failed to update vault slideshow: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
