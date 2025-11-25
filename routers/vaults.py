@@ -816,6 +816,7 @@ class VaultMetaUpdate(BaseModel):
     share_color: Optional[str] | None = None
     share_layout: Optional[str] | None = None  # 'grid' | 'masonry'
     share_logo_url: Optional[str] | None = None
+    share_bg_color: Optional[str] | None = None
     descriptions: Optional[dict[str, str]] | None = None
 
 
@@ -859,6 +860,8 @@ async def vaults_set_meta(request: Request, payload: VaultMetaUpdate, db: Sessio
             meta["share_layout"] = lay
         if payload.share_logo_url is not None:
             meta["share_logo_url"] = str(payload.share_logo_url).strip()
+        if payload.share_bg_color is not None:
+            meta["share_bg_color"] = str(payload.share_bg_color).strip()
         if isinstance(payload.descriptions, dict):
             # Merge into existing descriptions map
             existing_desc = meta.get("descriptions") or {}
@@ -883,6 +886,7 @@ async def vaults_set_meta(request: Request, payload: VaultMetaUpdate, db: Sessio
             "share_color": meta.get("share_color"),
             "share_layout": meta.get("share_layout"),
             "share_logo_url": meta.get("share_logo_url"),
+            "share_bg_color": meta.get("share_bg_color"),
             "descriptions": meta.get("descriptions"),
         })
         return {"ok": True, "vault": safe_vault, "display_name": meta.get("display_name"), "order": meta.get("order"), "share": {
@@ -1964,6 +1968,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
             "layout": str(mmeta.get("share_layout") or "grid"),
             "logo_url": str(mmeta.get("share_logo_url") or ""),
             "welcome_message": str(mmeta.get("welcome_message") or ""),
+            "bg_color": str(mmeta.get("share_bg_color") or ""),
         }
         dmap = mmeta.get("descriptions") or {}
         if isinstance(dmap, dict):
