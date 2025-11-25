@@ -10,6 +10,7 @@ from core.config import logger, s3, R2_BUCKET
 from sqlalchemy.orm import Session
 from core.database import get_db
 from models.user import User
+from routers.vaults import _read_vault_meta, _vault_key, STATIC_DIR, _pg_upsert_vault_meta
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])  # secure endpoints via ADMIN_SECRET
 
@@ -241,7 +242,106 @@ async def admin_users_search(request: Request, q: str, secret: Optional[str] = N
         return {"users": out, "query": query}
     except Exception as ex:
         logger.warning(f"/api/admin/users/search failed: {ex}")
-        return JSONResponse({"error": "search_failed"}, status_code=500)
+    return JSONResponse({"error": "search_failed"}, status_code=500)
+
+
+def _list_vault_names_for_uid(uid: str) -> List[str]:
+    prefix = f"users/{uid}/vaults/"
+    names: List[str] = []
+    try:
+        if s3 and R2_BUCKET:
+            bucket = s3.Bucket(R2_BUCKET)
+            for obj in bucket.objects.filter(Prefix=prefix):
+                key = obj.key
+                if not key.endswith(".json"):
+                    continue
+                tail = key[len(prefix):]
+                if "/" in tail:
+                    continue
+                base = os.path.basename(key)[:-5]
+                names.append(base)
+        else:
+            dir_path = os.path.join(STATIC_DIR, prefix)
+            if os.path.isdir(dir_path):
+                for f in os.listdir(dir_path):
+                    if f.endswith(".json") and f != "_meta.json":
+                        names.append(f[:-5])
+    except Exception:
+        pass
+    out = sorted(set(n for n in names if isinstance(n, str) and n.strip()))
+    return out
+
+
+def _shared_pairs_from_tokens() -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    try:
+        if s3 and R2_BUCKET:
+            bucket = s3.Bucket(R2_BUCKET)
+            for obj in bucket.objects.filter(Prefix="shares/"):
+                k = obj.key
+                if not k.endswith(".json"):
+                    continue
+                try:
+                    import json as _j
+                    body = obj.get()["Body"].read().decode("utf-8")
+                    rec = _j.loads(body)
+                    uid = str(rec.get("uid") or "").strip()
+                    vault = str(rec.get("vault") or "").strip()
+                    if uid and vault:
+                        pairs.add((uid, vault))
+                except Exception:
+                    continue
+        else:
+            base = os.path.join(STATIC_DIR, "shares")
+            if os.path.isdir(base):
+                for f in os.listdir(base):
+                    if f.endswith(".json"):
+                        try:
+                            path = os.path.join(base, f)
+                            with open(path, "r", encoding="utf-8") as fh:
+                                rec = json.load(fh)
+                            uid = str(rec.get("uid") or "").strip()
+                            vault = str(rec.get("vault") or "").strip()
+                            if uid and vault:
+                                pairs.add((uid, vault))
+                        except Exception:
+                            continue
+    except Exception:
+        pass
+    return pairs
+
+
+@router.post("/migrate/vaults-meta")
+async def admin_migrate_vaults_meta(request: Request, secret: Optional[str] = None, db: Session = Depends(get_db)):
+    sec = _require_admin(request, secret)
+    if sec is not None:
+        return sec
+    try:
+        users = _fetch_all_users_sql(db, max_count=5000)
+        shared_pairs = _shared_pairs_from_tokens()
+        migrated = 0
+        skipped = 0
+        errors: List[str] = []
+        for uid, _ in users:
+            try:
+                vault_names = _list_vault_names_for_uid(uid)
+                for v in vault_names:
+                    try:
+                        safe_v = _vault_key(uid, v)[1]
+                        meta = _read_vault_meta(uid, safe_v) or {}
+                        vis = "shared" if (uid, safe_v) in shared_pairs else "private"
+                        _pg_upsert_vault_meta(db, uid, safe_v, meta, visibility=vis)
+                        migrated += 1
+                    except Exception as ex:
+                        errors.append(f"{uid}:{v}:{ex}")
+                        skipped += 1
+            except Exception as ex:
+                errors.append(f"{uid}:list_failed:{ex}")
+                continue
+        return {"ok": True, "migrated": migrated, "skipped": skipped, "errors": errors[:50]}
+    except Exception as ex:
+        logger.warning(f"/api/admin/migrate/vaults-meta failed: {ex}")
+        return JSONResponse({"error": "migrate_failed"}, status_code=500)
 
 
 @router.post("/users/update")

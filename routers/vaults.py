@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Request, Body, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Request, Body, UploadFile, File, Form, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -20,6 +20,9 @@ from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from core.database import get_db
 
 router = APIRouter(prefix="/api", tags=["vaults"])
 
@@ -536,7 +539,7 @@ class VaultCreatePayload(BaseModel):
     client_emails: Optional[List[str]] = []
 
 @router.post("/vaults/create")
-async def vaults_create(request: Request, payload: VaultCreatePayload):
+async def vaults_create(request: Request, payload: VaultCreatePayload, db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -580,6 +583,11 @@ async def vaults_create(request: Request, payload: VaultCreatePayload):
         # Save metadata if any
         if meta:
             _write_vault_meta(uid, name, meta)
+        try:
+            safe_name = _vault_key(uid, name)[1]
+            _pg_upsert_vault_meta(db, uid, safe_name, meta if meta else {}, visibility="private")
+        except Exception:
+            pass
         
         return {
             "name": _vault_key(uid, name)[1], 
@@ -591,7 +599,7 @@ async def vaults_create(request: Request, payload: VaultCreatePayload):
 
 
 @router.post("/vaults/add")
-async def vaults_add(request: Request, vault: str = Body(..., embed=True), keys: List[str] = Body(..., embed=True), password: Optional[str] = Body(None, embed=True)):
+async def vaults_add(request: Request, vault: str = Body(..., embed=True), keys: List[str] = Body(..., embed=True), password: Optional[str] = Body(None, embed=True), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -601,6 +609,11 @@ async def vaults_add(request: Request, vault: str = Body(..., embed=True), keys:
         filtered = [k for k in keys if k.startswith(f"users/{uid}/")]
         merged = sorted(set(exist) | set(filtered))
         _write_vault(uid, vault, merged)
+        try:
+            safe_vault = _vault_key(uid, vault)[1]
+            _pg_upsert_vault_meta(db, uid, safe_vault, {}, visibility="private")
+        except Exception:
+            pass
         return {"vault": _vault_key(uid, vault)[1], "count": len(merged)}
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
@@ -817,7 +830,7 @@ class SlideshowUpdatePayload(BaseModel):
 
 
 @router.post("/vaults/meta")
-async def vaults_set_meta(request: Request, payload: VaultMetaUpdate):
+async def vaults_set_meta(request: Request, payload: VaultMetaUpdate, db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -863,6 +876,15 @@ async def vaults_set_meta(request: Request, payload: VaultMetaUpdate):
             existing_desc.update(clean_desc)
             meta["descriptions"] = existing_desc
         _write_vault_meta(uid, safe_vault, meta)
+        _pg_upsert_vault_meta(db, uid, safe_vault, {
+            "display_name": meta.get("display_name"),
+            "order": meta.get("order"),
+            "share_hide_ui": meta.get("share_hide_ui"),
+            "share_color": meta.get("share_color"),
+            "share_layout": meta.get("share_layout"),
+            "share_logo_url": meta.get("share_logo_url"),
+            "descriptions": meta.get("descriptions"),
+        })
         return {"ok": True, "vault": safe_vault, "display_name": meta.get("display_name"), "order": meta.get("order"), "share": {
             "hide_ui": bool(meta.get("share_hide_ui")),
             "color": str(meta.get("share_color") or ""),
@@ -1195,7 +1217,7 @@ async def vaults_get_preview(token: str):
 
 
 @router.post("/vaults/share")
-async def vaults_share(request: Request, payload: dict = Body(...)):
+async def vaults_share(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -1266,6 +1288,10 @@ async def vaults_share(request: Request, payload: dict = Body(...)):
     except Exception:
         pass
     _write_json_key(_share_key(token), rec)
+    try:
+        _pg_upsert_vault_meta(db, uid, safe_vault, {}, visibility="shared")
+    except Exception:
+        pass
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
     link = f"{front}/#share?token={token}"
@@ -1760,7 +1786,7 @@ async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True)
         return JSONResponse({"error": "upload failed"}, status_code=500)
 
 @router.post("/vaults/welcome")
-async def update_vault_welcome_message(request: Request, vault: str = Body(..., embed=True), welcome_message: str = Body(..., embed=True)):
+async def update_vault_welcome_message(request: Request, vault: str = Body(..., embed=True), welcome_message: str = Body(..., embed=True), db: Session = Depends(get_db)):
     """Update vault welcome message displayed to clients"""
     uid = get_uid_from_request(request)
     if not uid:
@@ -1770,15 +1796,17 @@ async def update_vault_welcome_message(request: Request, vault: str = Body(..., 
     try:
         safe_vault = _vault_key(uid, vault)[1]
         meta = _read_vault_meta(uid, safe_vault) or {}
-        meta["welcome_message"] = str(welcome_message).strip()
+        msg = str(welcome_message).strip()
+        meta["welcome_message"] = msg
         _write_vault_meta(uid, safe_vault, meta)
-        return {"ok": True, "welcome_message": meta["welcome_message"]}
+        _pg_upsert_vault_meta(db, uid, safe_vault, {"welcome_message": msg})
+        return {"ok": True, "welcome_message": msg}
     except Exception as ex:
         logger.warning(f"welcome message update failed: {ex}")
         return JSONResponse({"error": "update failed"}, status_code=500)
 
 @router.get("/vaults/shared/photos")
-async def vaults_shared_photos(token: str, password: Optional[str] = None):
+async def vaults_shared_photos(token: str, password: Optional[str] = None, db: Session = Depends(get_db)):
     if not token or len(token) < 10:
         return JSONResponse({"error": "invalid token"}, status_code=400)
 
@@ -1929,7 +1957,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None):
     # Share customization and descriptions
     share = {}
     try:
-        mmeta = _read_vault_meta(uid, vault) or {}
+        mmeta = _pg_read_vault_meta(db, uid, vault) or _read_vault_meta(uid, vault) or {}
         share = {
             "hide_ui": bool(mmeta.get("share_hide_ui")),
             "color": str(mmeta.get("share_color") or ""),
@@ -3158,3 +3186,35 @@ async def update_vault_slideshow(request: Request, payload: SlideshowUpdatePaylo
     except Exception as ex:
         logger.error(f"Failed to update vault slideshow: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=400)
+def _pg_read_vault_meta(db: Session, uid: str, name: str) -> dict:
+    try:
+        row = db.execute(text("SELECT metadata FROM public.vaults WHERE owner_uid=:uid AND name=:name"), {"uid": uid, "name": name}).first()
+        if not row:
+            return {}
+        data = row[0]
+        if isinstance(data, dict):
+            return data
+        try:
+            return json.loads(data) if isinstance(data, str) else {}
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+
+def _pg_upsert_vault_meta(db: Session, uid: str, name: str, meta_updates: dict, visibility: str | None = None) -> None:
+    md = json.dumps(meta_updates or {})
+    try:
+        existing = db.execute(text("SELECT id, visibility FROM public.vaults WHERE owner_uid=:uid AND name=:name"), {"uid": uid, "name": name}).first()
+        if existing:
+            vis = visibility or existing[1] or 'private'
+            db.execute(text("UPDATE public.vaults SET metadata = COALESCE(metadata, '{}'::jsonb) || :md::jsonb, visibility=:vis, updated_at=NOW() WHERE owner_uid=:uid AND name=:name"), {"md": md, "vis": vis, "uid": uid, "name": name})
+        else:
+            vis = visibility or 'private'
+            db.execute(text("INSERT INTO public.vaults (owner_uid, name, visibility, metadata) VALUES (:uid, :name, :vis, :md::jsonb)"), {"uid": uid, "name": name, "vis": vis, "md": md})
+        db.commit()
+    except Exception as ex:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(f"vault meta upsert failed: {ex}")
