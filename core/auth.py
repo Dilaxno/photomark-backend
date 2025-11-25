@@ -68,14 +68,10 @@ try:
     FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
     FIREBASE_SERVICE_ACCOUNT_JSON_PATH = (os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON_PATH", "") or "").strip().strip('"').strip("'")
 
-    # Default to repo service account file if present
-    DEFAULT_SA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "firebase-adminsdk.json"))
-    if not FIREBASE_SERVICE_ACCOUNT_JSON_PATH and os.path.isfile(DEFAULT_SA_PATH):
-        FIREBASE_SERVICE_ACCOUNT_JSON_PATH = DEFAULT_SA_PATH
-
     if not getattr(firebase_admin, "_apps", []):
         if FIREBASE_SERVICE_ACCOUNT_JSON:
-            cred = fb_credentials.Certificate(eval(FIREBASE_SERVICE_ACCOUNT_JSON))
+            import json
+            cred = fb_credentials.Certificate(json.loads(FIREBASE_SERVICE_ACCOUNT_JSON))
             firebase_admin.initialize_app(cred, {"projectId": FIREBASE_PROJECT_ID} if FIREBASE_PROJECT_ID else None)
         elif FIREBASE_SERVICE_ACCOUNT_JSON_PATH and os.path.isfile(FIREBASE_SERVICE_ACCOUNT_JSON_PATH):
             from os import environ

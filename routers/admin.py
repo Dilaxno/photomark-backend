@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Request, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from core.config import logger, s3, R2_BUCKET
+from core.config import logger, s3, R2_BUCKET, ADMIN_ALLOWLIST_IPS
 from sqlalchemy.orm import Session
 from core.database import get_db
 from models.user import User
@@ -48,6 +48,16 @@ def _require_admin(request: Request, secret: Optional[str] = None) -> Optional[J
     provided = _extract_secret(request, secret)
     if not provided or provided != configured:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        if ADMIN_ALLOWLIST_IPS:
+            ip = request.client.host if request.client else ""
+            forwarded = request.headers.get("X-Forwarded-For")
+            if forwarded:
+                ip = forwarded.split(",")[0].strip()
+            if ip and ip not in ADMIN_ALLOWLIST_IPS:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+    except Exception:
+        pass
     return None
 
 

@@ -71,6 +71,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Security headers ---
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    try:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
+        csp = (
+            "default-src 'self'; "
+            "img-src 'self' data: blob: https:; "
+            "style-src 'self' 'unsafe-inline' https:; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
+            "font-src 'self' data: https:; "
+            "connect-src 'self' https: http://localhost:5173 http://127.0.0.1:5173; "
+            "frame-ancestors 'none'"
+        )
+        response.headers.setdefault("Content-Security-Policy", csp)
+    except Exception:
+        pass
+    return response
+
 # ---- Static mount (local fallback) ----
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):

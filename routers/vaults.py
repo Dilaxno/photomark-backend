@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Body, UploadFile, File, Form, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+import bcrypt
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
@@ -332,11 +333,33 @@ def _vault_salt(uid: str, vault: str) -> str:
 
 import hashlib
 
-def _hash_password(pw: str, salt: str) -> str:
+def _hash_password_legacy(pw: str, salt: str) -> str:
     try:
         return hashlib.sha256(((pw or '') + salt).encode('utf-8')).hexdigest()
     except Exception:
         return ''
+
+def _hash_password_bcrypt(pw: str) -> str:
+    try:
+        return bcrypt.hashpw((pw or '').encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    except Exception:
+        return ''
+
+def _check_password(pw: str, meta: dict, uid: str, vault: str) -> bool:
+    try:
+        ph = str(meta.get('password_hash') or '')
+        if ph:
+            try:
+                return bcrypt.checkpw((pw or '').encode('utf-8'), ph.encode('utf-8'))
+            except Exception:
+                return False
+        legacy = str(meta.get('hash') or '')
+        if legacy:
+            salt = _vault_salt(uid, vault)
+            return _hash_password_legacy(pw or '', salt) == legacy
+    except Exception:
+        return False
+    return False
 
 
 def _is_vault_unlocked(uid: str, vault: str) -> bool:
@@ -351,8 +374,7 @@ def _unlock_vault(uid: str, vault: str, password: str) -> bool:
     meta = _read_vault_meta(uid, vault)
     if not meta.get('protected'):
         return True
-    salt = _vault_salt(uid, vault)
-    if meta.get('hash') == _hash_password(password or '', salt):
+    if _check_password(password or '', meta, uid, vault):
         s = _unlocked_vaults.get(uid)
         if not s:
             s = set()
@@ -464,14 +486,7 @@ async def vaults_delete(request: Request, payload: dict = Body(...)):
                     errors.append(name)
                     continue
                 
-                stored_hash = meta.get("password_hash")
-                if not stored_hash:
-                    errors.append(name)
-                    continue
-                
-                import hashlib
-                attempt_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
-                if attempt_hash != stored_hash:
+                if not _check_password(password or '', meta, uid, name):
                     return JSONResponse({"error": "Invalid password"}, status_code=403)
         except Exception:
             pass
@@ -971,11 +986,8 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
             # Adding protection
             if not payload.password:
                 return JSONResponse({"error": "password required for protection"}, status_code=400)
-            
-            salt = _vault_salt(uid, safe_vault)
             meta["protected"] = True
-            meta["hash"] = _hash_password(payload.password, salt)
-            
+            meta["password_hash"] = _hash_password_bcrypt(payload.password)
             # Lock the vault after adding protection
             _lock_vault(uid, safe_vault)
         else:
@@ -983,6 +995,8 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
             meta["protected"] = False
             if "hash" in meta:
                 del meta["hash"]
+            if "password_hash" in meta:
+                del meta["password_hash"]
             
             # Unlock the vault after removing protection
             _lock_vault(uid, safe_vault)
@@ -1869,10 +1883,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
     # Check if vault is protected - clients need password to access
     meta = _read_vault_meta(uid, vault)
     if meta.get('protected'):
-        # Verify password using the vault's hash
-        salt = _vault_salt(uid, vault)
-        provided_hash = _hash_password(password or '', salt)
-        if provided_hash != meta.get('hash'):
+        if not _check_password(password or '', meta, uid, vault):
             return JSONResponse({"error": "Vault is protected. Invalid or missing password."}, status_code=403)
 
     try:
@@ -2993,10 +3004,7 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
     # Check if vault is protected - clients need password to access
     meta = _read_vault_meta(uid, vault)
     if meta.get('protected'):
-        # Verify password using the vault's hash
-        salt = _vault_salt(uid, vault)
-        provided_hash = _hash_password(password or '', salt)
-        if provided_hash != meta.get('hash'):
+        if not _check_password(password or '', meta, uid, vault):
             return JSONResponse({"error": "Vault is protected. Invalid or missing password."}, status_code=403)
 
     # Collect vault keys and map to original keys
