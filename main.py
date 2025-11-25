@@ -24,6 +24,18 @@ from routers import (
     gallery_assistant, color_grading, admin, smart_resize,
     shop,
 )  # type: ignore
+try:
+    from routers import image_compression  # type: ignore
+except Exception as _ex:
+    image_compression = None
+try:
+    from routers import denoise  # type: ignore
+except Exception as _ex:
+    denoise = None
+try:
+    from routers import hdr_merge  # type: ignore
+except Exception as _ex:
+    hdr_merge = None
 
 # Background removal router
 try:
@@ -86,6 +98,12 @@ except Exception as _ex:
     logger.warning(f"mark_agent router not available: {_ex}")
 app.include_router(smart_resize.router)
 app.include_router(shop.router)
+if image_compression is not None:
+    app.include_router(image_compression.router)
+if denoise is not None:
+    app.include_router(denoise.router)
+if hdr_merge is not None:
+    app.include_router(hdr_merge.router)
 
 # app.include_router(pricing_checkout.router)  # removed
 # embed iframe endpoints
