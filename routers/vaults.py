@@ -3047,6 +3047,8 @@ async def licenses_verify(doc: LicenseDoc):
             return JSONResponse({"ok": False, "error": "invalid signature"}, status_code=400)
 
         return JSONResponse({"ok": False, "error": "unknown algo"}, status_code=400)
+    except Exception as ex:
+        return JSONResponse({"ok": False, "error": str(ex)}, status_code=400)
 
 
 @router.get("/vaults/slideshow")
