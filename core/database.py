@@ -24,7 +24,19 @@ engine = create_engine(
     pool_pre_ping=True,  # Verify connections before using
     pool_size=10,
     max_overflow=20,
-    echo=False  # Set to True for SQL query logging in development
+    pool_recycle=300,  # Recycle connections to avoid idle SSL drops
+    pool_timeout=30,
+    echo=False,  # Set to True for SQL query logging in development
+    connect_args={
+        # TCP keepalive settings to keep SSL sessions active
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+        # Ensure SSL is used if server requires it (Neon/RDS)
+        # You can also supply sslrootcert via env DATABASE_URL if needed
+        # "sslmode": "require",
+    },
 )
 
 # Create session factory
