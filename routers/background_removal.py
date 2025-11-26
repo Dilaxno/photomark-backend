@@ -6,6 +6,7 @@ import io
 import base64
 import numpy as np
 from PIL import Image, ImageDraw
+import cv2
 import os
 import sys
 
@@ -120,6 +121,26 @@ def _base64_to_image(base64_str: str) -> Image.Image:
     """Convert base64 string to PIL Image"""
     img_data = base64.b64decode(base64_str)
     return Image.open(io.BytesIO(img_data))
+
+def _sharpen_edges_pil(img_rgb: Image.Image, mask_l: Image.Image, amount: int = 1, radius: int = 2) -> Image.Image:
+    try:
+        im = np.array(img_rgb.convert("RGB"))
+        mk = np.array(mask_l.convert("L"))
+        mk_bin = (mk > 128).astype(np.uint8) * 255
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(1, radius*2+1), max(1, radius*2+1)))
+        dil = cv2.dilate(mk_bin, k)
+        ero = cv2.erode(mk_bin, k)
+        band = cv2.subtract(dil, ero)
+
+        sigma = max(0.5, float(radius))
+        blur = cv2.GaussianBlur(im, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        sharpened = cv2.addWeighted(im, 1.0 + float(amount), blur, -float(amount), 0)
+
+        band3 = cv2.merge([band, band, band])
+        out = np.where(band3 > 0, sharpened, im)
+        return Image.fromarray(out)
+    except Exception:
+        return img_rgb
 
 # ---------------- ENDPOINTS ----------------
 
@@ -413,7 +434,10 @@ async def step4_generate_final_cutout(
     request: Request,
     image_base64: str = Form(...),
     mask_base64: str = Form(...),
-    output_format: str = Form("png")  # png or jpg
+    output_format: str = Form("png"),  # png or jpg
+    edge_sharpen: int = Form(1),
+    edge_amount: int = Form(1),
+    edge_radius: int = Form(2),
 ):
     """
     Step 4: Generate final cutout with transparent or white background using Pillow
@@ -427,17 +451,22 @@ async def step4_generate_final_cutout(
         if img.size != mask.size:
             mask = mask.resize(img.size, Image.LANCZOS)
         
+        # Optional edge sharpening on foreground inside boundary band
+        fg_rgb = img
+        if int(edge_sharpen) != 0:
+            fg_rgb = _sharpen_edges_pil(img, mask, amount=int(max(0, min(5, edge_amount))), radius=int(max(1, min(10, edge_radius))))
+
         # Create cutout
         if output_format.lower() == "png":
             # Transparent background
             cutout = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            img_rgba = img.convert("RGBA")
+            img_rgba = fg_rgb.convert("RGBA")
             cutout.paste(img_rgba, (0, 0), mask)
             format_str = "PNG"
         else:
             # White background for JPG
             cutout = Image.new("RGB", img.size, (255, 255, 255))
-            cutout.paste(img, (0, 0), mask)
+            cutout.paste(fg_rgb, (0, 0), mask)
             format_str = "JPEG"
         
         # Convert to bytes for download
@@ -515,6 +544,9 @@ async def compose_background(
     bg_image: UploadFile | None = File(None),
     output_format: str = Form("png"),  # png|jpg
     fit: str = Form("cover"),  # cover|contain
+    edge_sharpen: int = Form(1),
+    edge_amount: int = Form(1),
+    edge_radius: int = Form(2),
 ):
     """Server-side background replacement.
     Composes the cutout over a background (solid color, green screen, or provided image).
@@ -549,7 +581,11 @@ async def compose_background(
         else:
             bg = Image.new("RGB", (W, H), (255, 255, 255))
 
-        fg = img.convert("RGBA")
+        # Optional edge sharpening on foreground inside boundary band
+        fg_rgb = img
+        if int(edge_sharpen) != 0:
+            fg_rgb = _sharpen_edges_pil(img, mask, amount=int(max(0, min(5, edge_amount))), radius=int(max(1, min(10, edge_radius))))
+        fg = fg_rgb.convert("RGBA")
         cutout = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         cutout.paste(fg, (0, 0), mask)
         composed = Image.alpha_composite(bg.convert("RGBA"), cutout)
