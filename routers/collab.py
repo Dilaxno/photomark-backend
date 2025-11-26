@@ -945,6 +945,26 @@ async def generate_collaborator_password(request: Request, db: Session = Depends
         return {"ok": True, "password": pw}
     except Exception as ex:
         db.rollback()
+        s = str(ex).lower()
+        if ("undefinedcolumn" in s) or ("password_plain" in s):
+            try:
+                from sqlalchemy import text
+                db.execute(text("ALTER TABLE public.collaborator_access ADD COLUMN password_plain TEXT"))
+                db.commit()
+                rec = CollaboratorAccess(
+                    email="",
+                    password_hash=pw_hash,
+                    password_plain=pw,
+                    owner_uid=uid,
+                    role=role,
+                    is_active=True,
+                )
+                db.add(rec)
+                db.commit()
+                return {"ok": True, "password": pw}
+            except Exception as ex2:
+                db.rollback()
+                logger.exception(f"generate_collaborator_password migration retry failed: {ex2}")
         logger.exception(f"generate_collaborator_password failed (sql): {ex}")
         _friendly_err("Failed to generate password", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
