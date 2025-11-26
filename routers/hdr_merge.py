@@ -68,17 +68,22 @@ def _merge_mertens(images: List[np.ndarray], cw: float, sw: float, ew: float) ->
 
 
 def _tone_map(img: np.ndarray, gamma: float, saturation: float) -> np.ndarray:
-    # Apply simple gamma correction and optional saturation boost in HSV
+    # Robust percentile stretch and gamma without HSV quantization
     # img: float32 RGB [0,1]
-    x = np.clip(img, 0.0, 1.0)
+    x = np.nan_to_num(img.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    x = np.clip(x, 0.0, 1.0)
+    # Luminance for percentile stretch
+    lum = 0.2126 * x[..., 0] + 0.7152 * x[..., 1] + 0.0722 * x[..., 2]
+    p1 = float(np.percentile(lum, 1.0)) if lum.size else 0.0
+    p99 = float(np.percentile(lum, 99.0)) if lum.size else 1.0
+    if p99 - p1 > 1e-6:
+        x = np.clip((x - p1) / (p99 - p1), 0.0, 1.0)
     if gamma and gamma > 0:
         x = np.power(x, 1.0 / float(gamma))
-    # saturation in 0..2 (1=none)
     if saturation and abs(saturation - 1.0) > 1e-3:
-        hsv = cv2.cvtColor((x * 255).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
-        hsv[...,1] = np.clip(hsv[...,1] * float(saturation), 0, 255)
-        x = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32) / 255.0
-    return np.clip(x, 0.0, 1.0)
+        gray = np.stack([lum, lum, lum], axis=-1)
+        x = np.clip(gray + (x - gray) * float(saturation), 0.0, 1.0)
+    return x
 
 
 def _normalize_hdr(img: np.ndarray) -> np.ndarray:
