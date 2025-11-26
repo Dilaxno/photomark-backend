@@ -95,6 +95,7 @@ class CollaboratorAccess(Base):
     # Token and user info
     email = Column(String(255), index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    password_plain = Column(String(255), nullable=True)
     
     # Access control
     owner_uid = Column(String(128), nullable=False, index=True)

@@ -935,6 +935,7 @@ async def generate_collaborator_password(request: Request, db: Session = Depends
         rec = CollaboratorAccess(
             email="",
             password_hash=pw_hash,
+            password_plain=pw,
             owner_uid=uid,
             role=role,
             is_active=True,
@@ -1037,6 +1038,7 @@ async def list_collaborator_access(request: Request, limit: int = 50, offset: in
                 "is_active": bool(r.is_active),
                 "created_at": (r.created_at.isoformat() if r.created_at else None),
                 "last_used_at": (r.last_used_at.isoformat() if r.last_used_at else None),
+                "password": getattr(r, "password_plain", None),
             })
         return {"ok": True, "access": out, "total": total}
     except Exception as ex:
