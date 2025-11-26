@@ -120,28 +120,29 @@ async def hdr_merge(
     try:
         if not files or len(files) < 2:
             return JSONResponse({"error": "Please provide at least 2 exposures of the same scene"}, status_code=400)
-        names = [ (f.filename or "img") for f in files ]
+        # Read all files up-front to avoid stream exhaustion issues
+        names: List[str] = []
+        file_bytes: List[bytes] = []
+        for f in files:
+            names.append(f.filename or "img")
+            try:
+                if hasattr(f, 'file'):
+                    f.file.seek(0)
+            except Exception:
+                pass
+            file_bytes.append(await f.read())
         # Decide whether to use HDRutils strictly for RAW image extensions
         raw_exts = {'.arw', '.nef', '.cr2', '.cr3', '.rw2', '.dng', '.orf', '.sr2', '.raf', '.pef', '.nrw', '.rw1'}
         exts = [ os.path.splitext(n)[1].lower() for n in names ]
         all_raw = len(exts) > 0 and all((e in raw_exts) for e in exts if e)
 
         use_hdrutils = (HDRutils is not None) and all_raw
-        file_bytes: List[bytes] = []
         if use_hdrutils:
             tmpdir = tempfile.mkdtemp(prefix="hdrutils_")
             paths = []
             try:
-                for i, f in enumerate(files):
-                    try:
-                        # reset stream if previously read
-                        if hasattr(f, 'file'):
-                            f.file.seek(0)
-                    except Exception:
-                        pass
-                    data = await f.read()
-                    file_bytes.append(data)
-                    name = f.filename or f"img_{i}.png"
+                for i, data in enumerate(file_bytes):
+                    name = names[i] or f"img_{i}.png"
                     base, ext = os.path.splitext(name)
                     ext = ext if ext else ".png"
                     p = os.path.join(tmpdir, f"{base}_{i}{ext}")
@@ -170,22 +171,15 @@ async def hdr_merge(
                     pass
         if not use_hdrutils:
             # Read all images (RGB float32 0..1)
-            imgs: List[np.ndarray] = []
-            if file_bytes and len(file_bytes) == len(files):
-                imgs = [ _read_image_rgb_float32(b) for b in file_bytes ]
-            else:
-                for f in files:
-                    try:
-                        if hasattr(f, 'file'):
-                            f.file.seek(0)
-                    except Exception:
-                        pass
-                    data = await f.read()
-                    imgs.append(_read_image_rgb_float32(data))
+            imgs: List[np.ndarray] = [ _read_image_rgb_float32(b) for b in file_bytes ]
             imgs = _resize_images_to_common_size(imgs)
             if align:
                 imgs = _align_images(imgs)
             merged = _merge_mertens(imgs, contrast_weight, saturation_weight, well_exposedness_weight)
+            # If fusion produced a near-zero image, fallback to simple average
+            if float(merged.max()) < 1e-6:
+                avg = np.mean(np.stack(imgs, axis=0), axis=0).astype(np.float32)
+                merged = np.clip(avg, 0.0, 1.0)
             # Guard against near-black after fusion
             merged = _auto_exposure(merged)
 
