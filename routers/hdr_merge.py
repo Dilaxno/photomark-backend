@@ -81,6 +81,18 @@ def _tone_map(img: np.ndarray, gamma: float, saturation: float) -> np.ndarray:
     return np.clip(x, 0.0, 1.0)
 
 
+def _normalize_hdr(img: np.ndarray) -> np.ndarray:
+    # Robustly normalize potentially HDR values into [0,1] using the 99th percentile
+    x = img.astype(np.float32)
+    # Guard against NaNs/Infs
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    p99 = float(np.percentile(x, 99.0)) if x.size else 1.0
+    if p99 <= 1e-8:
+        p99 = 1.0
+    x = x / p99
+    return np.clip(x, 0.0, 1.0)
+
+
 @router.post("/process/hdr-merge")
 async def hdr_merge(
     files: List[UploadFile] = File(...),
@@ -124,7 +136,11 @@ async def hdr_merge(
                 if estimate_exp:
                     kwargs["estimate_exp"] = estimate_exp
                 hdr_img = HDRutils.merge(paths, **kwargs)[0]
-                merged = np.clip(hdr_img.astype(np.float32), 0.0, 1.0)
+                raw_hdr = hdr_img.astype(np.float32)
+                merged = _normalize_hdr(raw_hdr)
+                if float(merged.mean()) < 1e-4:
+                    # Fallback if normalization still yields near-black
+                    use_hdrutils = False
             except Exception:
                 use_hdrutils = False
             finally:
@@ -150,7 +166,9 @@ async def hdr_merge(
             tmpdir = tempfile.mkdtemp(prefix="hdrutils_out_")
             out_path = os.path.join(tmpdir, f"{base}_hdr.exr")
             try:
-                HDRutils.imwrite(out_path, merged)
+                # Write the raw HDR image when available; otherwise write normalized LDR
+                to_write = locals().get('raw_hdr', None)
+                HDRutils.imwrite(out_path, to_write if isinstance(to_write, np.ndarray) else merged)
                 with open(out_path, "rb") as fp:
                     data = fp.read()
                 buf = BytesIO(data)
