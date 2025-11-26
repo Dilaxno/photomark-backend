@@ -28,6 +28,11 @@ def _write_retouch_queue(uid: str, queue: list):
 
 def _get_url_for_key(key: str) -> str:
     from core.config import R2_CUSTOM_DOMAIN, s3_presign_client
+    from utils.storage import presign_custom_domain_bucket
+    if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+        url = presign_custom_domain_bucket(key, expires_in=3600)
+        if url:
+            return url
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",

@@ -9,6 +9,7 @@ import io
 import zipfile
 
 from core.config import logger, GROQ_API_KEY, s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
+from utils.storage import presign_custom_domain_bucket
 from core.auth import resolve_workspace_uid, has_role_access
 # Reuse vault helpers
 from routers.vaults import (
@@ -97,7 +98,13 @@ async def _list_photos(uid: str, vault: str | None = None) -> List[Dict[str, Any
                 key = obj.key
                 if key.endswith("/_history.txt") or key.endswith("/"):
                     continue
-                if R2_CUSTOM_DOMAIN and s3_presign_client:
+                if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+                    url = presign_custom_domain_bucket(key, expires_in=60 * 60) or ""
+                    if not url and s3_presign_client:
+                        url = s3_presign_client.generate_presigned_url(
+                            "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
+                        )
+                elif R2_CUSTOM_DOMAIN and s3_presign_client:
                     url = s3_presign_client.generate_presigned_url(
                         "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
                     )

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 import bcrypt
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
-from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
+from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, presign_custom_domain_bucket
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
@@ -29,6 +29,10 @@ router = APIRouter(prefix="/api", tags=["vaults"])
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
+    if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+        url = presign_custom_domain_bucket(key, expires_in=expires_in)
+        if url:
+            return url
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",

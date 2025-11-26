@@ -5,6 +5,7 @@ from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from core.config import s3, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, s3_presign_client
+from utils.storage import presign_custom_domain_bucket
 from utils.storage import read_json_key
 
 router = APIRouter(prefix="/api/vaults/shared", tags=["shared"])
@@ -16,6 +17,10 @@ def _share_key(token: str) -> str:
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
+    if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+        url = presign_custom_domain_bucket(key, expires_in=expires_in)
+        if url:
+            return url
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",

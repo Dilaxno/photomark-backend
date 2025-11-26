@@ -7,7 +7,7 @@ from io import BytesIO
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir, logger
 from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
-from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes
+from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, presign_custom_domain_bucket
 from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
 from PIL import Image
@@ -21,6 +21,10 @@ import hashlib
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
+    if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+        url = presign_custom_domain_bucket(key, expires_in=expires_in)
+        if url:
+            return url
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",

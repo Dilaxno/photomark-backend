@@ -1,7 +1,9 @@
 import os
 import json
 from typing import Optional
-from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR, logger
+from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR, logger, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+import hashlib, hmac
+from urllib.parse import quote, urlencode
 from botocore.exceptions import ClientError
 
 
@@ -54,6 +56,10 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
     bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
 
     try:
+        if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+            url = presign_custom_domain_bucket(key, expires_in=60 * 60)
+            if url:
+                return url
         if R2_CUSTOM_DOMAIN and s3_presign_client:
             return s3_presign_client.generate_presigned_url(
                 "get_object",
@@ -69,6 +75,74 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
     except Exception as ex:
         logger.warning(f"presigned url generation failed for {key}: {ex}")
         return f"/static/{key}"
+
+
+def presign_custom_domain_bucket(key: str, expires_in: int = 3600) -> str:
+    try:
+        domain = (R2_CUSTOM_DOMAIN or "").strip()
+        access_key = (R2_ACCESS_KEY_ID or "").strip()
+        secret_key = (R2_SECRET_ACCESS_KEY or "").strip()
+        bucket = (R2_BUCKET or "").strip()
+        if not (domain and access_key and secret_key and bucket and key):
+            return ""
+
+        method = "GET"
+        service = "s3"
+        region = "auto"
+        from datetime import datetime
+        now = datetime.utcnow()
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        date_stamp = now.strftime("%Y%m%d")
+
+        credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        credential = f"{access_key}/{credential_scope}"
+
+        host = domain
+        signed_headers = "host"
+        canonical_uri = "/" + quote(str(key).lstrip("/"), safe="/")
+
+        q = {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": credential,
+            "X-Amz-Date": amz_date,
+            "X-Amz-Expires": str(int(expires_in or 3600)),
+            "X-Amz-SignedHeaders": signed_headers,
+        }
+        canonical_querystring = urlencode(q, safe="/", quote_via=lambda s, *_: quote(s, safe="/"))
+
+        canonical_headers = f"host:{host}\n"
+        payload_hash = hashlib.sha256(b"").hexdigest()
+
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            canonical_querystring,
+            canonical_headers,
+            signed_headers,
+            payload_hash,
+        ])
+
+        string_to_sign = "\n".join([
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            credential_scope,
+            hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+        ])
+
+        def _sign(key_bytes: bytes, msg: str) -> bytes:
+            return hmac.new(key_bytes, msg.encode("utf-8"), hashlib.sha256).digest()
+
+        k_date = _sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+        k_region = _sign(k_date, region)
+        k_service = _sign(k_region, service)
+        k_signing = _sign(k_service, "aws4_request")
+        signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        final_qs = canonical_querystring + "&X-Amz-Signature=" + signature
+        return f"https://{host}{canonical_uri}?{final_qs}"
+    except Exception as ex:
+        logger.warning(f"custom-domain presign failed for {key}: {ex}")
+        return ""
 
 
 def read_bytes_key(key: str) -> Optional[bytes]:
