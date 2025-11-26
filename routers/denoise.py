@@ -111,19 +111,101 @@ def _merge_alpha(rgb: np.ndarray, alpha: Optional[np.ndarray]) -> Image.Image:
     return Image.fromarray(rgba, mode="RGBA")
 
 
+# ---------------- Frequency-domain periodic noise removal (inspired by anadi45/Image-Noise-Remover) ---------------- #
+def _butterworth_lp(D0: float, shape: tuple[int, int], n: int) -> np.ndarray:
+    rows, cols = shape
+    y = np.arange(rows) - rows / 2.0
+    x = np.arange(cols) - cols / 2.0
+    X, Y = np.meshgrid(x, y)
+    D = np.sqrt(X ** 2 + Y ** 2)
+    # Avoid division by zero
+    D = np.where(D == 0, 1e-6, D)
+    H = 1.0 / (1.0 + (D / max(1.0, D0)) ** (2 * max(1, n)))
+    return H.astype(np.float32)
+
+
+def _apply_mask_for_noise_type(shifted: np.ndarray, noise_type: int) -> np.ndarray:
+    # shifted: complex spectrum centered (fftshift) with shape (H, W, C) or (H, W)
+    H, W = shifted.shape[:2]
+    crow, ccol = H // 2, W // 2
+    masked = shifted.copy()
+    # For multi-channel, operate on each channel
+    if masked.ndim == 3:
+        for c in range(masked.shape[2]):
+            masked[:, :, c] = _apply_mask_for_noise_type(masked[:, :, c], noise_type)
+        return masked
+    # Single channel masking similar to repo's logic
+    if noise_type == 1:
+        # horizontal band remove (vertical periodic noise in spatial domain)
+        masked[crow - 4:crow + 4, 0:ccol - 10] = 1
+        masked[crow - 4:crow + 4, ccol + 10:] = 1
+    elif noise_type == 2:
+        # vertical band remove (horizontal periodic noise)
+        masked[:crow - 10, ccol - 4:ccol + 4] = 1
+        masked[crow + 10:, ccol - 4:ccol + 4] = 1
+    elif noise_type == 3:
+        # main diagonal
+        for x in range(H):
+            y = x
+            if 0 <= y < W:
+                for i in range(10):
+                    xx = max(0, min(H - 1, x - i))
+                    masked[xx, y] = 1
+    elif noise_type == 4:
+        # anti-diagonal
+        for x in range(H):
+            y = W - 1 - x
+            if 0 <= y < W:
+                for i in range(10):
+                    xx = max(0, min(H - 1, x - i))
+                    masked[xx, y] = 1
+    return masked
+
+
+def _denoise_periodic_fourier(rgb: np.ndarray, noise_type: int, D0: float, order: int) -> np.ndarray:
+    # Apply per-channel FFT, mask periodic components, low-pass filter with Butterworth, then inverse FFT
+    H, W, C = rgb.shape
+    out = np.zeros_like(rgb, dtype=np.float32)
+    Hlp = _butterworth_lp(D0, (H, W), order)
+    for c in range(C):
+        ch = rgb[:, :, c].astype(np.float32)
+        # FFT
+        F = np.fft.fft2(ch)
+        Fshift = np.fft.fftshift(F)
+        # Mask periodic spikes
+        Fmasked = _apply_mask_for_noise_type(Fshift, noise_type)
+        # Optional low-pass filter to soften residual high-frequency noise
+        Ffiltered = Fmasked * Hlp
+        # Inverse FFT
+        ishift = np.fft.ifftshift(Ffiltered)
+        rec = np.fft.ifft2(ishift)
+        rec = np.real(rec)
+        # Normalize to 0..255
+        rec = np.clip(rec, 0, 255)
+        out[:, :, c] = rec
+    return out.astype(np.uint8)
+
+
 @router.post("/process/denoise-images")
 async def denoise_images(
     files: List[UploadFile] = File(...),
-    strength: float = Form(0.5),  # 0..1
+    strength: float = Form(0.5),  # 0..1 (for dncnn/opencv)
     jpeg_quality: int = Form(90),
+    method: str = Form("fourier"),  # auto|dncnn|opencv|fourier (default: fourier)
+    noise_type: int = Form(1),    # 1:vertical,2:horizontal,3:right diag,4:left diag (for fourier)
+    fourier_d0: float = Form(80.0),
+    fourier_order: int = Form(10),
 ):
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
 
-    # Try to load DnCNN model from environment variable
-    weights = os.getenv("DNCNN_WEIGHTS", "/home/ubuntu/models/dncnn.pth")
-    logger.info(f"Attempting to load DnCNN model from: {weights}")
-    model = _load_dncnn(weights)
+    # Prepare models/utilities based on method
+    method = (method or "auto").lower().strip()
+    model = None
+    if method in ("auto", "dncnn"):
+        weights = os.getenv("DNCNN_WEIGHTS", "/home/ubuntu/models/dncnn.pth")
+        logger.info(f"Attempting to load DnCNN model from: {weights}")
+        model = _load_dncnn(weights)
 
     outputs: List[tuple[str, bytes, str]] = []
 
@@ -133,7 +215,13 @@ async def denoise_images(
             ext = os.path.splitext(name)[1].lower() or ".jpg"
             data = await up.read()
             rgb, alpha = _read_image_keep_alpha(data)
-            if model is not None:
+            if method == "fourier":
+                nt = int(noise_type)
+                d0 = float(max(1.0, min(2048.0, fourier_d0)))
+                ord_n = int(max(1, min(20, fourier_order)))
+                logger.info(f"Using Fourier periodic removal (noise_type={nt}, D0={d0}, n={ord_n}) for {name}")
+                out_rgb = _denoise_periodic_fourier(rgb, nt, d0, ord_n)
+            elif (method in ("auto", "dncnn")) and (model is not None):
                 logger.info(f"Using DnCNN model for denoising {name}")
                 out_rgb = _denoise_dncnn(rgb, float(max(0.0, min(1.0, strength))), model)
             else:
