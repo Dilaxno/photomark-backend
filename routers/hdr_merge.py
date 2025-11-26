@@ -109,22 +109,27 @@ async def hdr_merge(
     try:
         if not files or len(files) < 2:
             return JSONResponse({"error": "Please provide at least 2 exposures of the same scene"}, status_code=400)
+        names = [ (f.filename or "img") for f in files ]
+        # Decide whether to use HDRutils strictly for RAW image extensions
+        raw_exts = {'.arw', '.nef', '.cr2', '.cr3', '.rw2', '.dng', '.orf', '.sr2', '.raf', '.pef', '.nrw', '.rw1'}
+        exts = [ os.path.splitext(n)[1].lower() for n in names ]
+        all_raw = len(exts) > 0 and all((e in raw_exts) for e in exts if e)
 
-        # Read all images (RGB float32 0..1)
-        imgs = []
-        names = []
-        for f in files:
-            names.append(f.filename or "img")
-            data = await f.read()
-            imgs.append(_read_image_rgb_float32(data))
-
-        use_hdrutils = HDRutils is not None
+        use_hdrutils = (HDRutils is not None) and all_raw
+        file_bytes: List[bytes] = []
         if use_hdrutils:
             tmpdir = tempfile.mkdtemp(prefix="hdrutils_")
             paths = []
             try:
                 for i, f in enumerate(files):
+                    try:
+                        # reset stream if previously read
+                        if hasattr(f, 'file'):
+                            f.file.seek(0)
+                    except Exception:
+                        pass
                     data = await f.read()
+                    file_bytes.append(data)
                     name = f.filename or f"img_{i}.png"
                     base, ext = os.path.splitext(name)
                     ext = ext if ext else ".png"
@@ -153,6 +158,19 @@ async def hdr_merge(
                 except Exception:
                     pass
         if not use_hdrutils:
+            # Read all images (RGB float32 0..1)
+            imgs: List[np.ndarray] = []
+            if file_bytes and len(file_bytes) == len(files):
+                imgs = [ _read_image_rgb_float32(b) for b in file_bytes ]
+            else:
+                for f in files:
+                    try:
+                        if hasattr(f, 'file'):
+                            f.file.seek(0)
+                    except Exception:
+                        pass
+                    data = await f.read()
+                    imgs.append(_read_image_rgb_float32(data))
             imgs = _resize_images_to_common_size(imgs)
             if align:
                 imgs = _align_images(imgs)
