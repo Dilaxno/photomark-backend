@@ -4,7 +4,7 @@ import json, os
 from datetime import datetime
 from routers.photos import _build_manifest
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir
-from utils.storage import presign_custom_domain_bucket
+from utils.storage import get_presigned_url
 from typing import Tuple
 
 router = APIRouter(prefix="/embed", tags=["embed"])
@@ -171,20 +171,7 @@ def embed_myuploads(
                     key = entry.get("Key", "")
                     if not key or key.endswith("/"): continue
                     name = os.path.basename(key)
-                    if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
-                        url = presign_custom_domain_bucket(key, expires_in=60 * 60) or ""
-                        if not url and s3_presign_client:
-                            url = s3_presign_client.generate_presigned_url(
-                                "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
-                            )
-                    elif R2_CUSTOM_DOMAIN and s3_presign_client:
-                        url = s3_presign_client.generate_presigned_url(
-                            "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
-                        )
-                    else:
-                        url = s3.meta.client.generate_presigned_url(
-                            "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
-                        )
+                    url = get_presigned_url(key, expires_in=60 * 60) or ""
                     items.append({"key": key, "url": url, "name": name, "last": (entry.get("LastModified") or datetime.utcnow()).isoformat()})
                 if resp.get("IsTruncated"):
                     continuation = resp.get("NextContinuationToken")

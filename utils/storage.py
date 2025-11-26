@@ -4,6 +4,11 @@ from typing import Optional
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR, logger, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
 import hashlib, hmac
 from urllib.parse import quote, urlencode
+import time
+
+# Simple in-process cache for presigned URLs
+_URL_CACHE: dict[str, tuple[str, float]] = {}
+_CACHE_TTL = int(os.getenv("URL_CACHE_TTL_SEC", "300") or "300")
 from botocore.exceptions import ClientError
 
 
@@ -52,26 +57,21 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
         return f"/static/{key}"
 
     bucket = s3.Bucket(R2_BUCKET)
-    
-    bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
 
     try:
-        if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
-            url = presign_custom_domain_bucket(key, expires_in=60 * 60)
-            if url:
-                return url
-        if R2_CUSTOM_DOMAIN and s3_presign_client:
-            return s3_presign_client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": R2_BUCKET, "Key": key},
-                ExpiresIn=60 * 60,
-            )
-        client = s3.meta.client
-        return client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": R2_BUCKET, "Key": key},
-            ExpiresIn=60 * 60,
-        )
+        cc = "public, max-age=604800"
+        k = (key or "").strip()
+        if "/watermarked/" in k:
+            cc = "public, max-age=2592000"
+        bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private", CacheControl=cc)
+    except Exception:
+        bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
+
+    try:
+        url = get_presigned_url(key, expires_in=60 * 60)
+        if url:
+            return url
+        return f"/static/{key}"
     except Exception as ex:
         logger.warning(f"presigned url generation failed for {key}: {ex}")
         return f"/static/{key}"
@@ -142,6 +142,41 @@ def presign_custom_domain_bucket(key: str, expires_in: int = 3600) -> str:
         return f"https://{host}{canonical_uri}?{final_qs}"
     except Exception as ex:
         logger.warning(f"custom-domain presign failed for {key}: {ex}")
+        return ""
+
+
+def get_presigned_url(key: str, expires_in: int = 3600) -> str:
+    """Central helper: returns cached presigned URL if available, otherwise generates.
+    Supports bucket-level custom domains via custom signer and standard presign client.
+    """
+    try:
+        k = f"{key}|{int(expires_in)}"
+        now = time.time()
+        cached = _URL_CACHE.get(k)
+        if cached and cached[1] > now:
+            return cached[0]
+
+        url = ""
+        if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
+            url = presign_custom_domain_bucket(key, expires_in=expires_in)
+        elif R2_CUSTOM_DOMAIN and s3_presign_client:
+            url = s3_presign_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": R2_BUCKET, "Key": key},
+                ExpiresIn=expires_in,
+            )
+        elif s3:
+            url = s3.meta.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": R2_BUCKET, "Key": key},
+                ExpiresIn=expires_in,
+            )
+
+        if url:
+            _URL_CACHE[k] = (url, now + max(1, min(_CACHE_TTL, int(expires_in))))
+        return url
+    except Exception as ex:
+        logger.warning(f"get_presigned_url failed for {key}: {ex}")
         return ""
 
 

@@ -97,7 +97,8 @@ async def upload_retouch_result(
             Key=key,
             Body=raw,
             ContentType=file.content_type or 'image/jpeg',
-            ACL='private'
+            ACL='private',
+            CacheControl='public, max-age=604800'
         )
         
         # Update retouch request with result URL

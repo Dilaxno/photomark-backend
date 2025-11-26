@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from core.config import s3, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, s3_presign_client
 from utils.storage import presign_custom_domain_bucket
-from utils.storage import read_json_key
+from utils.storage import read_json_key, get_presigned_url
 
 router = APIRouter(prefix="/api/vaults/shared", tags=["shared"])
 
@@ -17,23 +17,7 @@ def _share_key(token: str) -> str:
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
-    if R2_CUSTOM_DOMAIN and (os.getenv("R2_CUSTOM_DOMAIN_BUCKET_LEVEL", "0").strip() == "1"):
-        url = presign_custom_domain_bucket(key, expires_in=expires_in)
-        if url:
-            return url
-    if R2_CUSTOM_DOMAIN and s3_presign_client:
-        return s3_presign_client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": R2_BUCKET, "Key": key},
-            ExpiresIn=expires_in,
-        )
-    if s3:
-        return s3.meta.client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": R2_BUCKET, "Key": key},
-            ExpiresIn=expires_in,
-        )
-    return ""
+    return get_presigned_url(key, expires_in=expires_in) or ""
 
 
 @router.post("/upload-marked-photo")
@@ -86,7 +70,8 @@ async def upload_marked_photo(
             Key=key,
             Body=raw,
             ContentType=file.content_type or 'image/png',
-            ACL='private'
+            ACL='private',
+            CacheControl='public, max-age=604800'
         )
         
         # Generate URL
