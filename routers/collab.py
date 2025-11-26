@@ -1093,6 +1093,35 @@ async def set_collaborator_access_active(request: Request, payload: dict = Body(
         _friendly_err("Failed to update", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@router.post("/access/update_role")
+async def update_collaborator_access_role(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        _friendly_err("Unauthorized", status.HTTP_401_UNAUTHORIZED)
+    try:
+        rid = int(payload.get("id") or 0)
+        role = str(payload.get("role") or "").strip().lower()
+    except Exception:
+        _friendly_err("Invalid payload")
+    valid_roles = ["gallery_manager", "retoucher", "editor_retoucher", "vaults_manager", "general_admin"]
+    if role not in valid_roles:
+        _friendly_err("Invalid role", status.HTTP_400_BAD_REQUEST)
+    try:
+        rec = db.query(CollaboratorAccess).filter(CollaboratorAccess.id == rid).first()
+        if not rec:
+            _friendly_err("Not found", status.HTTP_404_NOT_FOUND)
+        if rec.owner_uid != uid:
+            _friendly_err("Forbidden", status.HTTP_403_FORBIDDEN)
+        rec.role = role
+        db.commit()
+        return {"ok": True, "id": rid, "role": role}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        db.rollback()
+        logger.exception(f"collab.access.update_role failed: {ex}")
+        _friendly_err("Failed to update", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 @router.post("/access/delete")
 async def delete_collaborator_access(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
