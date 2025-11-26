@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from typing import List
 from io import BytesIO
+import os
+import tempfile
 
 import cv2
 import numpy as np
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
 from PIL import Image
+try:
+    import HDRutils  # type: ignore
+except Exception:
+    HDRutils = None
 
 router = APIRouter()
 
@@ -85,6 +91,8 @@ async def hdr_merge(
     tone_gamma: float = Form(1.2),
     tone_saturation: float = Form(1.0),
     jpeg_quality: int = Form(95),
+    estimate_exp: str = Form(""),
+    output_format: str = Form("jpeg"),  # 'jpeg' | 'png' | 'exr'
 ):
     try:
         if not files or len(files) < 2:
@@ -98,28 +106,80 @@ async def hdr_merge(
             data = await f.read()
             imgs.append(_read_image_rgb_float32(data))
 
-        # Resize images to common dimensions (required by OpenCV HDR functions)
-        imgs = _resize_images_to_common_size(imgs)
+        use_hdrutils = HDRutils is not None
+        if use_hdrutils:
+            tmpdir = tempfile.mkdtemp(prefix="hdrutils_")
+            paths = []
+            try:
+                for i, f in enumerate(files):
+                    data = await f.read()
+                    name = f.filename or f"img_{i}.png"
+                    base, ext = os.path.splitext(name)
+                    ext = ext if ext else ".png"
+                    p = os.path.join(tmpdir, f"{base}_{i}{ext}")
+                    with open(p, "wb") as fp:
+                        fp.write(data)
+                    paths.append(p)
+                kwargs = {"align": bool(align)}
+                if estimate_exp:
+                    kwargs["estimate_exp"] = estimate_exp
+                hdr_img = HDRutils.merge(paths, **kwargs)[0]
+                merged = np.clip(hdr_img.astype(np.float32), 0.0, 1.0)
+            except Exception:
+                use_hdrutils = False
+            finally:
+                try:
+                    for p in paths:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    if os.path.isdir(tmpdir):
+                        os.rmdir(tmpdir)
+                except Exception:
+                    pass
+        if not use_hdrutils:
+            imgs = _resize_images_to_common_size(imgs)
+            if align:
+                imgs = _align_images(imgs)
+            merged = _merge_mertens(imgs, contrast_weight, saturation_weight, well_exposedness_weight)
 
-        # Align slight motion between frames if requested
-        if align:
-            imgs = _align_images(imgs)
-
-        # Merge using Mertens exposure fusion
-        merged = _merge_mertens(imgs, contrast_weight, saturation_weight, well_exposedness_weight)
-
-        # Tone map to a nice-looking 8-bit image
-        tonemapped = _tone_map(merged, tone_gamma, tone_saturation)
-        out_u8 = (np.clip(tonemapped, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-
-        # Encode to JPEG
-        out = Image.fromarray(out_u8, mode="RGB")
-        buf = BytesIO()
-        out.save(buf, format="JPEG", quality=int(max(1, min(95, jpeg_quality))), optimize=True, progressive=True)
-        buf.seek(0)
-        # Name from first file
         base = (names[0] or "hdr").rsplit('.', 1)[0]
-        fname = f"{base}_hdr.jpg"
-        return StreamingResponse(buf, media_type="image/jpeg", headers={"Content-Disposition": f"attachment; filename={fname}"})
+        fmt = output_format.lower().strip()
+        if fmt == "exr":
+            if HDRutils is None:
+                return JSONResponse({"error": "EXR output requires HDRutils and FreeImage plugin"}, status_code=400)
+            tmpdir = tempfile.mkdtemp(prefix="hdrutils_out_")
+            out_path = os.path.join(tmpdir, f"{base}_hdr.exr")
+            try:
+                HDRutils.imwrite(out_path, merged)
+                with open(out_path, "rb") as fp:
+                    data = fp.read()
+                buf = BytesIO(data)
+                buf.seek(0)
+                headers = {"Content-Disposition": f"attachment; filename={base}_hdr.exr"}
+                return StreamingResponse(buf, media_type="image/exr", headers=headers)
+            finally:
+                try:
+                    if os.path.exists(out_path):
+                        os.remove(out_path)
+                    os.rmdir(tmpdir)
+                except Exception:
+                    pass
+        else:
+            # Tone map to a nice-looking 8-bit image
+            tonemapped = _tone_map(merged, tone_gamma, tone_saturation)
+            out_u8 = (np.clip(tonemapped, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+            out = Image.fromarray(out_u8, mode="RGB")
+            buf = BytesIO()
+            if fmt == "png":
+                out.save(buf, format="PNG")
+                media_type = "image/png"
+                fname = f"{base}_hdr.png"
+            else:
+                out.save(buf, format="JPEG", quality=int(max(1, min(95, jpeg_quality))), optimize=True, progressive=True)
+                media_type = "image/jpeg"
+                fname = f"{base}_hdr.jpg"
+            buf.seek(0)
+            return StreamingResponse(buf, media_type=media_type, headers={"Content-Disposition": f"attachment; filename={fname}"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)

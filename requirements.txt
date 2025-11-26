@@ -26,6 +26,7 @@ kornia==0.7.3
 transparent-background==1.3.4
 segment-anything==1.0
 rembg[cpu]
+HDRutils
 
 # LUT generation
 PyLUT==1.4.9
