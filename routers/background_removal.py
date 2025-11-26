@@ -503,3 +503,63 @@ async def generate_preview(
     except Exception as e:
         logger.error(f"Preview generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/compose-background")
+async def compose_background(
+    request: Request,
+    image_base64: str = Form(...),
+    mask_base64: str = Form(...),
+    bg_mode: str = Form("image"),  # image|color|green|none
+    bg_color: str = Form("#ffffff"),
+    bg_image: UploadFile | None = File(None),
+    output_format: str = Form("png"),  # png|jpg
+    fit: str = Form("cover"),  # cover|contain
+):
+    """Server-side background replacement.
+    Composes the cutout over a background (solid color, green screen, or provided image).
+    Returns a base64 preview suitable for UI display or download.
+    """
+    try:
+        img = _base64_to_image(image_base64).convert("RGB")
+        mask = _base64_to_image(mask_base64).convert("L")
+        if img.size != mask.size:
+            mask = mask.resize(img.size, Image.LANCZOS)
+
+        W, H = img.size
+
+        if bg_mode == "color":
+            bg = Image.new("RGB", (W, H), bg_color)
+        elif bg_mode == "green":
+            bg = Image.new("RGB", (W, H), "#00ff00")
+        elif bg_mode == "image" and bg_image is not None:
+            data = await bg_image.read()
+            bgi = Image.open(io.BytesIO(data)).convert("RGB")
+            sw, sh = bgi.size
+            if fit == "cover":
+                scale = max(W / sw, H / sh)
+            else:
+                scale = min(W / sw, H / sh)
+            tw, th = max(1, int(sw * scale)), max(1, int(sh * scale))
+            bgi_rs = bgi.resize((tw, th), Image.LANCZOS)
+            dx = (W - tw) // 2
+            dy = (H - th) // 2
+            bg = Image.new("RGB", (W, H), (255, 255, 255))
+            bg.paste(bgi_rs, (dx, dy))
+        else:
+            bg = Image.new("RGB", (W, H), (255, 255, 255))
+
+        fg = img.convert("RGBA")
+        cutout = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        cutout.paste(fg, (0, 0), mask)
+        composed = Image.alpha_composite(bg.convert("RGBA"), cutout)
+
+        fmt = "PNG" if output_format.lower() == "png" else "JPEG"
+        if fmt == "JPEG":
+            composed = composed.convert("RGB")
+
+        b64 = _image_to_base64(composed, fmt)
+        return {"success": True, "preview": b64}
+    except Exception as e:
+        logger.error(f"Background composition failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
