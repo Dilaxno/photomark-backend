@@ -93,6 +93,17 @@ def _normalize_hdr(img: np.ndarray) -> np.ndarray:
     return np.clip(x, 0.0, 1.0)
 
 
+def _auto_exposure(img: np.ndarray) -> np.ndarray:
+    # Brighten near-black images robustly
+    x = np.clip(img.astype(np.float32), 0.0, 1.0)
+    mean = float(x.mean()) if x.size else 0.0
+    if mean < 0.02:
+        p95 = float(np.percentile(x, 95.0)) if x.size else 0.0
+        scale = 1.0 / max(p95, 1e-3)
+        x = np.clip(x * scale, 0.0, 1.0)
+    return x
+
+
 @router.post("/process/hdr-merge")
 async def hdr_merge(
     files: List[UploadFile] = File(...),
@@ -175,6 +186,8 @@ async def hdr_merge(
             if align:
                 imgs = _align_images(imgs)
             merged = _merge_mertens(imgs, contrast_weight, saturation_weight, well_exposedness_weight)
+            # Guard against near-black after fusion
+            merged = _auto_exposure(merged)
 
         base = (names[0] or "hdr").rsplit('.', 1)[0]
         fmt = output_format.lower().strip()
@@ -203,6 +216,9 @@ async def hdr_merge(
         else:
             # Tone map to a nice-looking 8-bit image
             tonemapped = _tone_map(merged, tone_gamma, tone_saturation)
+            if float(tonemapped.mean()) < 0.05:
+                # Adaptive secondary tone map to avoid black outputs
+                tonemapped = _tone_map(_auto_exposure(merged), max(0.8, tone_gamma * 0.8), tone_saturation)
             out_u8 = (np.clip(tonemapped, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
             out = Image.fromarray(out_u8, mode="RGB")
