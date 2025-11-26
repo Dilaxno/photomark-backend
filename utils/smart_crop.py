@@ -13,12 +13,6 @@ except Exception:
     mp = None  # type: ignore
     _MP_AVAILABLE = False
 
-try:
-    from autocrop import Cropper  # type: ignore
-    _AC_AVAILABLE = True
-except Exception:
-    Cropper = None  # type: ignore
-    _AC_AVAILABLE = False
 
 
 @dataclass
@@ -227,15 +221,6 @@ class SmartCropper:
         return img.crop((crop_box.x0, crop_box.y0, crop_box.x1, crop_box.y1))
 
     def crop_and_resize(self, img: Image.Image, out_w: int, out_h: int) -> Image.Image:
-        if _AC_AVAILABLE and Cropper is not None:
-            arr = np.array(img.convert("RGB"))
-            try:
-                cp = Cropper(width=int(out_w), height=int(out_h))
-                res = cp.crop(arr)
-                if isinstance(res, np.ndarray) and res.size > 0:
-                    return Image.fromarray(res)
-            except Exception:
-                pass
         cropped = self.crop_to_aspect(img, out_w, out_h)
         return cropped.resize((out_w, out_h), Image.Resampling.LANCZOS)
 
