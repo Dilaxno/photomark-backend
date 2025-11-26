@@ -11,6 +11,7 @@ httpx==0.28.1
 websockets==14.2
 Wand==0.6.13
 opencv-python-headless==4.10.0.84
+autocrop
 numpy==1.26.4
 jinja2==3.1.4
 google-auth==2.34.0
