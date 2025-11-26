@@ -27,10 +27,7 @@ def _write_retouch_queue(uid: str, queue: list):
 
 
 def _get_url_for_key(key: str) -> str:
-    """Generate URL for R2 key."""
-    from core.config import R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, s3_presign_client
-    if R2_PUBLIC_BASE_URL:
-        return f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+    from core.config import R2_CUSTOM_DOMAIN, s3_presign_client
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",
@@ -94,7 +91,8 @@ async def upload_retouch_result(
             Bucket=R2_BUCKET,
             Key=key,
             Body=raw,
-            ContentType=file.content_type or 'image/jpeg'
+            ContentType=file.content_type or 'image/jpeg',
+            ACL='private'
         )
         
         # Update retouch request with result URL

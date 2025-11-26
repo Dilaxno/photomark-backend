@@ -97,9 +97,7 @@ async def _list_photos(uid: str, vault: str | None = None) -> List[Dict[str, Any
                 key = obj.key
                 if key.endswith("/_history.txt") or key.endswith("/"):
                     continue
-                if R2_PUBLIC_BASE_URL:
-                    url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
-                elif R2_CUSTOM_DOMAIN and s3_presign_client:
+                if R2_CUSTOM_DOMAIN and s3_presign_client:
                     url = s3_presign_client.generate_presigned_url(
                         "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
                     )
@@ -143,9 +141,7 @@ async def _list_external_photos(uid: str) -> List[Dict[str, Any]]:
                 key = obj.key
                 if key.endswith("/_history.txt") or key.endswith("/"):
                     continue
-                if R2_PUBLIC_BASE_URL:
-                    url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
-                elif R2_CUSTOM_DOMAIN and s3_presign_client:
+                if R2_CUSTOM_DOMAIN and s3_presign_client:
                     url = s3_presign_client.generate_presigned_url(
                         "get_object", Params={"Bucket": R2_BUCKET, "Key": key}, ExpiresIn=60 * 60
                     )

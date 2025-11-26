@@ -51,33 +51,20 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
 
     bucket = s3.Bucket(R2_BUCKET)
     
-    # Prioritize public URL over custom domain
-    if R2_PUBLIC_BASE_URL:
-        base = (R2_PUBLIC_BASE_URL or "").strip().strip('"').strip("'").strip('`').rstrip('/')
-        # Use public ACL for direct access via public URL
-        bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="public-read")
-        return f"{base}/{key}"
-    
-    # Fallback to custom domain with presigned URLs if configured
-    if R2_CUSTOM_DOMAIN and s3_presign_client:
-        # Use private ACL when using custom domain with presigned URLs
-        bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
-        return s3_presign_client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": R2_BUCKET, "Key": key},
-            ExpiresIn=60 * 60 * 24 * 7,  # 7 days
-        )
-    
-    # Use public ACL as default
-    bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="public-read")
+    bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
 
-    # Fallback: generate presigned URL with default endpoint
     try:
+        if R2_CUSTOM_DOMAIN and s3_presign_client:
+            return s3_presign_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": R2_BUCKET, "Key": key},
+                ExpiresIn=60 * 60,
+            )
         client = s3.meta.client
         return client.generate_presigned_url(
             "get_object",
             Params={"Bucket": R2_BUCKET, "Key": key},
-            ExpiresIn=60 * 60 * 24 * 7,
+            ExpiresIn=60 * 60,
         )
     except Exception as ex:
         logger.warning(f"presigned url generation failed for {key}: {ex}")

@@ -29,9 +29,6 @@ router = APIRouter(prefix="/api", tags=["vaults"])
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
-    """Generate URL for R2 key - prioritizes public URL over custom domain."""
-    if R2_PUBLIC_BASE_URL:
-        return f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",
@@ -44,7 +41,7 @@ def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
             Params={"Bucket": R2_BUCKET, "Key": key},
             ExpiresIn=expires_in,
         )
-    return "" 
+    return ""
 
 # Special vault machine name used historically for collaborator uploads
 FRIENDS_VAULT_SAFE = "Photos_sent_by_friends" 
@@ -1639,23 +1636,14 @@ async def vaults_create_reel(request: Request, payload: dict = Body(...), backgr
     img_urls: list[str] = []
     try:
         if s3 and R2_BUCKET:
-            if R2_PUBLIC_BASE_URL:
-                for k in keys:
-                    if k.lower().endswith('.json'):
-                        continue
-                    img_urls.append(_get_url_for_key(k, expires_in=60 * 60 * 24))
-            else:
-                # Signed URLs may expire; acceptable for immediate render
-                for k in keys:
-                    if k.lower().endswith('.json'):
-                        continue
-                    try:
-                        url = s3.meta.client.generate_presigned_url(
-                            "get_object", Params={"Bucket": R2_BUCKET, "Key": k}, ExpiresIn=60 * 60
-                        )
-                        img_urls.append(url)
-                    except Exception:
-                        continue
+            for k in keys:
+                if k.lower().endswith('.json'):
+                    continue
+                try:
+                    url = _get_url_for_key(k, expires_in=60 * 60)
+                    img_urls.append(url)
+                except Exception:
+                    continue
         else:
             for k in keys:
                 if k.lower().endswith('.json'):
@@ -1915,9 +1903,7 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
                         ok = o.key
                         if ok.endswith("/"):
                             continue
-                        if R2_PUBLIC_BASE_URL:
-                            o_url = f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{ok}"
-                        elif R2_CUSTOM_DOMAIN and s3_presign_client:
+                        if R2_CUSTOM_DOMAIN and s3_presign_client:
                             o_url = s3_presign_client.generate_presigned_url(
                                 "get_object", Params={"Bucket": R2_BUCKET, "Key": ok}, ExpiresIn=60 * 60
                             )

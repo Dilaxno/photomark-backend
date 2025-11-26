@@ -16,9 +16,6 @@ def _share_key(token: str) -> str:
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
-    """Generate URL for R2 key."""
-    if R2_PUBLIC_BASE_URL:
-        return f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
     if R2_CUSTOM_DOMAIN and s3_presign_client:
         return s3_presign_client.generate_presigned_url(
             "get_object",
@@ -83,7 +80,8 @@ async def upload_marked_photo(
             Bucket=R2_BUCKET,
             Key=key,
             Body=raw,
-            ContentType=file.content_type or 'image/png'
+            ContentType=file.content_type or 'image/png',
+            ACL='private'
         )
         
         # Generate URL
