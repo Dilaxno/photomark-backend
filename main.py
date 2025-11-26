@@ -244,7 +244,8 @@ async def allow_domain(request: Request):
         return {"allow": False}
     try:
         db: Session = next(get_db())
-        shop = db.query(Shop).filter(Shop.domain['hostname'].astext == domain).first()  # type: ignore
+        from sqlalchemy import cast, String
+        shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
         if shop:
             try:
                 enabled = bool((shop.domain or {}).get('enabled') or False)
@@ -377,7 +378,8 @@ def root(request: Request):
             from models.user import User
             db: Session = next(get_db())
             try:
-                shop = db.query(Shop).filter(Shop.domain['hostname'].astext == host).first()  # type: ignore
+                from sqlalchemy import cast, String
+                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
                 if shop:
                     enabled = bool((shop.domain or {}).get('enabled') or False)
                     if enabled:
@@ -409,7 +411,8 @@ def domain_redirect_any(request: Request, remaining_path: str):
             from models.user import User
             db: Session = next(get_db())
             try:
-                shop = db.query(Shop).filter(Shop.domain['hostname'].astext == host).first()  # type: ignore
+                from sqlalchemy import cast, String
+                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
                 if shop:
                     enabled = bool((shop.domain or {}).get('enabled') or False)
                     if enabled:
