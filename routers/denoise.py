@@ -82,13 +82,28 @@ def _denoise_dncnn(img: np.ndarray, strength: float, model: DnCNN) -> np.ndarray
     return out_np
 
 
-def _denoise_cv2(img: np.ndarray, strength: float) -> np.ndarray:
-    # Colored denoising as fallback; strength maps to h parameters
-    h_color = int(5 + strength * 15)
-    h_luma = int(5 + strength * 15)
-    # cv2 expects BGR
+def _denoise_cv2(
+    img: np.ndarray,
+    strength: float,
+    h_luma: Optional[int] = None,
+    h_color: Optional[int] = None,
+    template_size: int = 7,
+    search_size: int = 21,
+    use_gray: bool = False,
+) -> np.ndarray:
+    hl = h_luma if h_luma is not None else int(max(0, min(50, 5 + strength * 15)))
+    hc = h_color if h_color is not None else int(max(0, min(50, 5 + strength * 15)))
+    ts = max(3, template_size)
+    ts = ts if ts % 2 == 1 else ts + 1
+    ss = max(5, search_size)
+    ss = ss if ss % 2 == 1 else ss + 1
+    if use_gray or (img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1)):
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
+        den = cv2.fastNlMeansDenoising(gray, None, hl, ts, ss)
+        rgb = cv2.cvtColor(den, cv2.COLOR_GRAY2RGB)
+        return rgb
     bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    den = cv2.fastNlMeansDenoisingColored(bgr, None, h_luma, h_color, 7, 21)
+    den = cv2.fastNlMeansDenoisingColored(bgr, None, hl, hc, ts, ss)
     rgb = cv2.cvtColor(den, cv2.COLOR_BGR2RGB)
     return rgb
 
@@ -189,12 +204,17 @@ def _denoise_periodic_fourier(rgb: np.ndarray, noise_type: int, D0: float, order
 @router.post("/process/denoise-images")
 async def denoise_images(
     files: List[UploadFile] = File(...),
-    strength: float = Form(0.5),  # 0..1 (for dncnn/opencv)
+    strength: float = Form(0.5),
     jpeg_quality: int = Form(90),
-    method: str = Form("fourier"),  # auto|dncnn|opencv|fourier (default: fourier)
-    noise_type: int = Form(1),    # 1:vertical,2:horizontal,3:right diag,4:left diag (for fourier)
+    method: str = Form("opencv"),
+    noise_type: int = Form(1),
     fourier_d0: float = Form(80.0),
     fourier_order: int = Form(10),
+    nlm_h_luma: Optional[int] = Form(None),
+    nlm_h_color: Optional[int] = Form(None),
+    nlm_template_size: int = Form(7),
+    nlm_search_size: int = Form(21),
+    nlm_grayscale: bool = Form(False),
 ):
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
@@ -225,8 +245,18 @@ async def denoise_images(
                 logger.info(f"Using DnCNN model for denoising {name}")
                 out_rgb = _denoise_dncnn(rgb, float(max(0.0, min(1.0, strength))), model)
             else:
-                logger.info(f"Using OpenCV fallback for denoising {name}")
-                out_rgb = _denoise_cv2(rgb, float(max(0.0, min(1.0, strength))))
+                logger.info(
+                    f"Using OpenCV FastNLMeans for denoising {name} (h_luma={nlm_h_luma}, h_color={nlm_h_color}, template={nlm_template_size}, search={nlm_search_size}, gray={nlm_grayscale})"
+                )
+                out_rgb = _denoise_cv2(
+                    rgb,
+                    float(max(0.0, min(1.0, strength))),
+                    nlm_h_luma,
+                    nlm_h_color,
+                    int(nlm_template_size),
+                    int(nlm_search_size),
+                    bool(nlm_grayscale),
+                )
 
             out_img = _merge_alpha(out_rgb, alpha)
 
