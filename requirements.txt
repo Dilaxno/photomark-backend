@@ -27,6 +27,7 @@ transparent-background==1.3.4
 segment-anything==1.0
 rembg[cpu]
 HDRutils
+imgdiet
 
 # LUT generation
 PyLUT==1.4.9

@@ -5,6 +5,11 @@ from io import BytesIO
 from PIL import Image
 import zipfile
 import os
+import tempfile
+try:
+    from imgdiet import save as imgdiet_save  # type: ignore
+except Exception:
+    imgdiet_save = None
 
 router = APIRouter()
 
@@ -63,40 +68,68 @@ async def compress_images(
     files: List[UploadFile] = File(...),
     jpeg_quality: int = Form(85),
     png_compress_level: int = Form(6),
+    use_imgdiet: bool = Form(False),
+    target_psnr: float = Form(40.0),
 ):
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
 
     outputs: List[tuple[str, bytes, str]] = []  # (filename, data, mime)
 
-    for up in files:
+    if use_imgdiet and imgdiet_save is not None:
+        tmpdir = tempfile.mkdtemp(prefix="imgdiet_")
         try:
-            name = up.filename or "image"
-            ext = os.path.splitext(name)[1].lower() or ".jpg"
-            data = await up.read()
-            img = Image.open(BytesIO(data))
-            if ext in (".jpg", ".jpeg"):
-                buf = _compress_jpeg(img, jpeg_quality)
-                outputs.append((os.path.splitext(name)[0] + ".jpg", buf, "image/jpeg"))
-            elif ext == ".png":
-                buf = _compress_png(img, png_compress_level)
-                outputs.append((os.path.splitext(name)[0] + ".png", buf, "image/png"))
-            elif ext == ".webp":
-                buf = _compress_webp(img, jpeg_quality)
-                outputs.append((os.path.splitext(name)[0] + ".webp", buf, "image/webp"))
-            elif ext in (".tif", ".tiff"):
-                buf = _compress_tiff(img)
-                outputs.append((os.path.splitext(name)[0] + ".tiff", buf, "image/tiff"))
-            elif ext == ".bmp":
-                # Convert BMP to PNG for better compression
-                buf = _compress_png(img, png_compress_level)
-                outputs.append((os.path.splitext(name)[0] + ".png", buf, "image/png"))
-            else:
-                # Fallback: convert to JPEG
-                buf = _compress_jpeg(img, jpeg_quality)
-                outputs.append((os.path.splitext(name)[0] + ".jpg", buf, "image/jpeg"))
-        except Exception as e:
-            return JSONResponse({"error": f"Failed to process {up.filename}: {e}"}, status_code=400)
+            for i, up in enumerate(files):
+                name = up.filename or f"image_{i}"
+                base = os.path.splitext(name)[0]
+                src_path = os.path.join(tmpdir, f"{base}")
+                data = await up.read()
+                with open(src_path, "wb") as fp:
+                    fp.write(data)
+                out_path = os.path.join(tmpdir, f"{base}.webp")
+                try:
+                    imgdiet_save(source=src_path, target=out_path, target_psnr=float(target_psnr), verbose=False)
+                    with open(out_path, "rb") as fp:
+                        buf = fp.read()
+                    outputs.append((f"{base}.webp", buf, "image/webp"))
+                except Exception as e:
+                    return JSONResponse({"error": f"Failed to compress {name} with imgdiet: {e}"}, status_code=400)
+        finally:
+            try:
+                for f in os.listdir(tmpdir):
+                    p = os.path.join(tmpdir, f)
+                    if os.path.isfile(p):
+                        os.remove(p)
+                os.rmdir(tmpdir)
+            except Exception:
+                pass
+    else:
+        for up in files:
+            try:
+                name = up.filename or "image"
+                ext = os.path.splitext(name)[1].lower() or ".jpg"
+                data = await up.read()
+                img = Image.open(BytesIO(data))
+                if ext in (".jpg", ".jpeg"):
+                    buf = _compress_jpeg(img, jpeg_quality)
+                    outputs.append((os.path.splitext(name)[0] + ".jpg", buf, "image/jpeg"))
+                elif ext == ".png":
+                    buf = _compress_png(img, png_compress_level)
+                    outputs.append((os.path.splitext(name)[0] + ".png", buf, "image/png"))
+                elif ext == ".webp":
+                    buf = _compress_webp(img, jpeg_quality)
+                    outputs.append((os.path.splitext(name)[0] + ".webp", buf, "image/webp"))
+                elif ext in (".tif", ".tiff"):
+                    buf = _compress_tiff(img)
+                    outputs.append((os.path.splitext(name)[0] + ".tiff", buf, "image/tiff"))
+                elif ext == ".bmp":
+                    buf = _compress_png(img, png_compress_level)
+                    outputs.append((os.path.splitext(name)[0] + ".png", buf, "image/png"))
+                else:
+                    buf = _compress_jpeg(img, jpeg_quality)
+                    outputs.append((os.path.splitext(name)[0] + ".jpg", buf, "image/jpeg"))
+            except Exception as e:
+                return JSONResponse({"error": f"Failed to process {up.filename}: {e}"}, status_code=400)
 
     if len(outputs) == 1:
         fname, data, mime = outputs[0]
