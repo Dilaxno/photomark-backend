@@ -633,3 +633,217 @@ async def get_domain_status(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to check domain status: {str(e)}")
+
+# -------------------------------
+# Dynamic checkout link for public shop (no per-product creation in Dodo)
+# -------------------------------
+from core.config import DODO_ADHOC_PRODUCT_ID, logger  # type: ignore
+from utils.dodo import create_checkout_link  # type: ignore
+
+def _cents(amount: float) -> int:
+    try:
+        # Protect against floats and strings; round to nearest cent
+        return int(round(float(amount) * 100.0))
+    except Exception:
+        return 0
+
+@router.post("/checkout/link")
+async def create_shop_checkout_link(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a hosted Dodo Payments checkout link for a public shop cart
+    without creating individual products in Dodo.
+
+    Request JSON:
+    {
+      "slug": "my-shop",
+      "items": [{ "id": "product_id_in_shop", "quantity": 1 }],
+      "customer": { "email": "buyer@example.com", "name": "John Doe" },
+      "returnUrl": "https://photomark.cloud/#thank-you"  // optional
+    }
+
+    Response: { "url": "<redirect-to-dodo-checkout>" }
+    """
+    # Validate input
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "invalid_payload"}, status_code=400)
+
+    slug = str(payload.get("slug") or "").strip()
+    items_in = payload.get("items") or []
+    customer = payload.get("customer") or {}
+    return_url = str(
+        (payload.get("returnUrl") if isinstance(payload, dict) else None)
+        or (payload.get("return_url") if isinstance(payload, dict) else None)
+        or os.getenv("SHOP_CHECKOUT_RETURN_URL")
+        or "https://photomark.cloud/#success"
+    )
+
+    if not slug:
+        return JSONResponse({"error": "missing_slug"}, status_code=400)
+    if not isinstance(items_in, list) or len(items_in) == 0:
+        return JSONResponse({"error": "empty_cart"}, status_code=400)
+    if not DODO_ADHOC_PRODUCT_ID:
+        logger.warning("[shop.checkout] DODO_ADHOC_PRODUCT_ID not configured")
+        return JSONResponse({"error": "adhoc_product_not_configured"}, status_code=500)
+
+    # Load shop by slug
+    try:
+        slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == slug).first()
+        if not slug_mapping:
+            return JSONResponse({"error": "shop_not_found"}, status_code=404)
+        shop = db.query(Shop).filter(Shop.uid == slug_mapping.uid).first()
+        if not shop:
+            return JSONResponse({"error": "shop_not_found"}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": "db_error", "detail": str(e)}, status_code=500)
+
+    # Validate and price items against server data to prevent client tampering
+    catalog = {str(p.get("id")): p for p in (shop.products or []) if isinstance(p, dict) and p.get("id")}
+    line_items = []
+    currency_set: set[str] = set()
+    total_cents = 0
+
+    for line in items_in:
+        try:
+            pid = str(line.get("id") or "").strip()
+            qty = int(line.get("quantity") or 1)
+            qty = 1 if qty <= 0 else qty
+        except Exception:
+            return JSONResponse({"error": "invalid_items"}, status_code=400)
+
+        prod = catalog.get(pid)
+        if not prod:
+            return JSONResponse({"error": "invalid_item", "item_id": pid}, status_code=400)
+
+        price = float(prod.get("price") or 0.0)
+        curr = (prod.get("currency") or "USD").strip().upper()
+        currency_set.add(curr)
+        unit_cents = _cents(price)
+        line_total = unit_cents * qty
+        total_cents += line_total
+
+        line_items.append({
+            "id": pid,
+            "title": prod.get("title"),
+            "unit_price_cents": unit_cents,
+            "quantity": qty,
+            "line_total_cents": line_total,
+            "currency": curr,
+        })
+
+    if total_cents <= 0:
+        return JSONResponse({"error": "invalid_total"}, status_code=400)
+
+    if len(currency_set) != 1:
+        return JSONResponse({"error": "mixed_currency_not_supported", "currencies": sorted(list(currency_set))}, status_code=400)
+
+    currency = next(iter(currency_set))
+
+    # Prepare payloads for Dodo create-checkout flow (using a single pay-what-you-want product)
+    owner_uid = shop.owner_uid
+    shop_uid = shop.uid
+    meta = {
+        "shop_slug": slug,
+        "shop_uid": shop_uid,
+        "owner_uid": owner_uid,
+        "currency": currency,
+        "cart_total_cents": total_cents,
+        "cart_items": line_items,
+    }
+    qp = {"shop_slug": slug, "owner_uid": owner_uid}
+
+    # Reference identifiers to help reconcile in webhooks
+    ref_fields = {
+        "client_reference_id": f"{owner_uid}:{slug}",
+        "reference_id": f"{owner_uid}:{slug}",
+        "external_id": f"{owner_uid}:{slug}",
+    }
+
+    # Build primary payload (unified shape)
+    base_payload = {
+        **ref_fields,
+        "metadata": meta,
+        "query_params": qp,
+        "query": qp,
+        "params": qp,
+        "product_cart": [
+            {
+                "product_id": DODO_ADHOC_PRODUCT_ID,
+                "quantity": 1,
+                "amount": int(total_cents),  # lowest denomination
+            }
+        ],
+        "return_url": return_url,
+        "cancel_url": return_url,
+        "payment_link": True,
+        "allowed_payment_method_types": ["credit", "debit", "apple_pay", "google_pay"],
+        "show_saved_payment_methods": True,
+    }
+
+    # Add customer info if provided
+    cust_email = str(customer.get("email") or "").strip() if isinstance(customer, dict) else ""
+    cust_name = str(customer.get("name") or "").strip() if isinstance(customer, dict) else ""
+    if cust_email or cust_name:
+        base_payload["customer"] = {**({"email": cust_email} if cust_email else {}), **({"name": cust_name} if cust_name else {})}
+        if cust_email:
+            base_payload["email"] = cust_email
+            base_payload["customer_email"] = cust_email
+
+    # Alternative shapes to maximize compatibility across environments
+    alt_payloads = [
+        base_payload,
+        {
+            **ref_fields,
+            "metadata": meta,
+            "query_params": qp,
+            "query": qp,
+            "params": qp,
+            "items": [{"product_id": DODO_ADHOC_PRODUCT_ID, "quantity": 1, "amount": int(total_cents)}],
+            "return_url": return_url,
+            "cancel_url": return_url,
+            "payment_link": True,
+            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
+        },
+        {
+            **ref_fields,
+            "metadata": meta,
+            "query_params": qp,
+            "query": qp,
+            "params": qp,
+            "products": [{"product_id": DODO_ADHOC_PRODUCT_ID, "quantity": 1, "amount": int(total_cents)}],
+            "return_url": return_url,
+            "cancel_url": return_url,
+            "payment_link": True,
+            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
+        },
+    ]
+
+    # Create link via Dodo helper
+    link, details = await create_checkout_link(alt_payloads)
+    if link:
+        # Optionally cache context by code for webhook retrieval
+        try:
+            from utils.storage import write_json_key  # type: ignore
+            code = link.rsplit("/", 1)[-1]
+            write_json_key(
+                f"shops/cache/links/{code}.json",
+                {
+                    "shop_slug": slug,
+                    "shop_uid": shop_uid,
+                    "owner_uid": owner_uid,
+                    "currency": currency,
+                    "cart_total_cents": total_cents,
+                    "cart_items": line_items,
+                    "email": cust_email,
+                    "name": cust_name,
+                },
+            )
+        except Exception:
+            pass
+        return {"url": link}
+
+    logger.warning(f"[shop.checkout] failed to create link: {details}")
+    return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)

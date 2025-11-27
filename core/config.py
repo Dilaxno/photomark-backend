@@ -41,6 +41,8 @@ DODO_WEBHOOK_SECRET = (
     or os.getenv("DODO_PAYMENTS_WEBHOOK_SECRET")
     or ""
 )
+# Generic ad-hoc one-time product (pay_what_you_want enabled) for dynamic shop payments
+DODO_ADHOC_PRODUCT_ID = (os.getenv("DODO_ADHOC_PRODUCT_ID") or "").strip()
 
 # Export DODO_PAYMENTS_WEBHOOK_KEY for routers that import it directly
 DODO_PAYMENTS_WEBHOOK_KEY = (
