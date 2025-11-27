@@ -458,9 +458,67 @@ def root(request: Request):
         pass
     return {"ok": True}
 
+@app.head("/")
+def root_head(request: Request):
+    try:
+        host = _get_request_host(request)
+        if host:
+            from core.database import get_db
+            from sqlalchemy.orm import Session
+            from models.shop import Shop
+            from models.user import User
+            db: Session = next(get_db())
+            try:
+                from sqlalchemy import cast, String
+                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
+                if shop:
+                    if _should_redirect_shop(shop):
+                        user = db.query(User).filter(User.uid == shop.owner_uid).first()
+                        slug = (shop.slug or "").strip()
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        return RedirectResponse(url)
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {"ok": True}
+
 # Catch-all: redirect any unmatched path on a configured custom domain to the public shop
 @app.get("/{remaining_path:path}")
 def domain_redirect_any(request: Request, remaining_path: str):
+    try:
+        host = _get_request_host(request)
+        if host:
+            from core.database import get_db
+            from sqlalchemy.orm import Session
+            from models.shop import Shop
+            from models.user import User
+            db: Session = next(get_db())
+            try:
+                from sqlalchemy import cast, String
+                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
+                if shop:
+                    if _should_redirect_shop(shop):
+                        user = db.query(User).filter(User.uid == shop.owner_uid).first()
+                        slug = (shop.slug or "").strip()
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        return RedirectResponse(url)
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {"ok": True}
+
+@app.head("/{remaining_path:path}")
+def domain_redirect_any_head(request: Request, remaining_path: str):
     try:
         host = _get_request_host(request)
         if host:
