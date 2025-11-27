@@ -18,10 +18,12 @@ router = APIRouter(prefix="/api/shop", tags=["shop"])
 # Allowed file types
 IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
 VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo']
+FONT_TYPES = ['font/ttf', 'font/otf', 'font/woff', 'font/woff2', 'application/font-ttf', 'application/font-otf', 'application/font-woff', 'application/font-woff2', 'application/octet-stream']
 
 # File size limits
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FONT_SIZE = 20 * 1024 * 1024   # 20MB
 
 print("[SHOP] Shop router initialized")
 
@@ -57,6 +59,10 @@ async def upload_shop_asset(
             allowed_types = VIDEO_TYPES
             max_size = MAX_VIDEO_SIZE
             media_type = 'video'
+        elif type == 'font':
+            allowed_types = FONT_TYPES
+            max_size = MAX_FONT_SIZE
+            media_type = 'font'
         else:
             raise HTTPException(status_code=400, detail=f"Invalid upload type: {type}")
         
