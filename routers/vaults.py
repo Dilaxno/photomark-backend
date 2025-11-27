@@ -1000,7 +1000,7 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
 
 
 @router.get("/vaults/photos")
-async def vaults_photos(request: Request, vault: str, password: Optional[str] = None):
+async def vaults_photos(request: Request, vault: str, password: Optional[str] = None, limit: Optional[int] = None, cursor: Optional[str] = None):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -1008,6 +1008,15 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
     # Password protection only applies to shared access via tokens
     try:
         keys = _read_vault(uid, vault)
+        start_index = 0
+        if cursor:
+            try:
+                start_index = max(0, int(cursor))
+            except Exception:
+                start_index = 0
+        eff_limit = None
+        if isinstance(limit, int) and limit > 0:
+            eff_limit = max(1, min(limit, 1000))
         # Hide collaborator-sent items from 'Photos sent by friends' vault
         try:
             if vault == FRIENDS_VAULT_SAFE:
@@ -1022,6 +1031,10 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
                 keys = sorted(keys, key=lambda k: order_index.get(k, 10**9))
         except Exception:
             pass
+        # Apply optional ordering and then slice for pagination
+        if eff_limit is not None or cursor:
+            keys = keys[start_index : (start_index + (eff_limit or len(keys)))]
+
         items: list[dict] = []
         if s3 and R2_BUCKET:
             # Build lookup of originals to attach to items
@@ -1130,7 +1143,12 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
                 except Exception:
                     pass
                 items.append(item)
-        return {"photos": items}
+        result = {"photos": items}
+        if eff_limit is not None:
+            next_start = start_index + eff_limit
+            if next_start < len(_read_vault(uid, vault)):
+                result["next_cursor"] = str(next_start)
+        return result
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
 
@@ -1186,7 +1204,7 @@ async def vaults_generate_preview(request: Request, vault: str = Body(..., embed
 
 
 @router.get("/vaults/preview/{token}")
-async def vaults_get_preview(token: str):
+async def vaults_get_preview(token: str, limit: Optional[int] = None, cursor: Optional[str] = None):
     """Get vault photos using preview token (public, no auth required)"""
     try:
         preview_key = f"previews/{token}.json"
@@ -1203,6 +1221,17 @@ async def vaults_get_preview(token: str):
         
         # Get vault photos
         keys = _read_vault(uid, vault)
+        start_index = 0
+        if cursor:
+            try:
+                start_index = max(0, int(cursor))
+            except Exception:
+                start_index = 0
+        eff_limit = None
+        if isinstance(limit, int) and limit > 0:
+            eff_limit = max(1, min(limit, 1000))
+        if eff_limit is not None or cursor:
+            keys = keys[start_index : (start_index + (eff_limit or len(keys)))]
         items = []
         for k in keys:
             try:
@@ -1232,13 +1261,19 @@ async def vaults_get_preview(token: str):
                             "title": slide.get("title", "")
                         })
         
-        return {
+        resp = {
             "vault": vault,
             "display_name": display_name or vault.replace("_", " "),
             "photos": items,
             "photo_count": len(items),
             "slideshows": slideshow_items
         }
+        if eff_limit is not None:
+            next_start = start_index + eff_limit
+            all_keys = _read_vault(uid, vault)
+            if next_start < len(all_keys):
+                resp["next_cursor"] = str(next_start)
+        return resp
     except Exception as ex:
         logger.error(f"Failed to get preview: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=400)

@@ -651,7 +651,8 @@ async def api_photos_rename(request: Request, payload: dict = Body(...)):
 @router.get("/photos/external")
 async def get_external_photos(
     request: Request,
-    limit: int = 1000
+    limit: int = 1000,
+    cursor: Optional[str] = None
 ):
     """Get all externally uploaded photos for uploads-preview page."""
     try:
@@ -671,43 +672,32 @@ async def get_external_photos(
         # R2 Cloud Storage
         if s3 and R2_BUCKET:
             try:
-                paginator = s3.meta.client.get_paginator('list_objects_v2')
-                page_iterator = paginator.paginate(
-                    Bucket=R2_BUCKET,
-                    Prefix=prefix,
-                    PaginationConfig={'MaxItems': limit}
-                )
-                
-                for page in page_iterator:
-                    for obj in page.get('Contents', []):
-                        key = obj['Key']
-                        
-                        # Skip directories and history files
-                        if key.endswith('/') or key.endswith('/_history.txt'):
-                            continue
-                        
-                        name = os.path.basename(key)
-                        
-                        # Skip friend photos
-                        if '-fromfriend' in name.lower():
-                            continue
-                        
-                        # Generate presigned URL
-                        url = _get_url_for_key(key, expires_in=3600)
-                        
-                        photos.append({
-                            'key': key,
-                            'url': url,
-                            'name': name,
-                            'size': obj.get('Size', 0),
-                            'last_modified': obj.get('LastModified', datetime.utcnow()).isoformat()
-                        })
-                
-                # Sort by last modified (newest first)
-                photos.sort(key=lambda x: x['last_modified'], reverse=True)
-                
-                return {'photos': photos[:limit], 'count': len(photos)}
-                
+                client = s3.meta.client
+                params = {
+                    'Bucket': R2_BUCKET,
+                    'Prefix': prefix,
+                    'MaxKeys': max(1, min(int(limit or 1000), 1000)),
+                }
+                if cursor:
+                    params['ContinuationToken'] = cursor
+                resp = client.list_objects_v2(**params)
+                for obj in resp.get('Contents', []) or []:
+                    key = obj.get('Key', '')
+                    if not key or key.endswith('/') or key.endswith('/_history.txt'):
+                        continue
+                    name = os.path.basename(key)
+                    if '-fromfriend' in name.lower():
+                        continue
+                    url = _get_url_for_key(key, expires_in=3600)
+                    photos.append({
+                        'key': key,
+                        'url': url,
+                        'name': name,
+                        'size': obj.get('Size', 0),
+                        'last_modified': obj.get('LastModified', datetime.utcnow()).isoformat()
+                    })
+                next_token = resp.get('NextContinuationToken') or None
+                return {'photos': photos, 'next_cursor': next_token}
             except Exception as ex:
                 logger.exception(f"R2 error for user {uid}: {ex}")
                 return JSONResponse({"error": "Storage error"}, status_code=500)
@@ -743,10 +733,8 @@ async def get_external_photos(
                             'last_modified': datetime.fromtimestamp(os.path.getmtime(full_path)).isoformat()
                         })
                 
-                # Sort by last modified (newest first)
                 photos.sort(key=lambda x: x['last_modified'], reverse=True)
-                
-                return {'photos': photos[:limit], 'count': len(photos)}
+                return {'photos': photos[:limit]}
                 
             except Exception as ex:
                 logger.exception(f"Filesystem error for user {uid}: {ex}")
