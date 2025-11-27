@@ -25,8 +25,8 @@ MAX_FILES = int(os.getenv("MAX_FILES", "100"))
 
 # Payments (Dodo)
 DODO_API_BASE = os.getenv("DODO_API_BASE", "https://api.dodo-payments.example").rstrip("/")
-# Default to new unified checkout sessions endpoint
-DODO_CHECKOUT_PATH = os.getenv("DODO_CHECKOUT_PATH", "/checkouts").strip()
+# Default to stable v1 payment links endpoint
+DODO_CHECKOUT_PATH = os.getenv("DODO_CHECKOUT_PATH", "/v1/payment-links").strip()
 if not DODO_CHECKOUT_PATH.startswith("/"):
     DODO_CHECKOUT_PATH = "/" + DODO_CHECKOUT_PATH
 # Products endpoint for creating price objects

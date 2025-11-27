@@ -33,6 +33,16 @@ def build_headers_list() -> list[dict]:
                 env_hdr = "sandbox"
         except Exception:
             pass
+    # Normalize environment header for test/live
+    try:
+        base = (DODO_API_BASE or "").lower()
+        if env_hdr.lower() == "test" and ("test.dodopayments.com" in base or "sandbox" in base):
+            env_hdr = "sandbox"
+        if env_hdr.lower() == "prod":
+            env_hdr = "production"
+    except Exception:
+        pass
+
     for h in headers_list:
         if business_id:
             h["Dodo-Business-Id"] = business_id
@@ -59,13 +69,21 @@ def build_endpoints() -> list[str]:
     if not path.startswith("/"):
         path = "/" + path
     logger.info(f"[dodo] using api base: {base}")
-    # Use stable, documented endpoints only; avoid legacy paths that can trip Cloudflare (e.g. /payment-links/create)
-    return [
+    # Use stable, documented endpoints only; avoid legacy paths that can trip Cloudflare
+    endpoints: list[str] = [
         f"{base}/v1/checkout-sessions",
         f"{base}/v1/payments",
         f"{base}/v1/payment-links",
-        f"{base}{path}",  # typically /v1/payment-links if configured
     ]
+    # Include configured path only if it looks like a v1 API path
+    if path.startswith("/v1/"):
+        endpoints.append(f"{base}{path}")
+    else:
+        try:
+            logger.warning(f"[dodo] ignoring non-v1 checkout path '{path}' (using defaults)")
+        except Exception:
+            pass
+    return endpoints
 
 
 def pick_checkout_url(data: Dict[str, Any]) -> Optional[str]:
