@@ -138,7 +138,8 @@ async def custom_domain_routing(request: Request, call_next):
                 if shop:
                     if _should_redirect_shop(shop):
                         slug = (shop.slug or "").strip()
-                        url = f"/shop/{slug}" if slug else "/shop"
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
                         return RedirectResponse(url=url, status_code=307)
             finally:
                 try:
@@ -445,7 +446,8 @@ def root(request: Request):
                         sub_id = (user.subscription_id if user and user.subscription_id else "")
                         status = (user.subscription_status if user and user.subscription_status else (user.plan if user and user.plan else "inactive"))
                         slug = (shop.slug or "").strip()
-                        url = f"/shop/{slug}" if slug else "/shop"
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
                         return RedirectResponse(url)
             finally:
                 try:
@@ -474,7 +476,8 @@ def domain_redirect_any(request: Request, remaining_path: str):
                     if _should_redirect_shop(shop):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         slug = (shop.slug or "").strip()
-                        url = f"/shop/{slug}" if slug else "/shop"
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
                         return RedirectResponse(url)
             finally:
                 try:
