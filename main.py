@@ -199,6 +199,10 @@ except Exception as _ex:
 from routers import affiliates  # noqa: E402
 app.include_router(affiliates.router)
 
+# portfolios endpoints (owner showcase)
+from routers import portfolios  # noqa: E402
+app.include_router(portfolios.router)
+
 # Pricing webhook (replaces legacy Dodo webhook)
 try:
     from routers import pricing_webhook  # noqa: E402
