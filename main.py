@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
@@ -543,3 +543,34 @@ async def resolve_domain_simple(hostname: str):
         raise
     except Exception as _ex:
         raise HTTPException(status_code=500, detail=f"Failed to resolve domain: {_ex}")
+
+@app.get("/shop")
+async def proxy_shop_root():
+    try:
+        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{front}/shop")
+            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
+    except Exception:
+        return {"ok": True}
+
+@app.get("/shop/{slug}")
+async def proxy_shop_slug(slug: str):
+    try:
+        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{front}/shop/{slug}")
+            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
+    except Exception as _ex:
+        return Response(content=f"<html><body><h1>Shop page unavailable</h1><p>{_ex}</p></body></html>", media_type="text/html", status_code=502)
+
+@app.get("/assets/{path:path}")
+async def proxy_assets(path: str):
+    try:
+        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{front}/assets/{path}")
+            ct = r.headers.get("content-type") or "application/octet-stream"
+            return Response(content=r.content, media_type=ct, status_code=r.status_code)
+    except Exception:
+        return Response(content=b"", media_type="application/octet-stream", status_code=404)
