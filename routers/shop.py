@@ -593,7 +593,7 @@ async def get_domain_status(
 # Dynamic checkout link for public shop (no per-product creation in Dodo)
 # -------------------------------
 from core.config import DODO_ADHOC_PRODUCT_ID, logger  # type: ignore
-from utils.dodo import create_checkout_link  # type: ignore
+from utils.dodo import create_checkout_link, create_checkout_session  # type: ignore
 
 @router.get("/checkout/health")
 async def checkout_health():
@@ -813,97 +813,38 @@ async def create_shop_checkout_link(
             base_payload["email"] = cust_email
             base_payload["customer_email"] = cust_email
 
-    # Alternative shapes to maximize compatibility across environments and endpoints
-    # We send both variants (with and without payment_link) and with explicit billing_currency
-    alt_payloads = [
-        # sessions-style (product_cart)
-        base_payload,
-        # payments/payment-links style (items) WITHOUT payment_link
-        {
-            **common_top,
-            **ref_fields,
-            "metadata": meta,
-            "query_params": qp,
-            "query": qp,
-            "params": qp,
-            "items": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
-            "billing_currency": currency,
-            "return_url": return_url,
-            "cancel_url": return_url,
-            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
-        },
-        # payments/payment-links style (items) WITH payment_link
-        {
-            **common_top,
-            **ref_fields,
-            "metadata": meta,
-            "query_params": qp,
-            "query": qp,
-            "params": qp,
-            "items": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
-            "billing_currency": currency,
-            "return_url": return_url,
-            "cancel_url": return_url,
-            "payment_link": True,
-            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
-        },
-        # products alias (products) WITHOUT payment_link
-        {
-            **common_top,
-            **ref_fields,
-            "metadata": meta,
-            "query_params": qp,
-            "query": qp,
-            "params": qp,
-            "products": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
-            "billing_currency": currency,
-            "return_url": return_url,
-            "cancel_url": return_url,
-            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
-        },
-        # products alias (products) WITH payment_link
-        {
-            **common_top,
-            **ref_fields,
-            "metadata": meta,
-            "query_params": qp,
-            "query": qp,
-            "params": qp,
-            "products": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
-            "billing_currency": currency,
-            "return_url": return_url,
-            "cancel_url": return_url,
-            "payment_link": True,
-            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
-        },
-    ]
+    session_payload = base_payload
+    session_data, error = await create_checkout_session(session_payload)
+    if session_data and isinstance(session_data, dict):
+        link = (
+            session_data.get("checkout_url")
+            or session_data.get("session_url")
+            or session_data.get("url")
+        )
+        if isinstance(link, str) and link:
+            try:
+                from utils.storage import write_json_key  # type: ignore
+                code = link.rsplit("/", 1)[-1]
+                write_json_key(
+                    f"shops/cache/links/{code}.json",
+                    {
+                        "shop_slug": slug,
+                        "shop_uid": shop_uid,
+                        "owner_uid": owner_uid,
+                        "currency": currency,
+                        "cart_total_cents": total_cents,
+                        "cart_items": line_items,
+                        "email": cust_email,
+                        "name": cust_name,
+                        "session_id": session_data.get("session_id") or session_data.get("id"),
+                    },
+                )
+            except Exception:
+                pass
+            return {"url": link, "session_id": session_data.get("session_id") or session_data.get("id")}
 
-    # Create link via Dodo helper
-    link, details = await create_checkout_link(alt_payloads)
-    if link:
-        # Optionally cache context by code for webhook retrieval
-        try:
-            from utils.storage import write_json_key  # type: ignore
-            code = link.rsplit("/", 1)[-1]
-            write_json_key(
-                f"shops/cache/links/{code}.json",
-                {
-                    "shop_slug": slug,
-                    "shop_uid": shop_uid,
-                    "owner_uid": owner_uid,
-                    "currency": currency,
-                    "cart_total_cents": total_cents,
-                    "cart_items": line_items,
-                    "email": cust_email,
-                    "name": cust_name,
-                },
-            )
-        except Exception:
-            pass
-        return {"url": link}
-
-    logger.warning(f"[shop.checkout] failed to create link: {details}")
-    return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
+    logger.warning(f"[shop.checkout] failed to create checkout session: {error}")
+    return JSONResponse({"error": "session_creation_failed", "details": error}, status_code=502)
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
