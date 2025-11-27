@@ -595,6 +595,48 @@ async def get_domain_status(
 from core.config import DODO_ADHOC_PRODUCT_ID, logger  # type: ignore
 from utils.dodo import create_checkout_link  # type: ignore
 
+@router.get("/checkout/health")
+async def checkout_health():
+    """
+    Quick config health check for Dodo checkout integration.
+    - Verifies presence of mandatory vars
+    - Lists available per-currency ad-hoc product IDs: DODO_ADHOC_PRODUCT_ID_<CURRENCY>
+    """
+    import os as _os  # reflect live env at call-time
+    from core.config import DODO_API_BASE, DODO_API_KEY, DODO_ADHOC_PRODUCT_ID  # type: ignore
+
+    missing: list[str] = []
+    if not (DODO_API_BASE or "").strip():
+        missing.append("DODO_API_BASE")
+    if not (DODO_API_KEY or "").strip():
+        missing.append("DODO_API_KEY")
+    # Generic is optional if per-currency IDs are configured
+    has_generic = bool((DODO_ADHOC_PRODUCT_ID or "").strip())
+
+    # Discover per-currency overrides present in the env
+    currency_map = sorted(
+        [
+            k.split("DODO_ADHOC_PRODUCT_ID_", 1)[1]
+            for k, v in _os.environ.items()
+            if k.startswith("DODO_ADHOC_PRODUCT_ID_") and str(v or "").strip()
+        ]
+    )
+
+    if not has_generic and not currency_map:
+        missing.append("DODO_ADHOC_PRODUCT_ID or DODO_ADHOC_PRODUCT_ID_<CURRENCY>")
+
+    details = {
+        "api_base": (DODO_API_BASE or "").strip(),
+        "api_key_set": bool((DODO_API_KEY or "").strip()),
+        "adhoc_product_id_set": has_generic,
+        "adhoc_currency_map": currency_map,  # e.g., ["USD","EUR"]
+        "how_to_configure": "Set DODO_ADHOC_PRODUCT_ID for a default pay-what-you-want product, or set DODO_ADHOC_PRODUCT_ID_<CURRENCY> per currency (e.g., DODO_ADHOC_PRODUCT_ID_USD).",
+    }
+    ok = len(missing) == 0
+    if not ok:
+        logger.warning(f"[shop.checkout.health] Missing config: {missing} | details={details}")
+    return JSONResponse({"ok": ok, "missing": missing, "details": details})
+
 def _cents(amount: float) -> int:
     try:
         # Protect against floats and strings; round to nearest cent
@@ -640,9 +682,10 @@ async def create_shop_checkout_link(
         return JSONResponse({"error": "missing_slug"}, status_code=400)
     if not isinstance(items_in, list) or len(items_in) == 0:
         return JSONResponse({"error": "empty_cart"}, status_code=400)
+    # Generic check removed here to allow per-currency overrides;
+    # validation happens after we determine the cart currency.
     if not DODO_ADHOC_PRODUCT_ID:
-        logger.warning("[shop.checkout] DODO_ADHOC_PRODUCT_ID not configured")
-        return JSONResponse({"error": "adhoc_product_not_configured"}, status_code=500)
+        logger.warning("[shop.checkout] DODO_ADHOC_PRODUCT_ID not set; will look for per-currency override (DODO_ADHOC_PRODUCT_ID_<CURRENCY>)")
 
     # Load shop by slug
     try:
@@ -697,6 +740,22 @@ async def create_shop_checkout_link(
 
     currency = next(iter(currency_set))
 
+    # Resolve ad-hoc product id for this currency: prefer DODO_ADHOC_PRODUCT_ID_<CURRENCY>, fallback to generic
+    ADHOC_ID = (os.getenv(f"DODO_ADHOC_PRODUCT_ID_{currency}", "") or "").strip() or DODO_ADHOC_PRODUCT_ID
+    if not ADHOC_ID:
+        logger.warning(f"[shop.checkout] No ad-hoc product configured for currency={currency}")
+        return JSONResponse(
+            {
+                "error": "adhoc_product_not_configured",
+                "missing_env": f"DODO_ADHOC_PRODUCT_ID_{currency} or DODO_ADHOC_PRODUCT_ID",
+                "currency": currency,
+                "how_to_fix": f"Create a single one-time product in Dodo with pay_what_you_want enabled for {currency}, then set DODO_ADHOC_PRODUCT_ID_{currency}. "
+                              f"Alternatively set a generic DODO_ADHOC_PRODUCT_ID if your ad-hoc product currency matches the cart currency.",
+                "health_check": "/api/shop/checkout/health"
+            },
+            status_code=500
+        )
+
     # Prepare payloads for Dodo create-checkout flow (using a single pay-what-you-want product)
     owner_uid = shop.owner_uid
     shop_uid = shop.uid
@@ -726,7 +785,7 @@ async def create_shop_checkout_link(
         "params": qp,
         "product_cart": [
             {
-                "product_id": DODO_ADHOC_PRODUCT_ID,
+                "product_id": ADHOC_ID,
                 "quantity": 1,
                 "amount": int(total_cents),  # lowest denomination
             }
@@ -756,7 +815,7 @@ async def create_shop_checkout_link(
             "query_params": qp,
             "query": qp,
             "params": qp,
-            "items": [{"product_id": DODO_ADHOC_PRODUCT_ID, "quantity": 1, "amount": int(total_cents)}],
+            "items": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
             "return_url": return_url,
             "cancel_url": return_url,
             "payment_link": True,
@@ -768,7 +827,7 @@ async def create_shop_checkout_link(
             "query_params": qp,
             "query": qp,
             "params": qp,
-            "products": [{"product_id": DODO_ADHOC_PRODUCT_ID, "quantity": 1, "amount": int(total_cents)}],
+            "products": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
             "return_url": return_url,
             "cancel_url": return_url,
             "payment_link": True,
