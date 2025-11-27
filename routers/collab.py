@@ -924,7 +924,7 @@ async def generate_collaborator_password(request: Request, db: Session = Depends
     role = str((body or {}).get("role", "gallery_manager")).strip().lower()
     
     # Validate role
-    valid_roles = ["gallery_manager", "retoucher", "editor_retoucher", "vaults_manager", "general_admin"]
+    valid_roles = ["gallery_manager", "retoucher", "editor_retoucher", "vaults_manager", "general_admin", "shop_manager"]
     if role not in valid_roles:
         _friendly_err(f"Invalid role. Must be one of: {', '.join(valid_roles)}")
     
@@ -1123,7 +1123,7 @@ async def update_collaborator_access_role(request: Request, payload: dict = Body
         role = str(payload.get("role") or "").strip().lower()
     except Exception:
         _friendly_err("Invalid payload")
-    valid_roles = ["gallery_manager", "retoucher", "editor_retoucher", "vaults_manager", "general_admin"]
+    valid_roles = ["gallery_manager", "retoucher", "editor_retoucher", "vaults_manager", "general_admin", "shop_manager"]
     if role not in valid_roles:
         _friendly_err("Invalid role", status.HTTP_400_BAD_REQUEST)
     try:
