@@ -216,12 +216,8 @@ app.include_router(auth_ip.router)
 app.include_router(account.router)
 
 # retouch endpoints (AI background)
-from routers import retouch  # noqa: E402
-app.include_router(retouch.router)
 
 # retouch result upload endpoint
-from routers import retouch_upload  # noqa: E402
-app.include_router(retouch_upload.router)
 
 # shared upload endpoint (for marked photos)
 from routers import shared_upload  # noqa: E402
