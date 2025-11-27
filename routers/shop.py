@@ -769,6 +769,11 @@ async def create_shop_checkout_link(
     }
     qp = {"shop_slug": slug, "owner_uid": owner_uid}
 
+    # Business/brand identifiers for provider compatibility
+    business_id = (os.getenv("DODO_BUSINESS_ID") or "").strip()
+    brand_id = (os.getenv("DODO_BRAND_ID") or "").strip()
+    common_top = {**({"business_id": business_id} if business_id else {}), **({"brand_id": brand_id} if brand_id else {})}
+
     # Reference identifiers to help reconcile in webhooks
     ref_fields = {
         "client_reference_id": f"{owner_uid}:{slug}",
@@ -779,6 +784,7 @@ async def create_shop_checkout_link(
     # Build primary payload (unified shape)
     # Note: Do NOT include "payment_link" here; some checkout-session endpoints reject unknown fields.
     base_payload = {
+        **common_top,
         **ref_fields,
         "metadata": meta,
         "query_params": qp,
@@ -814,6 +820,7 @@ async def create_shop_checkout_link(
         base_payload,
         # payments/payment-links style (items) WITHOUT payment_link
         {
+            **common_top,
             **ref_fields,
             "metadata": meta,
             "query_params": qp,
@@ -827,6 +834,7 @@ async def create_shop_checkout_link(
         },
         # payments/payment-links style (items) WITH payment_link
         {
+            **common_top,
             **ref_fields,
             "metadata": meta,
             "query_params": qp,
@@ -841,6 +849,7 @@ async def create_shop_checkout_link(
         },
         # products alias (products) WITHOUT payment_link
         {
+            **common_top,
             **ref_fields,
             "metadata": meta,
             "query_params": qp,
@@ -854,6 +863,7 @@ async def create_shop_checkout_link(
         },
         # products alias (products) WITH payment_link
         {
+            **common_top,
             **ref_fields,
             "metadata": meta,
             "query_params": qp,
