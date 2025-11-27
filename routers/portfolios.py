@@ -175,3 +175,35 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
   except Exception as ex:
     logger.warning(f"public_portfolio failed: {ex}")
     return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.post("/portfolio/items/by_keys")
+async def add_items_by_keys(request: Request, payload: dict):
+  uid = get_uid_from_request(request)
+  if not uid:
+    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  try:
+    keys = payload.get("keys") or []
+    if not isinstance(keys, list) or not keys:
+      return JSONResponse({"error": "keys required"}, status_code=400)
+    items = read_json_key(_items_key(uid)) or {}
+    arr: List[dict] = list(items.get("items") or [])
+    added = 0
+    for k in keys:
+      try:
+        ks = str(k or "").strip()
+        if not ks:
+          continue
+        pid = uuid.uuid4().hex[:12]
+        url = get_presigned_url(ks, expires_in=60 * 60) or f"/static/{ks}"
+        title = os.path.basename(ks)
+        rec = {"id": pid, "key": ks, "imageUrl": url, "title": title, "description": ""}
+        arr.insert(0, rec)
+        added += 1
+      except Exception:
+        continue
+    write_json_key(_items_key(uid), {"items": arr})
+    return {"ok": True, "added": added}
+  except Exception as ex:
+    logger.warning(f"add_items_by_keys failed: {ex}")
+    return JSONResponse({"error": "server error"}, status_code=500)
