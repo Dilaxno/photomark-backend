@@ -182,32 +182,40 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
 
 async def create_checkout_session(payload: dict) -> Tuple[Optional[dict], Optional[dict]]:
     base = (DODO_API_BASE or "https://test.dodopayments.com").rstrip("/")
-    url = f"{base}/v1/checkout-sessions"
     headers_list = build_headers_list()
+    endpoints = [
+        f"{base}/v1/checkout-sessions",
+        f"{base}/checkout-sessions",
+        f"{base}/v1/checkouts",
+        f"{base}/checkouts",
+    ]
     last_error = None
     async with httpx.AsyncClient(timeout=30.0) as client:
-        for headers in headers_list:
-            try:
-                logger.info(f"[dodo] creating checkout session via {url} with headers {list(headers.keys())}")
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code in (200, 201):
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        data = {}
-                    return data, None
+        for url in endpoints:
+            for headers in headers_list:
                 try:
-                    body_text = resp.text
-                except Exception:
-                    body_text = ""
-                last_error = {
-                    "status": resp.status_code,
-                    "endpoint": url,
-                    "payload_keys": list(payload.keys()),
-                    "body": body_text[:2000],
-                }
-            except Exception as ex:
-                last_error = {"exception": str(ex), "endpoint": url, "payload_keys": list(payload.keys())}
+                    logger.info(f"[dodo] creating checkout session via {url} with headers {list(headers.keys())}")
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code in (200, 201):
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            data = {}
+                        return data, None
+                    try:
+                        body_text = resp.text
+                    except Exception:
+                        body_text = ""
+                    last_error = {
+                        "status": resp.status_code,
+                        "endpoint": url,
+                        "payload_keys": list(payload.keys()),
+                        "body": body_text[:2000],
+                    }
+                    if resp.status_code == 404:
+                        continue
+                except Exception as ex:
+                    last_error = {"exception": str(ex), "endpoint": url, "payload_keys": list(payload.keys())}
     if last_error:
         logger.warning(f"[dodo] checkout session creation failed: {last_error}")
     return None, last_error

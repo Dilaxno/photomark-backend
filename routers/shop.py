@@ -813,7 +813,18 @@ async def create_shop_checkout_link(
             base_payload["email"] = cust_email
             base_payload["customer_email"] = cust_email
 
-    session_payload = base_payload
+    # Minimal session payload per provider guidance
+    session_payload = {
+        **common_top,
+        "product_cart": [
+            {
+                "product_id": ADHOC_ID,
+                "quantity": 1,
+                "amount": int(total_cents),
+            }
+        ],
+        "return_url": return_url,
+    }
     session_data, error = await create_checkout_session(session_payload)
     if session_data and isinstance(session_data, dict):
         link = (
