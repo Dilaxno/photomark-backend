@@ -19,6 +19,9 @@ from core.database import get_db, SessionLocal
 from models.user import User
 from models.pricing import PricingEvent, Subscription
 from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
+from models.shop_sales import ShopSale
+from models.shop import ShopSlug
+import uuid
 
 # Firestore dependency removed in Neon migration
 
@@ -583,6 +586,106 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                 meta = meta_found
         except Exception:
             pass
+
+    # --- Shop sale tracking (Public Shop) ---
+    try:
+        shop_slug = ""
+        owner_uid_ctx = ""
+        cart_items_ctx = []
+        currency_ctx = ""
+
+        if isinstance(meta, dict):
+            shop_slug = str((meta.get("shop_slug") or meta.get("slug") or "")).strip()
+            owner_uid_ctx = str((meta.get("owner_uid") or meta.get("uid") or "")).strip()
+            cart_items_ctx = meta.get("cart_items") or []
+            currency_ctx = str((meta.get("currency") or "")).strip().upper()
+
+        if not shop_slug and isinstance(qp, dict):
+            shop_slug = str((qp.get("shop_slug") or qp.get("shop") or "")).strip()
+        if not owner_uid_ctx and isinstance(qp, dict):
+            owner_uid_ctx = str((qp.get("owner_uid") or qp.get("uid") or "")).strip()
+
+        # Only process for payment.succeeded with shop context
+        if evt_type == "payment.succeeded" and (shop_slug or owner_uid_ctx) and (cart_items_ctx or meta.get("cart_total_cents")):
+            # Extract payment_id
+            def _deep_first_str(node: dict, keys: tuple[str, ...]) -> str:
+                return _deep_find_first(node, keys) if isinstance(node, dict) else ""
+            payment_id = str((event_obj.get("payment_id") or "")).strip()
+            if not payment_id:
+                payment_id = _deep_first_str(event_obj, ("payment_id", "paymentId", "id"))
+
+            # Amount in lowest denomination (cents)
+            amount_cents = 0
+            try:
+                raw_amt = (
+                    event_obj.get("amount_total")
+                    or event_obj.get("total_amount")
+                    or event_obj.get("grand_total")
+                    or event_obj.get("amount")
+                    or 0
+                )
+                amount_cents = int(raw_amt) if raw_amt else 0
+            except Exception:
+                amount_cents = 0
+
+            if amount_cents <= 0:
+                try:
+                    amount_cents = int(meta.get("cart_total_cents") or 0)
+                except Exception:
+                    amount_cents = 0
+
+            # Currency
+            currency = (event_obj.get("currency") or currency_ctx or "USD")
+            try:
+                currency = str(currency).upper()
+            except Exception:
+                currency = "USD"
+
+            # Resolve shop_uid via slug mapping if not present
+            shop_uid_ctx = str((meta.get("shop_uid") or "")).strip()
+            if not shop_uid_ctx and shop_slug:
+                try:
+                    slug_row = db.query(ShopSlug).filter(ShopSlug.slug == shop_slug).first()
+                    if slug_row:
+                        shop_uid_ctx = slug_row.uid
+                except Exception:
+                    shop_uid_ctx = ""
+
+            # Idempotency check
+            if payment_id:
+                existing = db.query(ShopSale).filter(ShopSale.payment_id == payment_id).first()
+                if existing:
+                    return {"ok": True, "shop_sale_recorded": False, "reason": "duplicate_payment_id"}
+
+            sale_id = payment_id or uuid.uuid4().hex
+            try:
+                items_payload = cart_items_ctx if isinstance(cart_items_ctx, list) else []
+                sale = ShopSale(
+                    id=sale_id,
+                    payment_id=payment_id or None,
+                    owner_uid=owner_uid_ctx or (shop_uid_ctx or ""),
+                    shop_uid=shop_uid_ctx or None,
+                    slug=shop_slug or None,
+                    currency=currency or "USD",
+                    amount_cents=int(amount_cents or 0),
+                    items=items_payload,
+                    metadata=meta or {},
+                    delivered=False,
+                )
+                db.add(sale)
+                db.commit()
+            except Exception as _ex:
+                try:
+                    if hasattr(db, "rollback"):
+                        db.rollback()
+                except Exception:
+                    pass
+                logger.warning(f"[pricing.webhook] shop sale persist failed: {_ex}")
+                return {"ok": True, "shop_sale_recorded": False, "reason": "db_write_failed"}
+
+            return {"ok": True, "shop_sale_recorded": True, "payment_id": payment_id, "amount_cents": int(amount_cents or 0), "currency": currency}
+    except Exception as _ex:
+        logger.warning(f"[pricing.webhook] shop sale tracking error: {_ex}" )
 
     # --- Step 6: Resolve UID ---
     uid = ""
