@@ -125,9 +125,8 @@ async def custom_domain_routing(request: Request, call_next):
                 if shop:
                     enabled = bool((shop.domain or {}).get('enabled') or False)
                     if enabled:
-                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         slug = (shop.slug or "").strip()
-                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        url = f"/shop/{slug}" if slug else "/shop"
                         return RedirectResponse(url=url, status_code=307)
             finally:
                 try:
@@ -431,12 +430,11 @@ def root(request: Request):
                 if shop:
                     enabled = bool((shop.domain or {}).get('enabled') or False)
                     if enabled:
-                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         sub_id = (user.subscription_id if user and user.subscription_id else "")
                         status = (user.subscription_status if user and user.subscription_status else (user.plan if user and user.plan else "inactive"))
                         slug = (shop.slug or "").strip()
-                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        url = f"/shop/{slug}" if slug else "/shop"
                         return RedirectResponse(url)
             finally:
                 try:
@@ -464,10 +462,9 @@ def domain_redirect_any(request: Request, remaining_path: str):
                 if shop:
                     enabled = bool((shop.domain or {}).get('enabled') or False)
                     if enabled:
-                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         slug = (shop.slug or "").strip()
-                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        url = f"/shop/{slug}" if slug else "/shop"
                         return RedirectResponse(url)
             finally:
                 try:
