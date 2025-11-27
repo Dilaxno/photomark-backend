@@ -110,11 +110,11 @@ def _get_request_host(request: Request) -> str:
 def _should_redirect_shop(shop) -> bool:
     try:
         dom = shop.domain or {}
-        enabled = bool(dom.get('enabled') or False)
-        dns_verified = bool(dom.get('dnsVerified') or False)
-        return enabled or dns_verified
+        hostname = (dom.get('hostname') or '').strip()
+        slug = (getattr(shop, 'slug', '') or '').strip()
+        return bool(hostname or slug)
     except Exception:
-        return False
+        return True
 
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
