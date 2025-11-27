@@ -102,6 +102,20 @@ try:
 except Exception:
     pass
 
+def _get_request_host(request: Request) -> str:
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+    host = (host.split(":")[0] or "").strip().lower().strip(".")
+    return host
+
+def _should_redirect_shop(shop) -> bool:
+    try:
+        dom = shop.domain or {}
+        enabled = bool(dom.get('enabled') or False)
+        dns_verified = bool(dom.get('dnsVerified') or False)
+        return enabled or dns_verified
+    except Exception:
+        return False
+
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
     try:
@@ -112,8 +126,7 @@ async def custom_domain_routing(request: Request, call_next):
         if path.startswith("/.well-known/acme-challenge/") or path.startswith("/shop/"):
             return await call_next(request)
 
-        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
-        host = (host.split(":")[0] or "").strip().lower().strip(".")
+        host = _get_request_host(request)
         if host:
             from core.database import get_db
             from sqlalchemy.orm import Session
@@ -123,8 +136,7 @@ async def custom_domain_routing(request: Request, call_next):
                 from sqlalchemy import cast, String
                 shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
                 if shop:
-                    enabled = bool((shop.domain or {}).get('enabled') or False)
-                    if enabled:
+                    if _should_redirect_shop(shop):
                         slug = (shop.slug or "").strip()
                         url = f"/shop/{slug}" if slug else "/shop"
                         return RedirectResponse(url=url, status_code=307)
@@ -417,7 +429,7 @@ async def _init_postgres_schema():
 @app.get("/")
 def root(request: Request):
     try:
-        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
+        host = _get_request_host(request)
         if host:
             from core.database import get_db
             from sqlalchemy.orm import Session
@@ -428,8 +440,7 @@ def root(request: Request):
                 from sqlalchemy import cast, String
                 shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
                 if shop:
-                    enabled = bool((shop.domain or {}).get('enabled') or False)
-                    if enabled:
+                    if _should_redirect_shop(shop):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         sub_id = (user.subscription_id if user and user.subscription_id else "")
                         status = (user.subscription_status if user and user.subscription_status else (user.plan if user and user.plan else "inactive"))
@@ -449,7 +460,7 @@ def root(request: Request):
 @app.get("/{remaining_path:path}")
 def domain_redirect_any(request: Request, remaining_path: str):
     try:
-        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
+        host = _get_request_host(request)
         if host:
             from core.database import get_db
             from sqlalchemy.orm import Session
@@ -460,8 +471,7 @@ def domain_redirect_any(request: Request, remaining_path: str):
                 from sqlalchemy import cast, String
                 shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
                 if shop:
-                    enabled = bool((shop.domain or {}).get('enabled') or False)
-                    if enabled:
+                    if _should_redirect_shop(shop):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         slug = (shop.slug or "").strip()
                         url = f"/shop/{slug}" if slug else "/shop"
