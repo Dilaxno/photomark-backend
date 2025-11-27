@@ -1,4 +1,4 @@
-from typing import List, Optional, Literal
+from typing import List, Optional
 import os
 import io
 import zipfile
@@ -35,6 +35,18 @@ try:
 except Exception:
     pyvips = None  # type: ignore
     PYVIPS_AVAILABLE = False
+
+# Optional: imageio for extended format support (e.g., webp)
+try:
+    import imageio.v3 as iio  # type: ignore
+    IMAGEIO_AVAILABLE = True
+except Exception:
+    try:
+        import imageio as iio  # type: ignore
+        IMAGEIO_AVAILABLE = True
+    except Exception:
+        iio = None  # type: ignore
+        IMAGEIO_AVAILABLE = False
 
 router = APIRouter(prefix="/api", tags=["convert"])
 
@@ -75,7 +87,33 @@ def _consume_one_free(uid: str, tool: str) -> bool:
         pass
     return True
 
-SupportedTarget = Literal['psd', 'tiff', 'png', 'jpeg', 'jpg', 'gif', 'svg', 'eps', 'pdf']
+def _supported_targets() -> List[str]:
+    targets: set[str] = set()
+    # Start with common safe formats
+    targets.update(['png', 'jpeg', 'jpg', 'tiff', 'gif'])
+    # Vector/container formats via Wand
+    if WAND_AVAILABLE:
+        targets.update(['svg', 'eps', 'pdf', 'psd'])
+        try:
+            fmts = getattr(WandImage, 'supported_formats', None)
+            if isinstance(fmts, set):
+                # Include a few widely useful outputs if present
+                for k in ['PNG', 'JPEG', 'TIFF', 'GIF', 'WEBP', 'PDF', 'SVG', 'EPS', 'PSD']:
+                    if k in fmts:
+                        targets.add(k.lower())
+        except Exception:
+            pass
+    # ImageIO adds webp reliably
+    if IMAGEIO_AVAILABLE:
+        try:
+            # Heuristic: if imageio can save webp, include it
+            targets.add('webp')
+        except Exception:
+            pass
+    # Normalize aliases
+    if 'jpg' in targets:
+        targets.add('jpeg')
+    return sorted({('jpeg' if t == 'jpg' else t) for t in targets})
 
 # =============================
 # Aspect ratio (letterbox) util
@@ -196,7 +234,7 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
     try:
         out_blob = None
         out_ext = target
-        if WAND_AVAILABLE:
+        if WAND_AVAILABLE and target.lower().strip() in ('psd', 'svg', 'eps', 'pdf'):
             # Wand path
             with WandImage(blob=raw) as img:
                 if len(img.sequence) > 1:
@@ -236,7 +274,7 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
             fmt = target.lower().strip()
             if fmt == 'jpg':
                 fmt = 'jpeg'
-            if fmt in ('jpeg', 'png', 'tiff', 'gif', 'pdf', 'eps', 'svg'):
+            if fmt in ('jpeg', 'png', 'tiff', 'gif', 'pdf', 'eps', 'svg', 'webp'):
                 buf = io.BytesIO()
                 if fmt == 'jpeg':
                     im = im.convert('RGB')
@@ -267,6 +305,23 @@ def convert_one(raw: bytes, filename: str, target: str, artist: Optional[str]) -
                     b64 = _b64.b64encode(tmp.getvalue()).decode('ascii')
                     svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><image href="data:image/png;base64,{b64}" width="{w}" height="{h}"/></svg>'
                     buf.write(svg.encode('utf-8'))
+                elif fmt == 'webp':
+                    try:
+                        im.save(buf, format='WEBP', quality=95, method=6)
+                    except Exception:
+                        # imageio fallback
+                        try:
+                            if IMAGEIO_AVAILABLE:
+                                arr = iio.imread(io.BytesIO(raw))
+                                iio.imwrite(buf, arr, format='WEBP', quality=95)
+                            else:
+                                raise RuntimeError('imageio not available')
+                        except Exception:
+                            # fallback to PNG
+                            if im.mode not in ('RGBA', 'RGB'):
+                                im = im.convert('RGBA')
+                            im.save(buf, format='PNG', optimize=True)
+                            fmt = 'png'
                 out_blob = buf.getvalue()
                 out_ext = fmt
             else:
@@ -319,7 +374,7 @@ async def convert_bulk(
     request: Request,
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
-    target: SupportedTarget = Form(...),
+    target: str = Form(...),
     artist: Optional[str] = Form(None),
     email_result: Optional[bool] = Form(False),
 ):
@@ -344,6 +399,10 @@ async def convert_bulk(
     t = target.lower().strip()
     if t == 'jpg':
         t = 'jpeg'
+
+    allowed = set(_supported_targets())
+    if t not in allowed:
+        return JSONResponse({"error": "unsupported_format", "message": f"Target '{t}' not supported"}, status_code=400)
 
     if not files:
         return JSONResponse({"error": "no files"}, status_code=400)
@@ -432,6 +491,16 @@ async def convert_bulk(
         "Access-Control-Expose-Headers": "Content-Disposition",
     }
     return StreamingResponse(mem_zip, media_type="application/zip", headers=headers)
+
+
+@router.get('/convert/formats')
+async def convert_formats(request: Request):
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'convert'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    return {"targets": _supported_targets()}
 
 
 @router.post('/convert/aspect-batch')
