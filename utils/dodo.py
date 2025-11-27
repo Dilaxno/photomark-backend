@@ -1,4 +1,5 @@
 import os
+import asyncio
 import httpx
 from typing import Dict, Any, Optional, Tuple
 from core.config import logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_API_KEY
@@ -7,8 +8,18 @@ from core.config import logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_API_KEY
 def build_headers_list() -> list[dict]:
     api_key = (DODO_API_KEY or "").strip()
     headers_list = [
-        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"},
-        {"X-API-KEY": api_key, "Content-Type": "application/json", "Accept": "application/json"},
+        {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "PhotomarkBackend/1.0",
+        },
+        {
+            "X-API-KEY": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "PhotomarkBackend/1.0",
+        },
     ]
     # Optional environment/business/brand
     business_id = (os.getenv("DODO_BUSINESS_ID") or "").strip()
@@ -35,29 +46,25 @@ def build_headers_list() -> list[dict]:
 def build_endpoints() -> list[str]:
     # Default to Dodo test base if env not set; override via DODO_API_BASE
     # Valid bases: https://test.dodopayments.com (sandbox), https://live.dodopayments.com (production)
-    base = (DODO_API_BASE or "https://test.dodopayments.com").rstrip("/")
+    # Normalize base URL. Never use placeholder/example or api.dodopayments.com
+    base_in = (DODO_API_BASE or "").strip()
+    low = base_in.lower()
+    if (not base_in) or ("example" in low) or ("api.dodo-payments" in low) or ("api.dodopayments.com" in low):
+        base = "https://test.dodopayments.com"
+    else:
+        base = base_in
+    base = base.rstrip("/")
+
     path = (DODO_CHECKOUT_PATH or "/v1/payment-links").strip()
     if not path.startswith("/"):
         path = "/" + path
-    # Prefer session endpoints first to support redirect-based flows
+    logger.info(f"[dodo] using api base: {base}")
+    # Use stable, documented endpoints only; avoid legacy paths that can trip Cloudflare (e.g. /payment-links/create)
     return [
-        # New official checkout sessions endpoint
         f"{base}/v1/checkout-sessions",
-        # Common variants that some environments expose
-        f"{base}/v1/checkout/sessions",
-        f"{base}/v1/checkout/session",
-        f"{base}/checkout/session",
-        f"{base}/checkouts/session",
-        # Payments (for creating payment links when needed)
         f"{base}/v1/payments",
-        # Payment link endpoints next (overlay/link fallback)
-        f"{base}{path}",
         f"{base}/v1/payment-links",
-        f"{base}/payment-links",
-        f"{base}/api/payment-links",
-        f"{base}/v1/payment_links",
-        f"{base}/v1/payment-links/create",
-        f"{base}/payment-links/create",
+        f"{base}{path}",  # typically /v1/payment-links if configured
     ]
 
 
@@ -102,8 +109,7 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
         new_p.setdefault("success_url", redirect_url)
         new_p.setdefault("return_url", redirect_url)
         new_p.setdefault("redirect_url", redirect_url)
-        # If hitting the payments API, request a payment link instead of immediate charge
-        new_p.setdefault("payment_link", True)
+        # Do not force payment_link; keep payload minimal to satisfy checkout-sessions schema
         updated_payloads.append(new_p)
 
     last_error = None
@@ -123,11 +129,32 @@ async def create_checkout_link(payloads: list[dict]) -> Tuple[Optional[str], Opt
                             if link:
                                 logger.info("[dodo] created payment link successfully")
                                 return link, None
+                        # Handle rate limiting / Cloudflare
+                        if resp.status_code == 429:
+                            try:
+                                body_text = resp.text
+                            except Exception:
+                                body_text = ""
+                            last_error = {
+                                "status": resp.status_code,
+                                "endpoint": url,
+                                "payload_keys": list(payload.keys()),
+                                "body": body_text[:2000],
+                            }
+                            logger.warning(f"[dodo] rate limited at {url}; backing off briefly")
+                            await asyncio.sleep(0.8)
+                            continue
+                        # Other non-success
                         try:
                             body_text = resp.text
                         except Exception:
                             body_text = ""
-                        last_error = {"status": resp.status_code, "endpoint": url, "payload_keys": list(payload.keys()), "body": body_text[:2000]}
+                        last_error = {
+                            "status": resp.status_code,
+                            "endpoint": url,
+                            "payload_keys": list(payload.keys()),
+                            "body": body_text[:2000],
+                        }
                     except Exception as ex:
                         last_error = {"exception": str(ex), "endpoint": url, "payload_keys": list(payload.keys())}
     if last_error:

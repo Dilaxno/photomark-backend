@@ -777,6 +777,7 @@ async def create_shop_checkout_link(
     }
 
     # Build primary payload (unified shape)
+    # Note: Do NOT include "payment_link" here; some checkout-session endpoints reject unknown fields.
     base_payload = {
         **ref_fields,
         "metadata": meta,
@@ -790,9 +791,9 @@ async def create_shop_checkout_link(
                 "amount": int(total_cents),  # lowest denomination
             }
         ],
+        "billing_currency": currency,
         "return_url": return_url,
         "cancel_url": return_url,
-        "payment_link": True,
         "allowed_payment_method_types": ["credit", "debit", "apple_pay", "google_pay"],
         "show_saved_payment_methods": True,
     }
@@ -806,9 +807,12 @@ async def create_shop_checkout_link(
             base_payload["email"] = cust_email
             base_payload["customer_email"] = cust_email
 
-    # Alternative shapes to maximize compatibility across environments
+    # Alternative shapes to maximize compatibility across environments and endpoints
+    # We send both variants (with and without payment_link) and with explicit billing_currency
     alt_payloads = [
+        # sessions-style (product_cart)
         base_payload,
+        # payments/payment-links style (items) WITHOUT payment_link
         {
             **ref_fields,
             "metadata": meta,
@@ -816,11 +820,26 @@ async def create_shop_checkout_link(
             "query": qp,
             "params": qp,
             "items": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
+            "billing_currency": currency,
+            "return_url": return_url,
+            "cancel_url": return_url,
+            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
+        },
+        # payments/payment-links style (items) WITH payment_link
+        {
+            **ref_fields,
+            "metadata": meta,
+            "query_params": qp,
+            "query": qp,
+            "params": qp,
+            "items": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
+            "billing_currency": currency,
             "return_url": return_url,
             "cancel_url": return_url,
             "payment_link": True,
             **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
         },
+        # products alias (products) WITHOUT payment_link
         {
             **ref_fields,
             "metadata": meta,
@@ -828,6 +847,20 @@ async def create_shop_checkout_link(
             "query": qp,
             "params": qp,
             "products": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
+            "billing_currency": currency,
+            "return_url": return_url,
+            "cancel_url": return_url,
+            **({"customer": {"email": cust_email, "name": cust_name}, "email": cust_email, "customer_email": cust_email} if (cust_email or cust_name) else {}),
+        },
+        # products alias (products) WITH payment_link
+        {
+            **ref_fields,
+            "metadata": meta,
+            "query_params": qp,
+            "query": qp,
+            "params": qp,
+            "products": [{"product_id": ADHOC_ID, "quantity": 1, "amount": int(total_cents)}],
+            "billing_currency": currency,
             "return_url": return_url,
             "cancel_url": return_url,
             "payment_link": True,
