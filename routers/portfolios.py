@@ -37,7 +37,26 @@ async def get_portfolio(request: Request):
   if not uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
   items = read_json_key(_items_key(uid)) or {}
-  return {"items": items.get("items", [])}
+  arr: List[dict] = list(items.get("items") or [])
+  out: List[dict] = []
+  for it in arr:
+    k = str(it.get("key") or "").strip()
+    url = str(it.get("imageUrl") or "").strip()
+    if k:
+      try:
+        fresher = get_presigned_url(k, expires_in=60 * 60)
+        if fresher:
+          url = fresher
+      except Exception:
+        pass
+    out.append({
+      "id": it.get("id"),
+      "imageUrl": url,
+      "title": it.get("title") or "",
+      "description": it.get("description") or "",
+      "key": k if k else None,
+    })
+  return {"items": out}
 
 
 @router.post("/portfolio/item")
@@ -56,7 +75,7 @@ async def create_item(request: Request, file: UploadFile = File(...), title: str
     url = upload_bytes(key, raw, content_type={
       '.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp','.heic':'image/heic','.tif':'image/tiff','.tiff':'image/tiff'
     }.get(ext, 'application/octet-stream'))
-    rec = {"id": pid, "imageUrl": url, "title": title or '', "description": description or ''}
+    rec = {"id": pid, "key": key, "imageUrl": url, "title": title or '', "description": description or ''}
     doc = read_json_key(_items_key(uid)) or {}
     arr: List[dict] = list(doc.get('items') or [])
     arr.insert(0, rec)
@@ -134,8 +153,25 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
     if not target_uid:
       return JSONResponse({"error": "not found"}, status_code=404)
     doc = read_json_key(_items_key(target_uid)) or {}
-    return {"items": doc.get('items') or []}
+    arr: List[dict] = list(doc.get('items') or [])
+    out: List[dict] = []
+    for it in arr:
+      k = str(it.get("key") or "").strip()
+      url = str(it.get("imageUrl") or "").strip()
+      if k:
+        try:
+          fresher = get_presigned_url(k, expires_in=60 * 60)
+          if fresher:
+            url = fresher
+        except Exception:
+          pass
+      out.append({
+        "id": it.get("id"),
+        "imageUrl": url,
+        "title": it.get("title") or "",
+        "description": it.get("description") or "",
+      })
+    return {"items": out}
   except Exception as ex:
     logger.warning(f"public_portfolio failed: {ex}")
     return JSONResponse({"error": "server error"}, status_code=500)
-
