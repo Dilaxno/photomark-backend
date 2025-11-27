@@ -44,7 +44,7 @@ CREATE INDEX IF NOT EXISTS ix_users_referred_by ON public.users (referred_by);
 -- COLLABORATOR ACCESS
 CREATE TABLE IF NOT EXISTS public.collaborator_access (
   id SERIAL PRIMARY KEY,
-  email TEXT NOT NULL,
+  email TEXT,
   password_hash TEXT NOT NULL,
   owner_uid TEXT NOT NULL REFERENCES public.users(uid) ON DELETE CASCADE,
   role TEXT DEFAULT 'viewer',

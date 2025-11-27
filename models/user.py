@@ -93,7 +93,7 @@ class CollaboratorAccess(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     
     # Token and user info
-    email = Column(String(255), index=True, nullable=False)
+    email = Column(String(255), index=True, nullable=True)
     password_hash = Column(String(255), nullable=False)
     password_plain = Column(String(255), nullable=True)
     
