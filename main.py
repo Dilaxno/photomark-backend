@@ -474,3 +474,62 @@ def domain_redirect_any(request: Request, remaining_path: str):
     except Exception:
         pass
     return {"ok": True}
+
+@app.get("/allow-domain")
+async def allow_domain_text(request: Request):
+    from fastapi.responses import PlainTextResponse
+    domain = request.query_params.get("domain")
+    if not domain:
+        return PlainTextResponse("no", status_code=403)
+    domain = domain.strip().lower().rstrip(".")
+    try:
+        from core.database import get_db
+        from sqlalchemy.orm import Session
+        from models.shop import Shop
+        db: Session = next(get_db())
+        try:
+            from sqlalchemy import cast, String
+            shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
+            if shop:
+                return PlainTextResponse("yes", status_code=200)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return PlainTextResponse("no", status_code=403)
+
+@app.get("/resolve-domain/{hostname}")
+async def resolve_domain_simple(hostname: str):
+    from fastapi import HTTPException
+    inbound = (hostname or "").strip().lower().rstrip(".")
+    if not inbound:
+        raise HTTPException(status_code=400, detail="Invalid hostname")
+    try:
+        from core.database import get_db
+        from sqlalchemy.orm import Session
+        from models.shop import Shop
+        db: Session = next(get_db())
+        try:
+            from sqlalchemy import cast, String
+            shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == inbound).first()
+            if not shop:
+                raise HTTPException(status_code=404, detail="No shop bound to this domain")
+            enabled = bool((shop.domain or {}).get('enabled') or False)
+            return {
+                "slug": (shop.slug or "").strip(),
+                "uid": shop.uid,
+                "domain": (shop.domain or {}),
+                "enabled": enabled,
+            }
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except HTTPException:
+        raise
+    except Exception as _ex:
+        raise HTTPException(status_code=500, detail=f"Failed to resolve domain: {_ex}")
