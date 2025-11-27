@@ -207,6 +207,33 @@ async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get shop: {str(e)}")
 
+def _normalize_domain(dom: str | None) -> str | None:
+    if not dom:
+        return None
+    return dom.strip().lower().rstrip('.')
+
+@router.get('/resolve-domain/{hostname}')
+async def resolve_domain(hostname: str, db: Session = Depends(get_db)):
+    inbound = _normalize_domain(hostname)
+    if not inbound:
+        raise HTTPException(status_code=400, detail="Invalid hostname")
+    try:
+        from sqlalchemy import cast, String
+        shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == inbound).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="No shop bound to this domain")
+        enabled = bool((shop.domain or {}).get('enabled') or False)
+        return {
+            "slug": (shop.slug or "").strip(),
+            "uid": shop.uid,
+            "domain": (shop.domain or {}),
+            "enabled": enabled,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to resolve domain: {str(e)}")
+
 @router.get('/subscription/{sub_id}')
 async def get_shop_by_subscription(sub_id: str, db: Session = Depends(get_db)):
     try:

@@ -94,6 +94,50 @@ async def add_security_headers(request, call_next):
         pass
     return response
 
+try:
+    _cwd = os.getcwd()
+    ACME_CHALLENGE_DIR = os.path.join(_cwd, "data", "acme", ".well-known", "acme-challenge")
+    os.makedirs(ACME_CHALLENGE_DIR, exist_ok=True)
+    app.mount("/.well-known/acme-challenge", StaticFiles(directory=ACME_CHALLENGE_DIR), name="acme-challenge")
+except Exception:
+    pass
+
+@app.middleware("http")
+async def custom_domain_routing(request: Request, call_next):
+    try:
+        try:
+            path = request.url.path or ""
+        except Exception:
+            path = ""
+        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/shop/"):
+            return await call_next(request)
+
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+        host = (host.split(":")[0] or "").strip().lower().strip(".")
+        if host:
+            from core.database import get_db
+            from sqlalchemy.orm import Session
+            from models.shop import Shop
+            db: Session = next(get_db())
+            try:
+                from sqlalchemy import cast, String
+                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
+                if shop:
+                    enabled = bool((shop.domain or {}).get('enabled') or False)
+                    if enabled:
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        slug = (shop.slug or "").strip()
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        return RedirectResponse(url=url, status_code=307)
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return await call_next(request)
+
 # ---- Static mount (local fallback) ----
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
