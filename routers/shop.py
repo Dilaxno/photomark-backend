@@ -107,7 +107,7 @@ async def upload_shop_asset(
         base64_data = base64.b64encode(contents).decode('utf-8')
         data_url = f"data:{file.content_type};base64,{base64_data}"
 
-        print(f"[SHOP UPLOAD] Success - Generated: {filename} (r2: {bool(r2_url)}, static: {bool(static_url)})")
+        print(f"[SHOP UPLOAD] Success - Generated: {filename} -> {object_key}")
 
         return JSONResponse({
             'success': True,
@@ -802,3 +802,6 @@ async def create_shop_checkout_link(
 
     logger.warning(f"[shop.checkout] failed to create link: {details}")
     return JSONResponse({"error": "link_creation_failed", "details": details}, status_code=502)
+@router.get('/upload')
+async def upload_info():
+    return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
