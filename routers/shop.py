@@ -131,12 +131,46 @@ async def upload_shop_asset(
 
 @router.get('/uid/{uid}')
 async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
-    """Get shop data by owner UID"""
     try:
-        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        key = (uid or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="Invalid uid")
+        shop = db.query(Shop).filter(Shop.uid == key).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == key).first()
+        if not shop:
+            m = db.query(ShopSlug).filter(ShopSlug.slug == key).first()
+            if m:
+                shop = db.query(Shop).filter(Shop.uid == m.uid).first()
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
-        return shop.to_dict()
+        data = shop.to_dict()
+        try:
+            s = data.get("settings") or {}
+            t = s.get("theme") or {}
+            for k in ("logoUrl", "bannerUrl", "customFontUrl"):
+                v = t.get(k)
+                if isinstance(v, str):
+                    t[k] = v.strip().strip('`')
+            s["theme"] = t
+            data["settings"] = s
+            prods = data.get("products") or []
+            fixed = []
+            for p in prods:
+                if isinstance(p, dict):
+                    imgs = p.get("images") or []
+                    if isinstance(imgs, list):
+                        imgs = [((i.strip().strip('`')) if isinstance(i, str) else i) for i in imgs]
+                        p["images"] = imgs
+                    for k in ("videoUrl", "digitalFile"):
+                        v = p.get(k)
+                        if isinstance(v, str):
+                            p[k] = v.strip().strip('`')
+                    fixed.append(p)
+            data["products"] = fixed
+        except Exception:
+            pass
+        return data
     except HTTPException:
         raise
     except Exception as e:
