@@ -7,6 +7,7 @@ from core.database import get_db
 from models.shop import Shop, ShopSlug
 from models.shop_sales import ShopSale
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 import os
 import uuid
 import base64
@@ -984,7 +985,7 @@ async def get_shop_sales(
     if owner_uid and owner_uid != eff_uid:
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
-        q = db.query(ShopSale).filter(ShopSale.owner_uid == target_uid)
+        q = db.query(ShopSale).filter(or_(ShopSale.owner_uid == target_uid, ShopSale.shop_uid == target_uid))
         if slug:
             q = q.filter(ShopSale.slug == slug)
         rows = (
@@ -1034,7 +1035,7 @@ async def get_shop_sales_by_owner(
     if owner_uid != eff_uid:
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
-        q = db.query(ShopSale).filter(ShopSale.owner_uid == owner_uid)
+        q = db.query(ShopSale).filter(or_(ShopSale.owner_uid == owner_uid, ShopSale.shop_uid == owner_uid))
         if slug:
             q = q.filter(ShopSale.slug == slug)
         rows = (
