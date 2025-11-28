@@ -1311,3 +1311,142 @@ async def sales_owner_options(owner_uid: str):
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
+
+# ===== Discounts (Dodo Payments) endpoints =====
+from core.config import DODO_API_BASE
+from utils.dodo import build_headers_list
+import asyncio
+
+def _dodo_base_url() -> str:
+    base_in = (DODO_API_BASE or "").strip()
+    low = base_in.lower()
+    # Follow Sentra/Dodo guidance: prefer test/live bases; never use api.dodopayments.com
+    if (not base_in) or ("example" in low) or ("api.dodopayments.com" in low) or ("api.dodo-payments" in low):
+        return "https://test.dodopayments.com"
+    return base_in.rstrip("/")
+
+def _pick_headers() -> dict:
+    # Use Authorization Bearer variant first; fall back variants exist in list
+    variants = build_headers_list()
+    return variants[0] if variants else {}
+
+@router.get("/discounts")
+async def list_discounts(
+    request: Request,
+    page_number: int = 0,
+    page_size: int = 10,
+):
+    """
+    List discounts from Dodo Payments for the authenticated owner.
+
+    Security:
+    - Owner must be authenticated; API key is kept server-side.
+    """
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # basic pagination clamping
+    page_number = max(0, int(page_number))
+    page_size = max(1, min(100, int(page_size)))
+    base = _dodo_base_url()
+    url = f"{base}/discounts?page_number={page_number}&page_size={page_size}"
+    headers = _pick_headers()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code < 300:
+                return resp.json()
+            detail = (resp.text or "")[:2000]
+            raise HTTPException(status_code=resp.status_code, detail=f"Dodo list discounts failed: {detail}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Dodo list discounts error: {e}")
+
+class CreateDiscountPayload(BaseModel):
+    # percentage only (basis points), e.g. 540 = 5.40%
+    amount_bp: int
+    code: Optional[str] = None
+    name: Optional[str] = None
+    expires_at: Optional[str] = None  # ISO datetime string
+    usage_limit: Optional[int] = None
+    restricted_to: Optional[List[str]] = None  # product_ids scope
+
+@router.post("/discounts")
+async def create_discount(
+    request: Request,
+    payload: CreateDiscountPayload,
+):
+    """
+    Create a percentage discount in Dodo Payments.
+
+    Notes:
+    - amount_bp is sent as 'amount' in basis points to Dodo with type='percentage'
+    - If code omitted, Dodo generates a 16-char uppercase code
+    """
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    base = _dodo_base_url()
+    url = f"{base}/discounts"
+    headers = _pick_headers()
+
+    # Build Dodo payload
+    body: dict = {
+        "amount": int(payload.amount_bp),
+        "type": "percentage",
+    }
+    if payload.code:
+        body["code"] = str(payload.code).strip()
+    if payload.name:
+        body["name"] = str(payload.name).strip()
+    if payload.expires_at:
+        body["expires_at"] = str(payload.expires_at).strip()
+    if isinstance(payload.usage_limit, int) and payload.usage_limit > 0:
+        body["usage_limit"] = payload.usage_limit
+    if isinstance(payload.restricted_to, list):
+        body["restricted_to"] = [str(x) for x in payload.restricted_to if isinstance(x, str)]
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, headers=headers, json=body)
+            if resp.status_code < 300:
+                return resp.json()
+            detail = (resp.text or "")[:2000]
+            raise HTTPException(status_code=resp.status_code, detail=f"Dodo create discount failed: {detail}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Dodo create discount error: {e}")
+
+@router.delete("/discounts/{discount_id}")
+async def delete_discount(
+    request: Request,
+    discount_id: str,
+):
+    """
+    Delete a discount in Dodo Payments by id.
+    """
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    did = (discount_id or "").strip()
+    if not did:
+        raise HTTPException(status_code=400, detail="Invalid discount_id")
+
+    base = _dodo_base_url()
+    url = f"{base}/discounts/{did}"
+    headers = _pick_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.delete(url, headers=headers)
+            if resp.status_code < 300:
+                return {"ok": True}
+            detail = (resp.text or "")[:2000]
+            raise HTTPException(status_code=resp.status_code, detail=f"Dodo delete discount failed: {detail}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Dodo delete discount error: {e}")
