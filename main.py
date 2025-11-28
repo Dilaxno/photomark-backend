@@ -200,6 +200,12 @@ app.include_router(embed.router)
 from routers import upload, device  # noqa: E402
 app.include_router(upload.router)
 app.include_router(device.router)
+# backups router (Backblaze B2)
+try:
+    from routers import backup  # noqa: E402
+    app.include_router(backup.router)
+except Exception as _ex:
+    logger.warning(f"backup router not available: {_ex}")
 # admin endpoints
 app.include_router(admin.router)
 # Removed: bookings, portfolio, and create_lut endpoints
