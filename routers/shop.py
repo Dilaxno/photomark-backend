@@ -170,7 +170,7 @@ async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
             data["products"] = fixed
         except Exception:
             pass
-        return data
+        return JSONResponse(data)
     except HTTPException:
         raise
     except Exception as e:
