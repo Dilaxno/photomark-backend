@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Depends, Body
 from fastapi.responses import JSONResponse
-from core.auth import get_uid_from_request
+from core.auth import get_uid_from_request, resolve_workspace_uid
 from core.database import get_db
 from models.shop import Shop, ShopSlug
 from models.shop_sales import ShopSale
@@ -216,7 +216,7 @@ async def save_shop_settings(
     db: Session = Depends(get_db)
 ):
     """Save shop settings (name, slug, description, theme)"""
-    uid = get_uid_from_request(request)
+    uid, _ = resolve_workspace_uid(request)
     if not uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
     
