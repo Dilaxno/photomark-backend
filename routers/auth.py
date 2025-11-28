@@ -124,6 +124,21 @@ async def auth_signup_check(request: Request, payload: dict = Body(None)):
         # Fail open - allow signup if rate limiter fails
         return {"allowed": True}
 
+@router.post("/auth/signin/check")
+async def auth_signin_check(request: Request, payload: dict = Body(...)):
+    ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    recaptcha_token = (payload or {}).get("recaptchaToken", "").strip()
+    if not recaptcha_token:
+        return JSONResponse({"error": "Missing reCAPTCHA token"}, status_code=400)
+    is_valid_captcha = await verify_recaptcha(recaptcha_token, ip)
+    if not is_valid_captcha:
+        logger.warning(f"[auth.signin] reCAPTCHA verification failed for IP {ip}")
+        return JSONResponse({"error": "reCAPTCHA verification failed. Please try again."}, status_code=400)
+    return {"allowed": True}
+
 
 @router.post("/auth/signup/consume")
 async def auth_signup_consume(request: Request):

@@ -1,6 +1,7 @@
 """
 Mark Agent - LLM-powered function-calling agent for app actions
-Uses Google Gemini 2.0 Flash with vision, audio, and function calling support
+Primary model: Groq Llama 3.1 70B Versatile (function calling + vision via image_url)
+Fallback: Google Gemini 2.0 Flash when GROQ_API_KEY is not configured
 """
 
 import os
@@ -11,9 +12,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 import google.generativeai as genai
+import httpx
 from PIL import Image
 
-from core.config import logger, GEMINI_API_KEY
+from core.config import logger, GEMINI_API_KEY, GROQ_API_KEY
 from core.auth import get_uid_from_request, resolve_workspace_uid
 
 # Configure Gemini
@@ -277,6 +279,89 @@ async def _gemini_function_call(messages: List[Dict[str, str]], functions: List[
         logger.error(f"Gemini function call failed: {ex}")
         return {"type": "error", "message": "I couldn't process your request. Please try again."}
 
+# ---- Groq (Llama 3.1 versatile) function-calling ----
+async def _groq_function_call(messages: List[Dict[str, str]], functions: List[Dict], image_base64: Optional[str] = None) -> Dict[str, Any]:
+    if not GROQ_API_KEY:
+        return {"type": "error", "message": "Agent is not configured. Please set GROQ_API_KEY."}
+
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+
+        groq_tools = []
+        for func in functions:
+            groq_tools.append({
+                "type": "function",
+                "function": func["function"]
+            })
+
+        chat_messages: List[Dict[str, Any]] = []
+        chat_messages.append({"role": "system", "content": AGENT_SYSTEM_PROMPT})
+
+        # Add prior messages (all except the last)
+        if messages:
+            for m in messages[:-1]:
+                chat_messages.append({"role": m["role"], "content": m["content"]})
+
+        # Final message with optional image
+        if messages:
+            last = messages[-1]
+            if image_base64:
+                data_url = image_base64 if image_base64.startswith("data:") else f"data:image/png;base64,{image_base64}"
+                chat_messages.append({
+                    "role": last["role"],
+                    "content": [
+                        {"type": "text", "text": last["content"]},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ]
+                })
+            else:
+                chat_messages.append({"role": last["role"], "content": last["content"]})
+
+        payload = {
+            "model": "llama-3.1-70b-versatile",
+            "messages": chat_messages,
+            "tools": groq_tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(url, headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }, json=payload)
+            r.raise_for_status()
+            data = r.json()
+
+        choice = (data.get("choices") or [{}])[0]
+        msg = (choice.get("message") or {})
+
+        tool_calls = msg.get("tool_calls") or []
+        if tool_calls:
+            tc = tool_calls[0] or {}
+            fn = (tc.get("function") or {})
+            name = fn.get("name") or ""
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw)
+            except Exception:
+                args = {}
+            return {"type": "function_call", "function_name": name, "arguments": args}
+
+        content = msg.get("content") or "I'm not sure how to help with that."
+        return {"type": "message", "content": content}
+
+    except httpx.HTTPStatusError as ex:
+        try:
+            detail = ex.response.json()
+        except Exception:
+            detail = ex.response.text
+        logger.error(f"Groq upstream error: {ex.response.status_code} {detail}")
+        return {"type": "error", "message": "Agent request failed."}
+    except Exception as ex:
+        logger.error(f"Groq function call failed: {ex}")
+        return {"type": "error", "message": "I couldn't process your request. Please try again."}
+
 
 def _validate_function_call(function_name: str, arguments: Dict[str, Any]) -> Optional[str]:
     """Validate that function call is safe and correct. Returns error message if invalid."""
@@ -346,7 +431,10 @@ async def agent_chat(request: Request, body: Dict[str, Any] = Body(...)):
         return JSONResponse({"error": "no valid messages"}, status_code=400)
     
     # Call LLM with function calling and optional image
-    result = await _gemini_function_call(safe_msgs, AGENT_FUNCTIONS, image_base64=image_data)
+    if GROQ_API_KEY:
+        result = await _groq_function_call(safe_msgs, AGENT_FUNCTIONS, image_base64=image_data)
+    else:
+        result = await _gemini_function_call(safe_msgs, AGENT_FUNCTIONS, image_base64=image_data)
     
     if result["type"] == "error":
         return {"type": "error", "message": result["message"]}
