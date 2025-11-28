@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from core.auth import get_uid_from_request
 from core.database import get_db
 from models.shop import Shop, ShopSlug
+from models.shop_sales import ShopSale
 from sqlalchemy.orm import Session
 import os
 import uuid
@@ -863,6 +864,49 @@ async def create_shop_checkout_link(
 
     logger.warning(f"[shop.checkout] failed to create checkout session: {error}")
     return JSONResponse({"error": "session_creation_failed", "details": error}, status_code=502)
+
+@router.get('/sales')
+async def get_shop_sales(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    slug: str = "",
+    db: Session = Depends(get_db)
+):
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        q = db.query(ShopSale).filter(ShopSale.owner_uid == uid)
+        if slug:
+            q = q.filter(ShopSale.slug == slug)
+        rows = (
+            q.order_by(ShopSale.created_at.desc())
+             .offset(max(0, int(offset)))
+             .limit(max(1, min(int(limit), 200)))
+             .all()
+        )
+        out = []
+        for s in rows:
+            out.append({
+                "id": s.id,
+                "payment_id": s.payment_id,
+                "owner_uid": s.owner_uid,
+                "shop_uid": s.shop_uid,
+                "slug": s.slug,
+                "currency": s.currency,
+                "amount_cents": s.amount_cents,
+                "items": s.items,
+                "metadata": s.metadata,
+                "delivered": bool(s.delivered),
+                "customer_email": s.customer_email,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            })
+        return {"sales": out, "count": len(out)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)

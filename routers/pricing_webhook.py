@@ -596,7 +596,10 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
 
         sid = ""
         try:
-            sid = _deep_find_first(event_obj or {}, ("checkout_session_id", "session_id")) or _deep_find_first(payload or {}, ("checkout_session_id", "session_id"))
+            sid = (
+                _deep_find_first(event_obj or {}, ("checkout_session_id", "session_id", "checkout_id"))
+                or _deep_find_first(payload or {}, ("checkout_session_id", "session_id", "checkout_id"))
+            )
         except Exception:
             sid = ""
 
@@ -604,6 +607,21 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         try:
             if sid:
                 cache_ctx = read_json_key(f"shops/cache/sessions/{sid}.json") or {}
+            if not cache_ctx:
+                link_url = ""
+                try:
+                    link_url = (
+                        str((event_obj.get("checkout_url") or event_obj.get("session_url") or event_obj.get("url") or ""))
+                        or str((payload.get("checkout_url") or payload.get("session_url") or payload.get("url") or ""))
+                    ).strip()
+                except Exception:
+                    link_url = ""
+                if link_url:
+                    try:
+                        code = link_url.rsplit("/", 1)[-1]
+                        cache_ctx = read_json_key(f"shops/cache/links/{code}.json") or {}
+                    except Exception:
+                        pass
         except Exception:
             cache_ctx = {}
 
@@ -623,8 +641,8 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         if not owner_uid_ctx and isinstance(qp, dict):
             owner_uid_ctx = str((qp.get("owner_uid") or qp.get("uid") or "")).strip()
 
-        # Only process for payment.succeeded with shop context
-        if evt_type == "payment.succeeded" and (shop_slug or owner_uid_ctx) and (cart_items_ctx or meta.get("cart_total_cents")):
+        # Only process for completed payment events with shop context
+        if (evt_type in {"payment.succeeded", "checkout.completed", "payment.completed"}) and (shop_slug or owner_uid_ctx) and (cart_items_ctx or meta.get("cart_total_cents") or cache_ctx.get("cart_total_cents")):
             # Extract payment_id
             def _deep_first_str(node: dict, keys: tuple[str, ...]) -> str:
                 return _deep_find_first(node, keys) if isinstance(node, dict) else ""
