@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Depends, Body
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional, List, Literal, Dict, Any
 from core.auth import get_uid_from_request, resolve_workspace_uid
 from core.database import get_db
 from models.shop import Shop, ShopSlug
@@ -129,7 +131,7 @@ async def upload_shop_asset(
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-@router.get('/uid/{uid}')
+@router.get('/uid/{uid}', response_model=ShopDataSchema)
 async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
     try:
         key = (uid or "").strip()
@@ -170,14 +172,14 @@ async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
             data["products"] = fixed
         except Exception:
             pass
-        return JSONResponse(data)
+        return data
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get shop: {str(e)}")
 
 
-@router.get('/slug/{slug}')
+@router.get('/slug/{slug}', response_model=ShopDataSchema)
 async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
     """Get shop data by slug (for public viewing)"""
     try:
@@ -191,7 +193,7 @@ async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
         
-        return JSONResponse(shop.to_dict())
+        return shop.to_dict()
     except HTTPException:
         raise
     except Exception as e:
@@ -224,7 +226,7 @@ async def resolve_domain(hostname: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to resolve domain: {str(e)}")
 
-@router.get('/subscription/{sub_id}')
+@router.get('/subscription/{sub_id}', response_model=ShopDataSchema)
 async def get_shop_by_subscription(sub_id: str, db: Session = Depends(get_db)):
     try:
         from models.user import User
@@ -236,7 +238,7 @@ async def get_shop_by_subscription(sub_id: str, db: Session = Depends(get_db)):
             shop = db.query(Shop).filter(Shop.owner_uid == u.uid).first()
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
-        return JSONResponse(shop.to_dict())
+        return shop.to_dict()
     except HTTPException:
         raise
     except Exception as e:
@@ -534,7 +536,7 @@ async def enable_custom_domain(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to enable domain: {str(e)}")
 
 
-@router.get('/domain/status')
+@router.get('/domain/status', response_model=DomainStatusSchema)
 async def get_domain_status(
     request: Request,
     hostname: str | None = None,
@@ -605,7 +607,7 @@ async def get_domain_status(
         shop.updated_at = datetime.utcnow()
         db.commit()
 
-        return JSONResponse({
+        return {
             "hostname": hostname,
             "dnsVerified": dns_verified,
             "sslStatus": ssl_status,
@@ -617,7 +619,7 @@ async def get_domain_status(
                 "value": "api.photomark.cloud",
                 "ttl": 300
             }
-        })
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -899,7 +901,7 @@ async def create_shop_checkout_link(
     logger.warning(f"[shop.checkout] failed to create checkout session: {error}")
     return JSONResponse({"error": "session_creation_failed", "details": error}, status_code=502)
 
-@router.get('/sales')
+@router.get('/sales', response_model=SalesResponseSchema)
 async def get_shop_sales(
     request: Request,
     limit: int = 50,
@@ -946,7 +948,7 @@ async def get_shop_sales(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
 
-@router.get('/sales/owner/{owner_uid}')
+@router.get('/sales/owner/{owner_uid}', response_model=SalesResponseSchema)
 async def get_shop_sales_by_owner(
     request: Request,
     owner_uid: str,
@@ -994,3 +996,68 @@ async def get_shop_sales_by_owner(
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
+class ProductSchema(BaseModel):
+    id: str
+    title: str
+    description: str
+    price: float
+    currency: str
+    images: List[str] = []
+    videoUrl: Optional[str] = None
+    digitalFile: Optional[str] = None
+    category: Optional[str] = None
+    tags: List[str] = []
+    featured: Optional[bool] = None
+    active: Optional[bool] = None
+
+class ShopThemeSchema(BaseModel):
+    primaryColor: Optional[str] = None
+    secondaryColor: Optional[str] = None
+    accentColor: Optional[str] = None
+    backgroundColor: Optional[str] = None
+    textColor: Optional[str] = None
+    fontFamily: Optional[str] = None
+    logoUrl: Optional[str] = None
+    bannerUrl: Optional[str] = None
+    customFontUrl: Optional[str] = None
+
+class ShopSettingsSchema(BaseModel):
+    name: str
+    slug: str
+    description: Optional[str] = None
+    ownerUid: str
+    ownerName: Optional[str] = None
+    theme: ShopThemeSchema
+    domain: Dict[str, Any] = {}
+    createdAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+
+class ShopDataSchema(BaseModel):
+    settings: ShopSettingsSchema
+    products: List[ProductSchema] = []
+
+class DomainStatusSchema(BaseModel):
+    hostname: str
+    dnsVerified: bool
+    sslStatus: str
+    cnameObserved: Optional[str] = None
+    enabled: Optional[bool] = None
+    instructions: Dict[str, Any]
+
+class ShopSaleSchema(BaseModel):
+    id: str
+    payment_id: Optional[str] = None
+    owner_uid: str
+    shop_uid: Optional[str] = None
+    slug: Optional[str] = None
+    currency: str
+    amount_cents: int
+    items: List[Any] = []
+    metadata: Dict[str, Any] = {}
+    delivered: bool
+    customer_email: Optional[str] = None
+    created_at: Optional[str] = None
+
+class SalesResponseSchema(BaseModel):
+    sales: List[ShopSaleSchema]
+    count: int
