@@ -1009,7 +1009,12 @@ async def get_shop_sales(
                 "customer_email": s.customer_email,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             })
-        return {"sales": out, "count": len(out)}
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+        return JSONResponse({"sales": out, "count": len(out)}, headers=headers)
     except HTTPException:
         raise
     except Exception as e:
@@ -1054,7 +1059,12 @@ async def get_shop_sales_by_owner(
                 "customer_email": s.customer_email,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             })
-        return {"sales": out, "count": len(out)}
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+        return JSONResponse({"sales": out, "count": len(out)}, headers=headers)
     except HTTPException:
         raise
     except Exception as e:
