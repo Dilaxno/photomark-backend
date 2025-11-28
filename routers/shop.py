@@ -1014,7 +1014,6 @@ async def get_shop_sales(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
-
 @router.get('/sales/owner/{owner_uid}', response_model=SalesResponseSchema)
 async def get_shop_sales_by_owner(
     request: Request,
@@ -1056,6 +1055,10 @@ async def get_shop_sales_by_owner(
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             })
         return {"sales": out, "count": len(out)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
 
 @router.options('/sales')
 async def sales_options():
@@ -1074,10 +1077,6 @@ async def sales_owner_options(owner_uid: str):
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     })
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
