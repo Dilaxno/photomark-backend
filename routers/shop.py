@@ -897,7 +897,7 @@ async def get_shop_sales(
                 "currency": s.currency,
                 "amount_cents": s.amount_cents,
                 "items": s.items,
-                "metadata": s.metadata,
+                "metadata": s.sale_metadata,
                 "delivered": bool(s.delivered),
                 "customer_email": s.customer_email,
                 "created_at": s.created_at.isoformat() if s.created_at else None,

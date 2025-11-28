@@ -21,7 +21,7 @@ class ShopSale(Base):
     amount_cents = Column(Integer, nullable=False, default=0)
 
     items = Column(JSON, nullable=False, default=[])  # [{id,title,quantity,unit_price_cents,line_total_cents,currency}]
-    metadata = Column(JSON, nullable=False, default={})
+    sale_metadata = Column('metadata', JSON, nullable=False, default={})
 
     delivered = Column(Boolean, nullable=False, default=False)
 
