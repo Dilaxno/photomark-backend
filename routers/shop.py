@@ -129,7 +129,7 @@ async def upload_shop_asset(
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-@router.get('/{uid}')
+@router.get('/uid/{uid}')
 async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
     """Get shop data by owner UID"""
     try:
@@ -901,7 +901,7 @@ async def get_shop_sales(
                 "currency": s.currency,
                 "amount_cents": s.amount_cents,
                 "items": s.items,
-                "metadata": s.sale_metadata,
+                "metadata": s.metadata,
                 "delivered": bool(s.delivered),
                 "customer_email": s.customer_email,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -947,7 +947,7 @@ async def get_shop_sales_by_owner(
                 "currency": s.currency,
                 "amount_cents": s.amount_cents,
                 "items": s.items,
-                "metadata": s.sale_metadata,
+                "metadata": s.metadata,
                 "delivered": bool(s.delivered),
                 "customer_email": s.customer_email,
                 "created_at": s.created_at.isoformat() if s.created_at else None,

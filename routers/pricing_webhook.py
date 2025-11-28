@@ -710,7 +710,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     currency=currency or "USD",
                     amount_cents=int(amount_cents or 0),
                     items=items_payload,
-                    sale_metadata=meta or {},
+                    metadata=meta or {},
                     delivered=False,
                     customer_email=customer_email or None,
                 )
