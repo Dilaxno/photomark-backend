@@ -836,20 +836,27 @@ async def create_shop_checkout_link(
             try:
                 from utils.storage import write_json_key  # type: ignore
                 code = link.rsplit("/", 1)[-1]
+                payload = {
+                    "shop_slug": slug,
+                    "shop_uid": shop_uid,
+                    "owner_uid": owner_uid,
+                    "currency": currency,
+                    "cart_total_cents": total_cents,
+                    "cart_items": line_items,
+                    "email": cust_email,
+                    "name": cust_name,
+                    "session_id": session_data.get("session_id") or session_data.get("id"),
+                }
                 write_json_key(
                     f"shops/cache/links/{code}.json",
-                    {
-                        "shop_slug": slug,
-                        "shop_uid": shop_uid,
-                        "owner_uid": owner_uid,
-                        "currency": currency,
-                        "cart_total_cents": total_cents,
-                        "cart_items": line_items,
-                        "email": cust_email,
-                        "name": cust_name,
-                        "session_id": session_data.get("session_id") or session_data.get("id"),
-                    },
+                    payload,
                 )
+                sid = payload.get("session_id")
+                if isinstance(sid, str) and sid:
+                    write_json_key(
+                        f"shops/cache/sessions/{sid}.json",
+                        payload,
+                    )
             except Exception:
                 pass
             return {"url": link, "session_id": session_data.get("session_id") or session_data.get("id")}

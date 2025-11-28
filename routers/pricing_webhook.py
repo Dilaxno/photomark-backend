@@ -594,11 +594,29 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         cart_items_ctx = []
         currency_ctx = ""
 
+        sid = ""
+        try:
+            sid = _deep_find_first(event_obj or {}, ("checkout_session_id", "session_id")) or _deep_find_first(payload or {}, ("checkout_session_id", "session_id"))
+        except Exception:
+            sid = ""
+
+        cache_ctx = {}
+        try:
+            if sid:
+                cache_ctx = read_json_key(f"shops/cache/sessions/{sid}.json") or {}
+        except Exception:
+            cache_ctx = {}
+
         if isinstance(meta, dict):
-            shop_slug = str((meta.get("shop_slug") or meta.get("slug") or "")).strip()
-            owner_uid_ctx = str((meta.get("owner_uid") or meta.get("uid") or "")).strip()
-            cart_items_ctx = meta.get("cart_items") or []
-            currency_ctx = str((meta.get("currency") or "")).strip().upper()
+            shop_slug = str((meta.get("shop_slug") or meta.get("slug") or "" or cache_ctx.get("shop_slug") or "")).strip()
+            owner_uid_ctx = str((meta.get("owner_uid") or meta.get("uid") or "" or cache_ctx.get("owner_uid") or "")).strip()
+            cart_items_ctx = (meta.get("cart_items") or cache_ctx.get("cart_items") or [])
+            currency_ctx = str((meta.get("currency") or cache_ctx.get("currency") or "")).strip().upper()
+        else:
+            shop_slug = str((cache_ctx.get("shop_slug") or "")).strip()
+            owner_uid_ctx = str((cache_ctx.get("owner_uid") or "")).strip()
+            cart_items_ctx = cache_ctx.get("cart_items") or []
+            currency_ctx = str((cache_ctx.get("currency") or "")).strip().upper()
 
         if not shop_slug and isinstance(qp, dict):
             shop_slug = str((qp.get("shop_slug") or qp.get("shop") or "")).strip()
@@ -630,7 +648,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
 
             if amount_cents <= 0:
                 try:
-                    amount_cents = int(meta.get("cart_total_cents") or 0)
+                    amount_cents = int((meta.get("cart_total_cents") if isinstance(meta, dict) else 0) or (cache_ctx.get("cart_total_cents") if isinstance(cache_ctx, dict) else 0) or 0)
                 except Exception:
                     amount_cents = 0
 
@@ -660,6 +678,11 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             sale_id = payment_id or uuid.uuid4().hex
             try:
                 items_payload = cart_items_ctx if isinstance(cart_items_ctx, list) else []
+                customer_email = ""
+                try:
+                    customer_email = (_first_email_from_payload(event_obj or {}) or _first_email_from_payload(payload or {}) or str((meta.get("email") or "")).strip()).lower()
+                except Exception:
+                    customer_email = ""
                 sale = ShopSale(
                     id=sale_id,
                     payment_id=payment_id or None,
@@ -671,6 +694,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     items=items_payload,
                     metadata=meta or {},
                     delivered=False,
+                    customer_email=customer_email or None,
                 )
                 db.add(sale)
                 db.commit()
