@@ -1330,6 +1330,14 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         "max_uses": 1,
         "client_name": client_name,
     }
+    # Granular client download permission
+    try:
+        perm_raw = str((payload or {}).get('download_permission') or '').strip().lower()
+        if perm_raw not in ('none', 'low', 'high'):
+            perm_raw = 'none'
+        rec['download_permission'] = perm_raw
+    except Exception:
+        rec['download_permission'] = 'none'
     # Optional: password to unlock removal of invisible watermark (unmarked originals access)
     try:
         remove_pw = str((payload or {}).get('remove_password') or '').strip()
@@ -1604,6 +1612,14 @@ async def vaults_share_link(request: Request, payload: dict = Body(...)):
         "created_at": now.isoformat(),
         "max_uses": 0,  # unlimited until expiration
     }
+    # Optional granular permission for public share link
+    try:
+        perm_raw = str((payload or {}).get('download_permission') or '').strip().lower()
+        if perm_raw not in ('none', 'low', 'high'):
+            perm_raw = 'none'
+        rec['download_permission'] = perm_raw
+    except Exception:
+        rec['download_permission'] = 'none'
     _write_json_key(_share_key(token), rec)
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
@@ -2091,7 +2107,12 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
     except Exception:
         pass
 
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch}
+    # Include granular permission in response
+    try:
+        share['permission'] = str((rec or {}).get('download_permission') or 'none')
+    except Exception:
+        share['permission'] = 'none'
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission']}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
@@ -2975,7 +2996,7 @@ async def dodo_webhook(request: Request):
 
 
 @router.get("/vaults/shared/originals.zip")
-async def vaults_shared_originals_zip(token: str, password: Optional[str] = None):
+async def vaults_shared_originals_zip(token: str, password: Optional[str] = None, keys: Optional[str] = None):
     if not token or len(token) < 10:
         return JSONResponse({"error": "invalid token"}, status_code=400)
 
@@ -2991,8 +3012,8 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
     if exp and now > exp:
         return JSONResponse({"error": "expired"}, status_code=410)
 
-    # Allow if licensed OR correct removal password provided
-    allow_download = bool(rec.get("licensed"))
+    # Allow if licensed OR correct removal password provided OR explicit high-res permission
+    allow_download = bool(rec.get("licensed")) or (str(rec.get('download_permission') or '').strip().lower() == 'high')
     if not allow_download:
         try:
             if rec.get("remove_pw_hash"):
@@ -3018,9 +3039,21 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
 
     # Collect vault keys and map to original keys
     try:
-        keys = _read_vault(uid, vault)
+        vault_keys = _read_vault(uid, vault)
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
+
+    # Optional selection filter
+    try:
+        selected: list[str] = []
+        if keys:
+            raw = [x for x in (keys.split(',') if ',' in keys else [keys]) if x]
+            raw_set = set(raw)
+            selected = [k for k in vault_keys if k in raw_set]
+        else:
+            selected = vault_keys
+    except Exception:
+        selected = vault_keys
 
     original_items: list[tuple[str, bytes]] = []  # (arcname, content)
 
@@ -3053,7 +3086,7 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
         return None
 
     try:
-        for k in keys:
+        for k in selected:
             ok = map_original_key(k)
             if not ok:
                 continue
@@ -3081,6 +3114,149 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
             zf.writestr(name, content)
     mem.seek(0)
     headers = {"Content-Disposition": f"attachment; filename=\"{vault}-originals.zip\""}
+    return StreamingResponse(mem, media_type="application/zip", headers=headers)
+
+
+@router.get("/vaults/shared/lowres.zip")
+async def vaults_shared_lowres_zip(token: str, password: Optional[str] = None, keys: Optional[str] = None, max_size: Optional[int] = 1920, quality: Optional[int] = 60):
+    if not token or len(token) < 10:
+        return JSONResponse({"error": "invalid token"}, status_code=400)
+
+    rec = _read_json_key(_share_key(token))
+    if not rec:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    # Expiration check
+    try:
+        exp = datetime.fromisoformat(str(rec.get('expires_at', '')))
+    except Exception:
+        exp = None
+    now = datetime.utcnow()
+    if exp and now > exp:
+        return JSONResponse({"error": "expired"}, status_code=410)
+
+    # Permission check: allow low-res for 'low' or 'high'
+    perm = str((rec.get('download_permission') or '')).strip().lower()
+    if perm not in ('low', 'high'):
+        return JSONResponse({"error": "permission_denied"}, status_code=403)
+
+    uid = rec.get('uid') or ''
+    vault = rec.get('vault') or ''
+    if not uid or not vault:
+        return JSONResponse({"error": "invalid share"}, status_code=400)
+
+    # Protected vaults still require password to access contents
+    meta = _read_vault_meta(uid, vault)
+    if meta.get('protected'):
+        if not _check_password(password or '', meta, uid, vault):
+            return JSONResponse({"error": "Vault is protected. Invalid or missing password."}, status_code=403)
+
+    # Collect vault keys
+    try:
+        vault_keys = _read_vault(uid, vault)
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+    # Optional limit to selected keys
+    try:
+        selected: list[str] = []
+        if keys:
+            raw = [x for x in (keys.split(',') if ',' in keys else [keys]) if x]
+            raw_set = set(raw)
+            selected = [k for k in vault_keys if k in raw_set]
+        else:
+            selected = vault_keys
+    except Exception:
+        selected = vault_keys
+
+    # Prepare low-res conversions
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return JSONResponse({"error": "image_processing_unavailable"}, status_code=503)
+
+    low_items: list[tuple[str, bytes]] = []
+
+    def load_bytes(key: str) -> Optional[bytes]:
+        try:
+            if s3 and R2_BUCKET:
+                obj = s3.Object(R2_BUCKET, key)
+                return obj.get()["Body"].read()
+            else:
+                with open(os.path.join(STATIC_DIR, key), "rb") as f:
+                    return f.read()
+        except Exception:
+            return None
+
+    def map_original_key(wm_key: str) -> Optional[str]:
+        try:
+            dir_part = os.path.dirname(wm_key)
+            date_part = "/".join(dir_part.split("/")[-3:])
+            name = os.path.basename(wm_key)
+            base_part = name.rsplit("-o", 1)[0] if "-o" in name else os.path.splitext(name)[0]
+            for suf in ("-logo", "-txt"):
+                if base_part.endswith(suf):
+                    base_part = base_part[: -len(suf)]
+                    break
+            for ext in ("jpg","jpeg","png","webp","heic","tif","tiff","bin"):
+                cand = f"users/{uid}/originals/{date_part}/{base_part}-orig.{ext}" if ext != 'bin' else f"users/{uid}/originals/{date_part}/{base_part}-orig.bin"
+                if s3 and R2_BUCKET:
+                    try:
+                        obj = s3.Object(R2_BUCKET, cand)
+                        _ = obj.content_length
+                        return cand
+                    except Exception:
+                        continue
+                else:
+                    local_path = os.path.join(STATIC_DIR, cand)
+                    if os.path.isfile(local_path):
+                        return cand
+        except Exception:
+            return None
+        return None
+
+    max_edge = int(max_size or 1920)
+    quality_val = int(quality or 60)
+
+    for wm in selected:
+        orig_key = map_original_key(wm)
+        src_key = orig_key or wm
+        data = load_bytes(src_key)
+        if not data:
+            continue
+        try:
+            import io as _io
+            bio = _io.BytesIO(data)
+            img = Image.open(bio)
+            img = img.convert('RGB')
+            w, h = img.size
+            scale = 1.0
+            try:
+                m = float(max_edge)
+                scale = min(1.0, m / float(max(w, h)))
+            except Exception:
+                scale = 1.0
+            if scale < 1.0:
+                new_size = (int(w * scale), int(h * scale))
+                try:
+                    img = img.resize(new_size, resample=Image.LANCZOS)
+                except Exception:
+                    img = img.resize(new_size)
+            out = _io.BytesIO()
+            img.save(out, format='JPEG', quality=quality_val, optimize=True)
+            low_items.append((os.path.splitext(os.path.basename(src_key))[0] + "-lowres.jpg", out.getvalue()))
+        except Exception:
+            continue
+
+    if not low_items:
+        return JSONResponse({"error": "no_images"}, status_code=404)
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, content in low_items:
+            zf.writestr(name, content)
+    mem.seek(0)
+    headers = {"Content-Disposition": f"attachment; filename=\"{vault}-lowres.zip\""}
     return StreamingResponse(mem, media_type="application/zip", headers=headers)
 
 
