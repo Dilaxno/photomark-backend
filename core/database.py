@@ -55,12 +55,25 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     try:
         with engine.connect() as conn:
+            # Ensure shops.domain exists (custom domain config)
             chk = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shops' AND column_name='domain'"))
             if not chk.first():
                 conn.execute(text("ALTER TABLE public.shops ADD COLUMN domain JSONB NOT NULL DEFAULT '{}'::jsonb"))
+
             # Ensure collaborator_access.password_plain exists
             chk2 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='collaborator_access' AND column_name='password_plain'"))
             if not chk2.first():
                 conn.execute(text("ALTER TABLE public.collaborator_access ADD COLUMN password_plain TEXT"))
+
+            # Ensure customer enrichment columns exist on shop_sales
+            chk3 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shop_sales' AND column_name='customer_name'"))
+            if not chk3.first():
+                conn.execute(text("ALTER TABLE public.shop_sales ADD COLUMN customer_name VARCHAR(255)"))
+            chk4 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shop_sales' AND column_name='customer_city'"))
+            if not chk4.first():
+                conn.execute(text("ALTER TABLE public.shop_sales ADD COLUMN customer_city VARCHAR(255)"))
+            chk5 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shop_sales' AND column_name='customer_country'"))
+            if not chk5.first():
+                conn.execute(text("ALTER TABLE public.shop_sales ADD COLUMN customer_country VARCHAR(64)"))
     except Exception:
         pass

@@ -1121,6 +1121,9 @@ async def get_shop_sales(
                 "metadata": s.sale_metadata,
                 "delivered": bool(s.delivered),
                 "customer_email": s.customer_email,
+                "customer_name": getattr(s, "customer_name", None),
+                "customer_city": getattr(s, "customer_city", None),
+                "customer_country": getattr(s, "customer_country", None),
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             })
         headers = {
@@ -1278,6 +1281,9 @@ async def get_shop_sales_by_owner(
                 "metadata": s.sale_metadata,
                 "delivered": bool(s.delivered),
                 "customer_email": s.customer_email,
+                "customer_name": getattr(s, "customer_name", None),
+                "customer_city": getattr(s, "customer_city", None),
+                "customer_country": getattr(s, "customer_country", None),
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             })
         headers = {

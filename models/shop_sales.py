@@ -16,6 +16,9 @@ class ShopSale(Base):
 
     payment_id = Column(String(128), unique=True, index=True, nullable=True)
     customer_email = Column(String(255), nullable=True)
+    customer_name = Column(String(255), nullable=True)
+    customer_city = Column(String(255), nullable=True)
+    customer_country = Column(String(64), nullable=True)  # store alpha-2 or full name when provided
 
     currency = Column(String(10), nullable=False, default="USD")
     amount_cents = Column(Integer, nullable=False, default=0)

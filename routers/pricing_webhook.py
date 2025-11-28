@@ -101,6 +101,96 @@ def _first_email_from_payload(payload: dict) -> str:
     return candidates[0] if candidates else ""
 
 
+def _combine_name(first: str, last: str) -> str:
+    f = (first or "").strip()
+    l = (last or "").strip()
+    if f and l:
+        return f"{f} {l}"
+    return f or l
+
+
+def _first_customer_name(payload: dict) -> str:
+    """
+    Try to extract a customer's full name from typical webhook shapes.
+    Looks at:
+      - customer.name / customer.first_name + customer.last_name
+      - billing.name
+      - top-level name / customer_name
+      - nested data/object wrappers
+    """
+    try:
+        cust = payload.get("customer") if isinstance(payload, dict) else None
+        if isinstance(cust, dict):
+            nm = str(cust.get("name") or "").strip()
+            if nm:
+                return nm
+            first = str(cust.get("first_name") or cust.get("firstName") or "").strip()
+            last = str(cust.get("last_name") or cust.get("lastName") or "").strip()
+            nm = _combine_name(first, last)
+            if nm:
+                return nm
+        billing = payload.get("billing") if isinstance(payload, dict) else None
+        if isinstance(billing, dict):
+            nm = str(billing.get("name") or "").strip()
+            if nm:
+                return nm
+    except Exception:
+        pass
+    # Deep scan common keys
+    for k in ("customer_name", "name", "full_name"):
+        nm = _deep_find_first(payload if isinstance(payload, dict) else {}, (k,))
+        if isinstance(nm, str) and nm.strip():
+            return nm.strip()
+    # Try separate first/last via deep scan
+    first = _deep_find_first(payload if isinstance(payload, dict) else {}, ("first_name", "firstName"))
+    last = _deep_find_first(payload if isinstance(payload, dict) else {}, ("last_name", "lastName"))
+    if isinstance(first, str) or isinstance(last, str):
+        return _combine_name(str(first or ""), str(last or ""))
+    return ""
+
+
+def _first_city_country(payload: dict) -> tuple[str, str]:
+    """
+    Extract billing city and country (alpha-2 or full) from typical positions:
+      - billing.city / billing.country
+      - billing_address.city / billing_address.country
+      - address.city / address.country
+    Falls back to a deep scan for 'city' and 'country' if needed.
+    """
+    city = ""
+    country = ""
+    try:
+        billing = payload.get("billing") if isinstance(payload, dict) else None
+        if isinstance(billing, dict):
+            city = str(billing.get("city") or "").strip() or city
+            country = str(billing.get("country") or "").strip() or country
+        if not city or not country:
+            baddr = payload.get("billing_address") if isinstance(payload, dict) else None
+            if isinstance(baddr, dict):
+                city = city or str(baddr.get("city") or "").strip()
+                country = country or str(baddr.get("country") or "").strip()
+        if not city or not country:
+            addr = payload.get("address") if isinstance(payload, dict) else None
+            if isinstance(addr, dict):
+                city = city or str(addr.get("city") or "").strip()
+                country = country or str(addr.get("country") or "").strip()
+    except Exception:
+        pass
+    if not city:
+        c = _deep_find_first(payload if isinstance(payload, dict) else {}, ("city",))
+        city = str(c or "").strip()
+    if not country:
+        c = _deep_find_first(payload if isinstance(payload, dict) else {}, ("country", "country_code", "countryCode"))
+        country = str(c or "").strip()
+    # Normalize country to upper alpha-2 when likely a code
+    if len(country) in (2, 3):
+        try:
+            country = country.upper()
+        except Exception:
+            pass
+    return city, country
+
+
 def _deep_find_first(obj: dict, keys: tuple[str, ...]) -> str:
     """Recursively search a dict for the first non-empty string value for any key in keys.
     Limits depth and size to avoid pathological payloads.
@@ -701,6 +791,21 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     customer_email = (_first_email_from_payload(event_obj or {}) or _first_email_from_payload(payload or {}) or str((meta.get("email") or "")).strip()).lower()
                 except Exception:
                     customer_email = ""
+                # Enrich customer details (name, city, country) from event
+                cust_name = ""
+                city = ""
+                country = ""
+                try:
+                    # Prefer event_obj, fallback to entire payload
+                    cust_name = _first_customer_name(event_obj or {}) or _first_customer_name(payload or {})
+                    cty, ctry = _first_city_country(event_obj or {})
+                    if not cty and not ctry:
+                        cty, ctry = _first_city_country(payload or {})
+                    city = cty or ""
+                    country = ctry or ""
+                except Exception:
+                    pass
+
                 sale = ShopSale(
                     id=sale_id,
                     payment_id=payment_id or None,
@@ -713,6 +818,9 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     metadata=meta or {},
                     delivered=False,
                     customer_email=customer_email or None,
+                    customer_name=cust_name or None,
+                    customer_city=city or None,
+                    customer_country=country or None,
                 )
                 db.add(sale)
                 db.commit()
