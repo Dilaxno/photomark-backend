@@ -29,6 +29,73 @@ MAX_FONT_SIZE = 20 * 1024 * 1024   # 20MB
 
 print("[SHOP] Shop router initialized")
 
+# --- Response Schemas (Pydantic) ---
+class ProductSchema(BaseModel):
+    id: str
+    title: str
+    description: str
+    price: float
+    currency: str
+    images: List[str] = []
+    videoUrl: Optional[str] = None
+    digitalFile: Optional[str] = None
+    category: Optional[str] = None
+    tags: List[str] = []
+    featured: Optional[bool] = None
+    active: Optional[bool] = None
+
+class ShopThemeSchema(BaseModel):
+    primaryColor: Optional[str] = None
+    secondaryColor: Optional[str] = None
+    accentColor: Optional[str] = None
+    backgroundColor: Optional[str] = None
+    textColor: Optional[str] = None
+    fontFamily: Optional[str] = None
+    logoUrl: Optional[str] = None
+    bannerUrl: Optional[str] = None
+    customFontUrl: Optional[str] = None
+
+class ShopSettingsSchema(BaseModel):
+    name: str
+    slug: str
+    description: Optional[str] = None
+    ownerUid: str
+    ownerName: Optional[str] = None
+    theme: ShopThemeSchema
+    domain: Dict[str, Any] = {}
+    createdAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+
+class ShopDataSchema(BaseModel):
+    settings: ShopSettingsSchema
+    products: List[ProductSchema] = []
+
+class DomainStatusSchema(BaseModel):
+    hostname: str
+    dnsVerified: bool
+    sslStatus: str
+    cnameObserved: Optional[str] = None
+    enabled: Optional[bool] = None
+    instructions: Dict[str, Any]
+
+class ShopSaleSchema(BaseModel):
+    id: str
+    payment_id: Optional[str] = None
+    owner_uid: str
+    shop_uid: Optional[str] = None
+    slug: Optional[str] = None
+    currency: str
+    amount_cents: int
+    items: List[Any] = []
+    metadata: Dict[str, Any] = {}
+    delivered: bool
+    customer_email: Optional[str] = None
+    created_at: Optional[str] = None
+
+class SalesResponseSchema(BaseModel):
+    sales: List[ShopSaleSchema]
+    count: int
+
 
 @router.post('/upload')
 async def upload_shop_asset(
@@ -996,68 +1063,3 @@ async def get_shop_sales_by_owner(
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
-class ProductSchema(BaseModel):
-    id: str
-    title: str
-    description: str
-    price: float
-    currency: str
-    images: List[str] = []
-    videoUrl: Optional[str] = None
-    digitalFile: Optional[str] = None
-    category: Optional[str] = None
-    tags: List[str] = []
-    featured: Optional[bool] = None
-    active: Optional[bool] = None
-
-class ShopThemeSchema(BaseModel):
-    primaryColor: Optional[str] = None
-    secondaryColor: Optional[str] = None
-    accentColor: Optional[str] = None
-    backgroundColor: Optional[str] = None
-    textColor: Optional[str] = None
-    fontFamily: Optional[str] = None
-    logoUrl: Optional[str] = None
-    bannerUrl: Optional[str] = None
-    customFontUrl: Optional[str] = None
-
-class ShopSettingsSchema(BaseModel):
-    name: str
-    slug: str
-    description: Optional[str] = None
-    ownerUid: str
-    ownerName: Optional[str] = None
-    theme: ShopThemeSchema
-    domain: Dict[str, Any] = {}
-    createdAt: Optional[str] = None
-    updatedAt: Optional[str] = None
-
-class ShopDataSchema(BaseModel):
-    settings: ShopSettingsSchema
-    products: List[ProductSchema] = []
-
-class DomainStatusSchema(BaseModel):
-    hostname: str
-    dnsVerified: bool
-    sslStatus: str
-    cnameObserved: Optional[str] = None
-    enabled: Optional[bool] = None
-    instructions: Dict[str, Any]
-
-class ShopSaleSchema(BaseModel):
-    id: str
-    payment_id: Optional[str] = None
-    owner_uid: str
-    shop_uid: Optional[str] = None
-    slug: Optional[str] = None
-    currency: str
-    amount_cents: int
-    items: List[Any] = []
-    metadata: Dict[str, Any] = {}
-    delivered: bool
-    customer_email: Optional[str] = None
-    created_at: Optional[str] = None
-
-class SalesResponseSchema(BaseModel):
-    sales: List[ShopSaleSchema]
-    count: int
