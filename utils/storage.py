@@ -1,7 +1,7 @@
 import os
 import json
 from typing import Optional
-from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR, logger, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR, logger, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, s3_backup, BACKUP_BUCKET
 import hashlib, hmac
 from urllib.parse import quote, urlencode
 import time
@@ -66,6 +66,17 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
         bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private", CacheControl=cc)
     except Exception:
         bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
+
+    # Attempt backup mirror (best-effort; non-blocking on failure)
+    try:
+        if s3_backup and BACKUP_BUCKET:
+            try:
+                s3_backup.Bucket(BACKUP_BUCKET).put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
+                logger.info(f"Backup mirrored to B2: {BACKUP_BUCKET}/{key}")
+            except Exception as bx:
+                logger.warning(f"Backup mirror failed for {key}: {bx}")
+    except Exception:
+        pass
 
     try:
         url = get_presigned_url(key, expires_in=60 * 60)
@@ -195,3 +206,26 @@ def read_bytes_key(key: str) -> Optional[bytes]:
     except Exception as ex:
         logger.warning(f"read_bytes_key failed for {key}: {ex}")
         return None
+
+
+def backup_read_bytes_key(key: str) -> Optional[bytes]:
+    try:
+        if s3_backup and BACKUP_BUCKET:
+            obj = s3_backup.Object(BACKUP_BUCKET, key)
+            body = obj.get()["Body"].read()
+            return body
+        return None
+    except Exception as ex:
+        logger.warning(f"backup_read_bytes_key failed for {key}: {ex}")
+        return None
+
+
+def backup_delete_key(key: str) -> bool:
+    try:
+        if s3_backup and BACKUP_BUCKET:
+            s3_backup.Object(BACKUP_BUCKET, key).delete()
+            return True
+        return False
+    except Exception as ex:
+        logger.warning(f"backup_delete_key failed for {key}: {ex}")
+        return False

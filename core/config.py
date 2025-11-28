@@ -123,6 +123,8 @@ STATIC_DIR = os.path.abspath(STATIC_DIR)
 # S3/R2 client for storage operations
 s3 = None
 s3_presign_client = None  # Separate client for presigned URLs with custom domain
+s3_backup = None  # Optional secondary S3-compatible backup (e.g., Backblaze B2)
+BACKUP_BUCKET = ""
 
 if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
     # Main S3 resource for storage operations (uploads, deletes)
@@ -147,3 +149,29 @@ if R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
             config=BotoConfig(signature_version="s3v4"),
             region_name="auto",
         )
+
+# Optional Backblaze B2 S3-compatible backup
+BACKUP_STORAGE_PROVIDER = (os.getenv("BACKUP_STORAGE_PROVIDER", "").strip() or "").lower()
+B2_S3_ENDPOINT = os.getenv("B2_S3_ENDPOINT", "").strip()
+B2_REGION = os.getenv("B2_REGION", "").strip() or "us-east-005"
+B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME", "").strip()
+B2_KEY_ID = os.getenv("B2_KEY_ID", "").strip()
+B2_APP_KEY = os.getenv("B2_APP_KEY", "").strip()
+B2_S3_FORCE_PATH_STYLE = (os.getenv("B2_S3_FORCE_PATH_STYLE", "").strip() or "").lower() == "true"
+B2_S3_SIGNATURE_VERSION = os.getenv("B2_S3_SIGNATURE_VERSION", "s3v4").strip() or "s3v4"
+
+if BACKUP_STORAGE_PROVIDER == "backblaze" and B2_S3_ENDPOINT and B2_BUCKET_NAME and B2_KEY_ID and B2_APP_KEY:
+    try:
+        BACKUP_BUCKET = B2_BUCKET_NAME
+        s3_backup = boto3.resource(
+            "s3",
+            endpoint_url=B2_S3_ENDPOINT,
+            aws_access_key_id=B2_KEY_ID,
+            aws_secret_access_key=B2_APP_KEY,
+            config=BotoConfig(signature_version=B2_S3_SIGNATURE_VERSION),
+            region_name=B2_REGION or "us-east-005",
+        )
+        # Some SDKs require client-level path style; boto3 respects endpoint, resource suffices for most ops
+        logger.info("Backblaze B2 backup storage initialized")
+    except Exception as ex:
+        logger.warning(f"Backblaze B2 backup init failed: {ex}")
