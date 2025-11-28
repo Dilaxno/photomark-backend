@@ -33,6 +33,10 @@ try:
 except Exception as _ex:
     denoise = None
 try:
+    from routers import relight  # type: ignore
+except Exception as _ex:
+    relight = None
+try:
     from routers import hdr_merge  # type: ignore
 except Exception as _ex:
     hdr_merge = None
@@ -183,6 +187,8 @@ if image_compression is not None:
     app.include_router(image_compression.router)
 if denoise is not None:
     app.include_router(denoise.router)
+if relight is not None:
+    app.include_router(relight.router)
 if hdr_merge is not None:
     app.include_router(hdr_merge.router)
 
