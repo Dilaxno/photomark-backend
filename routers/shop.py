@@ -464,6 +464,110 @@ async def save_shop_data(
         raise HTTPException(status_code=500, detail=f"Failed to save shop data: {str(e)}")
 
 
+@router.get('/payout/settings')
+async def get_payout_settings(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        dom = shop.domain or {}
+        return (dom.get('payout') or {})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load payout settings: {str(e)}")
+
+
+@router.post('/payout/settings')
+async def save_payout_settings(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        dom = shop.domain or {}
+        dom['payout'] = payload or {}
+        shop.domain = dom
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save payout settings: {str(e)}")
+
+
+@router.get('/payout/next')
+async def get_next_payout(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        dom = shop.domain or {}
+        sched = dom.get('payout_schedule') or {}
+        return sched
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load payout schedule: {str(e)}")
+
+
+@router.post('/payout/next')
+async def set_next_payout(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    next_at = str((payload.get('nextPayoutAt') or '')).strip()
+    cadence = str((payload.get('cadence') or 'biweekly')).strip().lower()
+    weekday = str((payload.get('weekday') or 'friday')).strip().lower()
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+        dom = shop.domain or {}
+        dom['payout_schedule'] = {"nextPayoutAt": next_at, "cadence": cadence, "weekday": weekday}
+        shop.domain = dom
+        shop.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to set payout schedule: {str(e)}")
+
+
 @router.post('/slug')
 async def update_slug_mapping(
     request: Request,
