@@ -318,7 +318,7 @@ async def _groq_function_call(messages: List[Dict[str, str]], functions: List[Di
                 chat_messages.append({"role": last["role"], "content": last["content"]})
 
         payload = {
-            "model": "llama-3.1-70b-versatile",
+            "model": "llama-3.3-70b-versatile",
             "messages": chat_messages,
             "tools": groq_tools,
             "tool_choice": "auto",
