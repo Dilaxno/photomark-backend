@@ -871,13 +871,63 @@ async def get_shop_sales(
     limit: int = 50,
     offset: int = 0,
     slug: str = "",
+    owner_uid: str = "",
     db: Session = Depends(get_db)
 ):
-    uid = get_uid_from_request(request)
-    if not uid:
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    target_uid = (owner_uid or eff_uid).strip()
+    if owner_uid and owner_uid != eff_uid:
+        raise HTTPException(status_code=403, detail="Forbidden")
     try:
-        q = db.query(ShopSale).filter(ShopSale.owner_uid == uid)
+        q = db.query(ShopSale).filter(ShopSale.owner_uid == target_uid)
+        if slug:
+            q = q.filter(ShopSale.slug == slug)
+        rows = (
+            q.order_by(ShopSale.created_at.desc())
+             .offset(max(0, int(offset)))
+             .limit(max(1, min(int(limit), 200)))
+             .all()
+        )
+        out = []
+        for s in rows:
+            out.append({
+                "id": s.id,
+                "payment_id": s.payment_id,
+                "owner_uid": s.owner_uid,
+                "shop_uid": s.shop_uid,
+                "slug": s.slug,
+                "currency": s.currency,
+                "amount_cents": s.amount_cents,
+                "items": s.items,
+                "metadata": s.sale_metadata,
+                "delivered": bool(s.delivered),
+                "customer_email": s.customer_email,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            })
+        return {"sales": out, "count": len(out)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
+
+@router.get('/sales/owner/{owner_uid}')
+async def get_shop_sales_by_owner(
+    request: Request,
+    owner_uid: str,
+    limit: int = 50,
+    offset: int = 0,
+    slug: str = "",
+    db: Session = Depends(get_db)
+):
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if owner_uid != eff_uid:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        q = db.query(ShopSale).filter(ShopSale.owner_uid == owner_uid)
         if slug:
             q = q.filter(ShopSale.slug == slug)
         rows = (
