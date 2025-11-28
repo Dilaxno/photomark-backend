@@ -191,7 +191,7 @@ async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
         
-        return shop.to_dict()
+        return JSONResponse(shop.to_dict())
     except HTTPException:
         raise
     except Exception as e:
@@ -236,7 +236,7 @@ async def get_shop_by_subscription(sub_id: str, db: Session = Depends(get_db)):
             shop = db.query(Shop).filter(Shop.owner_uid == u.uid).first()
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
-        return shop.to_dict()
+        return JSONResponse(shop.to_dict())
     except HTTPException:
         raise
     except Exception as e:
@@ -605,7 +605,7 @@ async def get_domain_status(
         shop.updated_at = datetime.utcnow()
         db.commit()
 
-        return {
+        return JSONResponse({
             "hostname": hostname,
             "dnsVerified": dns_verified,
             "sslStatus": ssl_status,
@@ -617,7 +617,7 @@ async def get_domain_status(
                 "value": "api.photomark.cloud",
                 "ttl": 300
             }
-        }
+        })
     except HTTPException:
         raise
     except Exception as e:
