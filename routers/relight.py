@@ -41,10 +41,15 @@ def _enhance_with_model(img: Image.Image, strength: float) -> Image.Image:
   out_small = (np.clip(y0 * 255.0 + 0.5, 0, 255)).astype(np.uint8)
   out_img = Image.fromarray(out_small, mode="RGB")
   out_img = out_img.resize((w, h), Image.BICUBIC)
-  if 0.0 <= strength <= 1.0:
+  # Apply gamma-based exposure lift based on strength (higher strength -> brighter)
+  s = float(max(0.0, min(1.0, strength)))
+  enh_f = np.array(out_img, dtype=np.float32) / 255.0
+  gamma = max(0.35, 1.0 - 0.6 * s)
+  enh_f = np.clip(np.power(enh_f, gamma), 0.0, 1.0)
+  enh = np.clip(enh_f * 255.0 + 0.5, 0, 255).astype(np.uint8)
+  if 0.0 <= s <= 1.0:
     base = np.array(img.convert("RGB"), dtype=np.float32)
-    enh = np.array(out_img, dtype=np.float32)
-    mix = (1.0 - strength) * base + strength * enh
+    mix = (1.0 - s) * base + s * enh.astype(np.float32)
     mix = np.clip(mix + 0.5, 0, 255).astype(np.uint8)
     return Image.fromarray(mix, mode="RGB")
   return out_img
@@ -54,11 +59,19 @@ def _enhance_fallback(img: Image.Image, strength: float) -> Image.Image:
   rgb = np.array(img.convert("RGB"))
   lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
   l, a, b = cv2.split(lab)
-  clahe = cv2.createCLAHE(clipLimit=2.0 + max(0.0, min(1.0, strength)) * 2.0, tileGridSize=(8,8))
+  s = float(max(0.0, min(1.0, strength)))
+  clahe = cv2.createCLAHE(clipLimit=2.0 + s * 6.0, tileGridSize=(8,8))
   l2 = clahe.apply(l)
   lab2 = cv2.merge((l2, a, b))
   rgb2 = cv2.cvtColor(lab2, cv2.COLOR_LAB2RGB)
-  return Image.fromarray(rgb2, mode="RGB")
+  # Apply additional brightness/contrast based on strength
+  alpha = 1.0 + 0.45 * s  # contrast gain
+  beta = int(18 * s)      # brightness offset
+  adj = cv2.convertScaleAbs(rgb2, alpha=alpha, beta=beta)
+  # Blend with original according to strength to respect user intent
+  mix = (1.0 - s) * rgb.astype(np.float32) + s * adj.astype(np.float32)
+  mix = np.clip(mix + 0.5, 0, 255).astype(np.uint8)
+  return Image.fromarray(mix, mode="RGB")
 
 @router.post("/process/relight-images")
 async def relight_images(
@@ -97,4 +110,3 @@ async def relight_images(
       z.writestr(fname, data)
   zip_buf.seek(0)
   return StreamingResponse(zip_buf, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=relight_batch.zip"})
-
