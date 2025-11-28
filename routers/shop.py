@@ -1056,6 +1056,24 @@ async def get_shop_sales_by_owner(
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             })
         return {"sales": out, "count": len(out)}
+
+@router.options('/sales')
+async def sales_options():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+@router.options('/sales/owner/{owner_uid}')
+async def sales_owner_options(owner_uid: str):
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
     except HTTPException:
         raise
     except Exception as e:
