@@ -6,8 +6,9 @@ from core.auth import get_uid_from_request, resolve_workspace_uid
 from core.database import get_db
 from models.shop import Shop, ShopSlug
 from models.shop_sales import ShopSale
+from models.shop_traffic import ShopTraffic
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 import os
 import uuid
 import base64
@@ -96,6 +97,14 @@ class ShopSaleSchema(BaseModel):
 class SalesResponseSchema(BaseModel):
     sales: List[ShopSaleSchema]
     count: int
+
+class TrafficStatSchema(BaseModel):
+    date: str
+    views: int
+
+class TrafficResponseSchema(BaseModel):
+    stats: List[TrafficStatSchema]
+    total: int
 
 
 @router.post('/upload')
@@ -1020,6 +1029,113 @@ async def get_shop_sales(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
+
+@router.post('/traffic/visit')
+async def track_shop_visit(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    try:
+        slug = str(payload.get("slug") or "").strip()
+        path = str(payload.get("path") or "")[:512]
+        ref = str(payload.get("referrer") or "")
+        ua = request.headers.get("user-agent") or ""
+        ip = getattr(getattr(request, 'client', None), 'host', None) or request.headers.get("x-forwarded-for") or ""
+        device = str(payload.get("device") or "")
+        browser = str(payload.get("browser") or "")
+        os_name = str(payload.get("os") or "")
+
+        mapping = None
+        owner_uid = None
+        shop_uid = None
+        if slug:
+            mapping = db.query(ShopSlug).filter(ShopSlug.slug == slug).first()
+            if mapping:
+                shop_uid = mapping.uid
+                shop = db.query(Shop).filter(Shop.uid == shop_uid).first()
+                owner_uid = shop.owner_uid if shop else None
+
+        if not owner_uid:
+            eff_uid, _ = resolve_workspace_uid(request)
+            owner_uid = eff_uid
+
+        if not owner_uid:
+            return JSONResponse({"ok": False}, status_code=200)
+
+        from uuid import uuid4
+        rec = ShopTraffic(
+            id=str(uuid4()).replace('-', '')[:24],
+            owner_uid=owner_uid,
+            shop_uid=shop_uid,
+            slug=slug or None,
+            path=path or None,
+            referrer=ref or None,
+            ip=str(ip)[:64] if ip else None,
+            user_agent=ua or None,
+            device=device or None,
+            browser=browser or None,
+            os=os_name or None,
+        )
+        db.add(rec)
+        db.commit()
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+        return JSONResponse({"ok": True}, headers=headers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to track visit: {str(e)}")
+
+@router.get('/traffic/stats', response_model=TrafficResponseSchema)
+async def get_traffic_stats(
+    request: Request,
+    days: int = 30,
+    slug: str = "",
+    db: Session = Depends(get_db)
+):
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        q = db.query(
+            func.date(ShopTraffic.created_at).label('d'),
+            func.count(ShopTraffic.id).label('views')
+        ).filter(ShopTraffic.owner_uid == eff_uid)
+        if slug:
+            q = q.filter(ShopTraffic.slug == slug)
+        from datetime import datetime, timedelta
+        since = datetime.utcnow() - timedelta(days=max(1, min(365, int(days))))
+        q = q.filter(ShopTraffic.created_at >= since).group_by('d').order_by('d')
+        rows = q.all()
+        stats = [{"date": r[0].isoformat(), "views": int(r[1])} for r in rows]
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+        return JSONResponse({"stats": stats, "total": sum(s['views'] for s in stats)}, headers=headers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch traffic: {str(e)}")
+
+@router.options('/traffic/visit')
+async def traffic_visit_options():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
+
+@router.options('/traffic/stats')
+async def traffic_stats_options():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("", status_code=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    })
 @router.get('/sales/owner/{owner_uid}', response_model=SalesResponseSchema)
 async def get_shop_sales_by_owner(
     request: Request,
