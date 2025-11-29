@@ -21,6 +21,7 @@ from models.pricing import PricingEvent, Subscription
 from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
 from models.shop_sales import ShopSale
 from models.shop import ShopSlug
+from utils.emailing import send_email_smtp, render_email
 import uuid
 
 # Firestore dependency removed in Neon migration
@@ -816,7 +817,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     amount_cents=int(amount_cents or 0),
                     items=items_payload,
                     metadata=meta or {},
-                    delivered=False,
+                    delivered=True,  # Auto-mark as delivered for digital products
                     customer_email=customer_email or None,
                     customer_name=cust_name or None,
                     customer_city=city or None,
@@ -824,6 +825,54 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                 )
                 db.add(sale)
                 db.commit()
+                
+                # Send email notification to shop owner
+                try:
+                    owner_uid = owner_uid_ctx or shop_uid_ctx
+                    if owner_uid:
+                        # Get shop owner's email from User table
+                        owner = db.query(User).filter(User.uid == owner_uid).first()
+                        if owner and owner.email:
+                            # Format amount
+                            amount_display = f"${(int(amount_cents or 0) / 100):.2f} {(currency or 'USD').upper()}"
+                            
+                            # Format items for email
+                            email_items = []
+                            for item in items_payload:
+                                item_title = item.get("title", "Unknown Item")
+                                item_price = item.get("price", 0)
+                                item_price_display = f"${(item_price / 100):.2f}" if isinstance(item_price, (int, float)) else str(item_price)
+                                email_items.append({
+                                    "title": item_title,
+                                    "price": item_price_display
+                                })
+                            
+                            # Get frontend URL for dashboard link
+                            frontend_origin = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud"
+                            dashboard_url = f"{frontend_origin}/shop-editor?tab=earnings"
+                            
+                            # Render email template
+                            html = render_email(
+                                "sale_notification.html",
+                                amount=amount_display,
+                                customer_email=customer_email or "Unknown",
+                                items=email_items if email_items else None,
+                                dashboard_url=dashboard_url
+                            )
+                            
+                            # Send email
+                            send_email_smtp(
+                                to_addr=owner.email,
+                                subject=f"🎉 New Sale: {amount_display}",
+                                html=html,
+                                from_addr="sales@photomark.cloud",
+                                from_name="Photomark Sales"
+                            )
+                            logger.info(f"[pricing.webhook] Sent sale notification email to {owner.email}")
+                except Exception as email_ex:
+                    logger.warning(f"[pricing.webhook] Failed to send sale notification email: {email_ex}")
+                    # Don't fail the webhook if email fails
+                
             except Exception as _ex:
                 try:
                     if hasattr(db, "rollback"):

@@ -1321,6 +1321,34 @@ async def sales_owner_options(owner_uid: str):
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
     })
+
+@router.post('/sales/mark-delivered')
+async def mark_all_sales_delivered(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Mark all sales as delivered (for digital products that are instantly delivered)"""
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        # Update all sales for this owner to delivered=True
+        updated = db.query(ShopSale).filter(
+            or_(ShopSale.owner_uid == eff_uid, ShopSale.shop_uid == eff_uid)
+        ).update({"delivered": True}, synchronize_session=False)
+        
+        db.commit()
+        
+        return JSONResponse({
+            "ok": True,
+            "updated_count": updated,
+            "message": f"Marked {updated} sales as delivered"
+        })
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update sales: {str(e)}")
+
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
