@@ -157,7 +157,7 @@ async def custom_domain_routing(request: Request, call_next):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         async with httpx.AsyncClient(timeout=10.0) as client:
-                            r = await client.get(f"{front}/index.html")
+                            r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
                             inject = f"<script>try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}</script>" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
@@ -509,7 +509,7 @@ async def root(request: Request):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         async with httpx.AsyncClient(timeout=10.0) as client:
-                            r = await client.get(f"{front}/index.html")
+                            r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
                             inject = f"<script>try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}</script>" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
@@ -542,7 +542,7 @@ async def domain_redirect_any(request: Request, remaining_path: str):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         async with httpx.AsyncClient(timeout=10.0) as client:
-                            r = await client.get(f"{front}/index.html")
+                            r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
                             inject = f"<script>try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}</script>" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
