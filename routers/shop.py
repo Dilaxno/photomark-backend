@@ -1357,6 +1357,10 @@ async def upload_info():
 from core.config import DODO_API_BASE
 from utils.dodo import build_headers_list
 import asyncio
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.shop import Shop
+from models.discounts import ShopDiscount
 
 def _dodo_base_url() -> str:
     base_in = (DODO_API_BASE or "").strip()
@@ -1376,6 +1380,8 @@ async def list_discounts(
     request: Request,
     page_number: int = 0,
     page_size: int = 10,
+    slug: str | None = None,
+    db: Session = Depends(get_db),
 ):
     """
     List discounts from Dodo Payments for the authenticated owner.
@@ -1389,6 +1395,17 @@ async def list_discounts(
     # basic pagination clamping
     page_number = max(0, int(page_number))
     page_size = max(1, min(100, int(page_size)))
+    # Load owner-saved discount IDs from Neon
+    saved_ids = []
+    try:
+        q = db.query(ShopDiscount).filter(ShopDiscount.owner_uid == target_uid)
+        if slug:
+            q = q.filter(ShopDiscount.slug == slug)
+        rows = q.all()
+        saved_ids = [r.discount_id for r in rows]
+    except Exception:
+        saved_ids = []
+
     base = _dodo_base_url()
     url = f"{base}/discounts?page_number={page_number}&page_size={page_size}"
     headers = _pick_headers()
@@ -1396,7 +1413,9 @@ async def list_discounts(
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code < 300:
-                return resp.json()
+                data = resp.json()
+                items = [d for d in (data.get("items") or []) if (d.get("discount_id") in saved_ids)] if saved_ids else []
+                return {"items": items}
             detail = (resp.text or "")[:2000]
             raise HTTPException(status_code=resp.status_code, detail=f"Dodo list discounts failed: {detail}")
     except HTTPException:
@@ -1413,10 +1432,21 @@ class CreateDiscountPayload(BaseModel):
     usage_limit: Optional[int] = None
     restricted_to: Optional[List[str]] = None  # product_ids scope
 
+class UpdateDiscountPayload(BaseModel):
+    # All fields optional; only provided ones will be sent to Dodo
+    amount_bp: Optional[int] = None
+    code: Optional[str] = None
+    name: Optional[str] = None
+    expires_at: Optional[str] = None  # ISO datetime string
+    usage_limit: Optional[int] = None
+    restricted_to: Optional[List[str]] = None
+
 @router.post("/discounts")
 async def create_discount(
     request: Request,
     payload: CreateDiscountPayload,
+    slug: str | None = None,
+    db: Session = Depends(get_db),
 ):
     """
     Create a percentage discount in Dodo Payments.
@@ -1433,6 +1463,24 @@ async def create_discount(
     url = f"{base}/discounts"
     headers = _pick_headers()
 
+    # Collect product IDs for owner shops to restrict discount scope
+    restricted_ids: list[str] = []
+    try:
+        shops_q = db.query(Shop).filter(Shop.owner_uid == uid)
+        if slug:
+            shops_q = shops_q.filter(Shop.slug == slug)
+        shops = shops_q.all()
+        for s in shops:
+            for p in (s.products or []):
+                try:
+                    pid = str(p.get("id") or "").strip()
+                    if pid:
+                        restricted_ids.append(pid)
+                except Exception:
+                    continue
+    except Exception:
+        restricted_ids = []
+
     # Build Dodo payload
     body: dict = {
         "amount": int(payload.amount_bp),
@@ -1446,14 +1494,41 @@ async def create_discount(
         body["expires_at"] = str(payload.expires_at).strip()
     if isinstance(payload.usage_limit, int) and payload.usage_limit > 0:
         body["usage_limit"] = payload.usage_limit
-    if isinstance(payload.restricted_to, list):
-        body["restricted_to"] = [str(x) for x in payload.restricted_to if isinstance(x, str)]
+    # Always restrict to owner shop product IDs (security)
+    body["restricted_to"] = [str(x) for x in (restricted_ids or [])]
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, headers=headers, json=body)
             if resp.status_code < 300:
-                return resp.json()
+                out = resp.json()
+                # Persist mapping to Neon so owner only sees their discounts
+                try:
+                    did = str(out.get("discount_id") or "").strip()
+                    code = str(out.get("code") or "").strip() or None
+                    name = str(out.get("name") or "").strip() or None
+                    shop_uid = None
+                    in_slug = slug
+                    try:
+                        if not in_slug and shops:
+                            in_slug = shops[0].slug
+                        shop_uid = shops[0].uid if shops else None
+                    except Exception:
+                        pass
+                    if did:
+                        existing = db.query(ShopDiscount).filter(ShopDiscount.discount_id == did).first()
+                        if existing:
+                            existing.owner_uid = uid
+                            existing.code = code
+                            existing.name = name
+                            existing.slug = in_slug
+                            existing.shop_uid = shop_uid
+                        else:
+                            db.add(ShopDiscount(discount_id=did, owner_uid=uid, code=code, name=name, slug=in_slug, shop_uid=shop_uid))
+                        db.commit()
+                except Exception:
+                    pass
+                return out
             detail = (resp.text or "")[:2000]
             raise HTTPException(status_code=resp.status_code, detail=f"Dodo create discount failed: {detail}")
     except HTTPException:
@@ -1461,10 +1536,107 @@ async def create_discount(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Dodo create discount error: {e}")
 
+@router.patch("/discounts/{discount_id}")
+async def update_discount(
+    request: Request,
+    discount_id: str,
+    payload: UpdateDiscountPayload,
+    slug: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Update a discount in Dodo Payments for the authenticated owner.
+
+    Only provided fields are forwarded to Dodo.
+    """
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    did = (discount_id or "").strip()
+    if not did:
+        raise HTTPException(status_code=400, detail="Invalid discount_id")
+
+    base = _dodo_base_url()
+    url = f"{base}/discounts/{did}"
+    headers = _pick_headers()
+
+    # Collect product IDs for owner shops to restrict discount scope
+    restricted_ids: list[str] = []
+    try:
+        shops_q = db.query(Shop).filter(Shop.owner_uid == uid)
+        if slug:
+            shops_q = shops_q.filter(Shop.slug == slug)
+        shops = shops_q.all()
+        for s in shops:
+            for p in (s.products or []):
+                try:
+                    pid = str(p.get("id") or "").strip()
+                    if pid:
+                        restricted_ids.append(pid)
+                except Exception:
+                    continue
+    except Exception:
+        restricted_ids = []
+
+    body: dict = {}
+    if isinstance(payload.amount_bp, int) and payload.amount_bp >= 0:
+        body["amount"] = int(payload.amount_bp)
+        body["type"] = "percentage"
+    if payload.code:
+        body["code"] = str(payload.code).strip()
+    if payload.name:
+        body["name"] = str(payload.name).strip()
+    if payload.expires_at:
+        body["expires_at"] = str(payload.expires_at).strip()
+    if isinstance(payload.usage_limit, int) and payload.usage_limit >= 0:
+        body["usage_limit"] = payload.usage_limit
+    # Always restrict to owner shop product IDs (security)
+    body["restricted_to"] = [str(x) for x in (restricted_ids or [])]
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.patch(url, headers=headers, json=body)
+            if resp.status_code < 300:
+                out = resp.json()
+                # Persist mapping in Neon (upsert)
+                try:
+                    did2 = str(out.get("discount_id") or did)
+                    code = str(out.get("code") or "").strip() or None
+                    name = str(out.get("name") or "").strip() or None
+                    shop_uid = None
+                    in_slug = slug
+                    try:
+                        if not in_slug and shops:
+                            in_slug = shops[0].slug
+                        shop_uid = shops[0].uid if shops else None
+                    except Exception:
+                        pass
+                    if did2:
+                        existing = db.query(ShopDiscount).filter(ShopDiscount.discount_id == did2).first()
+                        if existing:
+                            existing.owner_uid = uid
+                            existing.code = code
+                            existing.name = name
+                            existing.slug = in_slug
+                            existing.shop_uid = shop_uid
+                        else:
+                            db.add(ShopDiscount(discount_id=did2, owner_uid=uid, code=code, name=name, slug=in_slug, shop_uid=shop_uid))
+                        db.commit()
+                except Exception:
+                    pass
+                return out
+            detail = (resp.text or "")[:2000]
+            raise HTTPException(status_code=resp.status_code, detail=f"Dodo update discount failed: {detail}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Dodo update discount error: {e}")
+
 @router.delete("/discounts/{discount_id}")
 async def delete_discount(
     request: Request,
     discount_id: str,
+    db: Session = Depends(get_db),
 ):
     """
     Delete a discount in Dodo Payments by id.
@@ -1484,6 +1656,14 @@ async def delete_discount(
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.delete(url, headers=headers)
             if resp.status_code < 300:
+                # Remove Neon mapping so it no longer appears for this owner
+                try:
+                    rec = db.query(ShopDiscount).filter(ShopDiscount.discount_id == did).first()
+                    if rec:
+                        db.delete(rec)
+                        db.commit()
+                except Exception:
+                    pass
                 return {"ok": True}
             detail = (resp.text or "")[:2000]
             raise HTTPException(status_code=resp.status_code, detail=f"Dodo delete discount failed: {detail}")
