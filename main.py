@@ -65,7 +65,7 @@ _default_origins = ",".join([
 _origins_env = os.getenv("ALLOWED_ORIGINS") or os.getenv("CORS_ORIGINS") or os.getenv("FRONTEND_ORIGIN") or _default_origins
 ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
 # Optional regex to match any photomark.cloud subdomain and scheme
-_origin_regex_env = os.getenv("ALLOWED_ORIGINS_REGEX") or os.getenv("CORS_ORIGIN_REGEX") or r"https?://([a-z0-9-]+\.)?photomark\.cloud(:\d+)?$"
+_origin_regex_env = os.getenv("ALLOWED_ORIGINS_REGEX") or os.getenv("CORS_ORIGIN_REGEX") or r".*"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
