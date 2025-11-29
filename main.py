@@ -144,7 +144,9 @@ async def custom_domain_routing(request: Request, call_next):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
-                        return RedirectResponse(url=url, status_code=307)
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(url)
+                            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
             finally:
                 try:
                     db.close()
@@ -333,6 +335,34 @@ async def allow_domain(request: Request):
     except Exception as _ex:
         logger.warning(f"allow-domain check failed: {_ex}")
     return {"allow": False}
+
+@app.get("/api/domains/validate")
+async def domains_validate(request: Request):
+    from fastapi.responses import PlainTextResponse
+    domain = (request.query_params.get("domain") or request.query_params.get("host") or "").strip().lower().rstrip(".")
+    if not domain:
+        return PlainTextResponse("no", status_code=403)
+    try:
+        from core.database import get_db
+        from sqlalchemy.orm import Session
+        from models.shop import Shop
+        db: Session = next(get_db())
+        try:
+            from sqlalchemy import cast, String
+            shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
+            if shop:
+                enabled = bool((shop.domain or {}).get('enabled') or False)
+                dns_verified = bool((shop.domain or {}).get('dnsVerified') or False)
+                if enabled or dns_verified:
+                    return PlainTextResponse("ok", status_code=200)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return PlainTextResponse("no", status_code=403)
 async def _check_domain(hostname: str):
     dns_verified = False
     cname_target = None
@@ -445,7 +475,7 @@ async def _init_postgres_schema():
     except Exception as _ex:
         logger.warning(f"init_db failed: {_ex}")
 @app.get("/")
-def root(request: Request):
+async def root(request: Request):
     try:
         host = _get_request_host(request)
         if host:
@@ -465,7 +495,9 @@ def root(request: Request):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
-                        return RedirectResponse(url)
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(url)
+                            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
             finally:
                 try:
                     db.close()
@@ -477,7 +509,7 @@ def root(request: Request):
 
 # Catch-all: redirect any unmatched path on a configured custom domain to the public shop
 @app.get("/{remaining_path:path}")
-def domain_redirect_any(request: Request, remaining_path: str):
+async def domain_redirect_any(request: Request, remaining_path: str):
     try:
         host = _get_request_host(request)
         if host:
@@ -495,7 +527,9 @@ def domain_redirect_any(request: Request, remaining_path: str):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
-                        return RedirectResponse(url)
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(url)
+                            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
             finally:
                 try:
                     db.close()
