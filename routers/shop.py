@@ -1361,6 +1361,7 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from models.shop import Shop
 from models.discounts import ShopDiscount
+import os
 
 def _dodo_base_url() -> str:
     base_in = (DODO_API_BASE or "").strip()
@@ -1374,6 +1375,21 @@ def _pick_headers() -> dict:
     # Use Authorization Bearer variant first; fall back variants exist in list
     variants = build_headers_list()
     return variants[0] if variants else {}
+
+def _adhoc_product_ids() -> list[str]:
+    ids: set[str] = set()
+    try:
+        base = (os.getenv("DODO_ADHOC_PRODUCT_ID") or "").strip()
+        if base:
+            ids.add(base)
+        for k, v in os.environ.items():
+            if k.startswith("DODO_ADHOC_PRODUCT_ID_"):
+                val = str(v or "").strip()
+                if val:
+                    ids.add(val)
+    except Exception:
+        pass
+    return sorted(list(ids))
 
 @router.get("/discounts")
 async def list_discounts(
@@ -1463,23 +1479,8 @@ async def create_discount(
     url = f"{base}/discounts"
     headers = _pick_headers()
 
-    # Collect product IDs for owner shops to restrict discount scope
-    restricted_ids: list[str] = []
-    try:
-        shops_q = db.query(Shop).filter(Shop.owner_uid == uid)
-        if slug:
-            shops_q = shops_q.filter(Shop.slug == slug)
-        shops = shops_q.all()
-        for s in shops:
-            for p in (s.products or []):
-                try:
-                    pid = str(p.get("id") or "").strip()
-                    if pid:
-                        restricted_ids.append(pid)
-                except Exception:
-                    continue
-    except Exception:
-        restricted_ids = []
+    # Restrict discount to Dodo ad-hoc product IDs used by shop checkout
+    restricted_ids: list[str] = _adhoc_product_ids()
 
     # Build Dodo payload
     body: dict = {
@@ -1494,8 +1495,9 @@ async def create_discount(
         body["expires_at"] = str(payload.expires_at).strip()
     if isinstance(payload.usage_limit, int) and payload.usage_limit > 0:
         body["usage_limit"] = payload.usage_limit
-    # Always restrict to owner shop product IDs (security)
-    body["restricted_to"] = [str(x) for x in (restricted_ids or [])]
+    # Restrict to Dodo ad-hoc product IDs only (security)
+    if restricted_ids:
+        body["restricted_to"] = [str(x) for x in restricted_ids]
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1507,12 +1509,15 @@ async def create_discount(
                     did = str(out.get("discount_id") or "").strip()
                     code = str(out.get("code") or "").strip() or None
                     name = str(out.get("name") or "").strip() or None
-                    shop_uid = None
                     in_slug = slug
+                    shop_uid = None
                     try:
-                        if not in_slug and shops:
-                            in_slug = shops[0].slug
-                        shop_uid = shops[0].uid if shops else None
+                        if in_slug:
+                            rec = db.query(Shop).filter(Shop.owner_uid == uid, Shop.slug == in_slug).first()
+                        else:
+                            rec = db.query(Shop).filter(Shop.owner_uid == uid).first()
+                        shop_uid = rec.uid if rec else None
+                        in_slug = in_slug or (rec.slug if rec else None)
                     except Exception:
                         pass
                     if did:
@@ -1560,23 +1565,8 @@ async def update_discount(
     url = f"{base}/discounts/{did}"
     headers = _pick_headers()
 
-    # Collect product IDs for owner shops to restrict discount scope
-    restricted_ids: list[str] = []
-    try:
-        shops_q = db.query(Shop).filter(Shop.owner_uid == uid)
-        if slug:
-            shops_q = shops_q.filter(Shop.slug == slug)
-        shops = shops_q.all()
-        for s in shops:
-            for p in (s.products or []):
-                try:
-                    pid = str(p.get("id") or "").strip()
-                    if pid:
-                        restricted_ids.append(pid)
-                except Exception:
-                    continue
-    except Exception:
-        restricted_ids = []
+    # Restrict discount to Dodo ad-hoc product IDs used by shop checkout
+    restricted_ids: list[str] = _adhoc_product_ids()
 
     body: dict = {}
     if isinstance(payload.amount_bp, int) and payload.amount_bp >= 0:
@@ -1590,8 +1580,9 @@ async def update_discount(
         body["expires_at"] = str(payload.expires_at).strip()
     if isinstance(payload.usage_limit, int) and payload.usage_limit >= 0:
         body["usage_limit"] = payload.usage_limit
-    # Always restrict to owner shop product IDs (security)
-    body["restricted_to"] = [str(x) for x in (restricted_ids or [])]
+    # Restrict to Dodo ad-hoc product IDs only (security)
+    if restricted_ids:
+        body["restricted_to"] = [str(x) for x in restricted_ids]
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1603,12 +1594,15 @@ async def update_discount(
                     did2 = str(out.get("discount_id") or did)
                     code = str(out.get("code") or "").strip() or None
                     name = str(out.get("name") or "").strip() or None
-                    shop_uid = None
                     in_slug = slug
+                    shop_uid = None
                     try:
-                        if not in_slug and shops:
-                            in_slug = shops[0].slug
-                        shop_uid = shops[0].uid if shops else None
+                        if in_slug:
+                            rec = db.query(Shop).filter(Shop.owner_uid == uid, Shop.slug == in_slug).first()
+                        else:
+                            rec = db.query(Shop).filter(Shop.owner_uid == uid).first()
+                        shop_uid = rec.uid if rec else None
+                        in_slug = in_slug or (rec.slug if rec else None)
                     except Exception:
                         pass
                     if did2:
