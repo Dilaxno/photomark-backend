@@ -114,11 +114,25 @@ def _get_request_host(request: Request) -> str:
 def _should_redirect_shop(shop) -> bool:
     try:
         dom = shop.domain or {}
-        enabled = bool(dom.get('enabled') or False)
-        dns_verified = bool(dom.get('dnsVerified') or False)
-        return enabled or dns_verified
+        hostname = (dom.get('hostname') or "").strip()
+        return bool(hostname)
     except Exception:
         return False
+
+def _find_shop_by_host(db, host: str):
+    try:
+        from models.shop import Shop
+        from sqlalchemy import cast, String, func
+        host_l = (host or "").strip().lower().rstrip(".")
+        q = db.query(Shop).filter(func.lower(cast(Shop.domain['hostname'], String)) == host_l)
+        shop = q.first()
+        if shop:
+            return shop
+        # Fallback: handle potential stored variations
+        q2 = db.query(Shop).filter(cast(Shop.domain['hostname'], String).like(f"%{host_l}%"))
+        return q2.first()
+    except Exception:
+        return None
 
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
@@ -137,8 +151,7 @@ async def custom_domain_routing(request: Request, call_next):
             from models.shop import Shop
             db: Session = next(get_db())
             try:
-                from sqlalchemy import cast, String
-                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
+                shop = _find_shop_by_host(db, host)
                 if shop:
                     if _should_redirect_shop(shop):
                         slug = (shop.slug or "").strip()
@@ -485,8 +498,7 @@ async def root(request: Request):
             from models.user import User
             db: Session = next(get_db())
             try:
-                from sqlalchemy import cast, String
-                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
+                shop = _find_shop_by_host(db, host)
                 if shop:
                     if _should_redirect_shop(shop):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
@@ -519,8 +531,7 @@ async def domain_redirect_any(request: Request, remaining_path: str):
             from models.user import User
             db: Session = next(get_db())
             try:
-                from sqlalchemy import cast, String
-                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == host).first()
+                shop = _find_shop_by_host(db, host)
                 if shop:
                     if _should_redirect_shop(shop):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
@@ -552,8 +563,7 @@ async def allow_domain_text(request: Request):
         from models.shop import Shop
         db: Session = next(get_db())
         try:
-            from sqlalchemy import cast, String
-            shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
+            shop = _find_shop_by_host(db, domain)
             if shop:
                 return PlainTextResponse("yes", status_code=200)
         finally:
@@ -577,8 +587,7 @@ async def resolve_domain_simple(hostname: str):
         from models.shop import Shop
         db: Session = next(get_db())
         try:
-            from sqlalchemy import cast, String
-            shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == inbound).first()
+            shop = _find_shop_by_host(db, inbound)
             if not shop:
                 raise HTTPException(status_code=404, detail="No shop bound to this domain")
             enabled = bool((shop.domain or {}).get('enabled') or False)
