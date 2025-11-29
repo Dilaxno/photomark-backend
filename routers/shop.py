@@ -260,16 +260,23 @@ async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
 async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
     """Get shop data by slug (for public viewing)"""
     try:
-        # Look up UID from slug mapping
-        slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == slug).first()
-        if not slug_mapping:
-            raise HTTPException(status_code=404, detail="Shop not found")
-        
-        # Get shop data
-        shop = db.query(Shop).filter(Shop.uid == slug_mapping.uid).first()
+        key = (slug or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="Invalid slug")
+
+        # Preferred: look up UID from slug mapping
+        slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == key).first()
+        shop = None
+        if slug_mapping:
+            shop = db.query(Shop).filter(Shop.uid == slug_mapping.uid).first()
+
+        # Fallback: query shops table by slug directly (for legacy/migration cases)
+        if not shop:
+            shop = db.query(Shop).filter(Shop.slug == key).first()
+
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
-        
+
         return shop.to_dict()
     except HTTPException:
         raise
