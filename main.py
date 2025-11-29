@@ -82,8 +82,18 @@ async def add_security_headers(request, call_next):
     try:
         response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
+
+        embed_ancestors = (os.getenv("EMBED_FRAME_ANCESTORS") or "https:").strip()
+        # If embedding is allowed, rely on CSP and relax X-Frame-Options
+        if embed_ancestors and embed_ancestors != "'none'":
+            try:
+                del response.headers["X-Frame-Options"]
+            except Exception:
+                pass
+        else:
+            response.headers.setdefault("X-Frame-Options", "DENY")
+
         csp = (
             "default-src 'self'; "
             "img-src 'self' data: blob: https:; "
@@ -91,9 +101,9 @@ async def add_security_headers(request, call_next):
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
             "font-src 'self' data: https:; "
             "connect-src 'self' https: http://localhost:5173 http://127.0.0.1:5173; "
-            "frame-ancestors 'none'"
+            f"frame-ancestors {embed_ancestors}"
         )
-        response.headers.setdefault("Content-Security-Policy", csp)
+        response.headers["Content-Security-Policy"] = csp
     except Exception:
         pass
     return response
