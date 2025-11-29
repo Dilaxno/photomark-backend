@@ -156,8 +156,10 @@ async def custom_domain_routing(request: Request, call_next):
                     if _should_redirect_shop(shop):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-                        local_url = f"/shop/{slug}" if slug else "/shop"
-                        return RedirectResponse(url=local_url, status_code=307)
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(url)
+                            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
             finally:
                 try:
                     db.close()
@@ -504,8 +506,10 @@ async def root(request: Request):
                         status = (user.subscription_status if user and user.subscription_status else (user.plan if user and user.plan else "inactive"))
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-                        local_url = f"/shop/{slug}" if slug else "/shop"
-                        return RedirectResponse(url=local_url, status_code=307)
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(url)
+                            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
             finally:
                 try:
                     db.close()
@@ -533,8 +537,10 @@ async def domain_redirect_any(request: Request, remaining_path: str):
                         user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-                        local_url = f"/shop/{slug}" if slug else "/shop"
-                        return RedirectResponse(url=local_url, status_code=307)
+                        url = f"{front}/shop/{slug}" if slug else f"{front}/shop"
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(url)
+                            return Response(content=r.text, media_type="text/html", status_code=r.status_code)
             finally:
                 try:
                     db.close()
