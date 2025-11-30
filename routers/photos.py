@@ -6,7 +6,7 @@ from datetime import datetime
 from io import BytesIO
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir, logger
-from core.auth import get_uid_from_request, resolve_workspace_uid
+from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
 from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
