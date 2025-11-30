@@ -16,6 +16,7 @@ from datetime import datetime
 import re
 import httpx
 from utils.storage import upload_bytes
+from utils.emailing import send_email_smtp
 
 router = APIRouter(prefix="/api/shop", tags=["shop"])
 
@@ -573,6 +574,96 @@ async def set_next_payout(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to set payout schedule: {str(e)}")
+
+@router.post('/payout/request')
+async def request_payout(
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    uid, _ = resolve_workspace_uid(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        shop = db.query(Shop).filter(Shop.uid == uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == uid).first()
+        if not shop:
+            raise HTTPException(status_code=404, detail="Shop not found")
+
+        dom = shop.domain or {}
+        payout = dom.get('payout') or {}
+        method = str((payout.get('method') or '')).strip().lower()
+        if method not in {'paypal','bank'}:
+            return JSONResponse({"error": "payout_method_not_set"}, status_code=400)
+
+        if method == 'paypal':
+            email = str(((payout.get('paypal') or {}).get('email') or '')).strip()
+            if not email:
+                return JSONResponse({"error": "payout_method_incomplete"}, status_code=400)
+        else:
+            bank = payout.get('bank') or {}
+            country = str((bank.get('country') or '')).strip()
+            fields = bank.get('fields') or {}
+            if not country or not isinstance(fields, dict) or len([k for k,v in fields.items() if str(v).strip()]) < 2:
+                return JSONResponse({"error": "payout_method_incomplete"}, status_code=400)
+
+        use_all = bool(payload.get('use_all'))
+        req_amount_cents = int(payload.get('amount_cents') or 0)
+        min_cents = 10000
+
+        total_available = int(
+            db.query(func.coalesce(func.sum(ShopSale.amount_cents), 0))
+              .filter(or_(ShopSale.owner_uid == uid, ShopSale.shop_uid == uid))
+              .filter(ShopSale.delivered == True)
+              .scalar()
+              or 0
+        )
+
+        amount_cents = total_available if use_all else req_amount_cents
+        if amount_cents < min_cents:
+            return JSONResponse({"error": "below_minimum"}, status_code=400)
+        if amount_cents > total_available:
+            amount_cents = total_available
+
+        owner_uid = shop.owner_uid
+        slug = shop.slug or ''
+        shop_name = shop.name or ''
+        cur = ''
+        last_sale = (
+            db.query(ShopSale)
+              .filter(or_(ShopSale.owner_uid == uid, ShopSale.shop_uid == uid))
+              .order_by(ShopSale.created_at.desc())
+              .first()
+        )
+        if last_sale and last_sale.currency:
+            cur = last_sale.currency
+
+        subject = f"Shop payout request: {shop_name or slug or owner_uid}"
+        html = (
+            f"<div>"
+            f"<p>Owner UID: {owner_uid}</p>"
+            f"<p>Shop UID: {shop.uid}</p>"
+            f"<p>Shop Slug: {slug}</p>"
+            f"<p>Shop Name: {shop_name}</p>"
+            f"<p>Requested Amount: {(amount_cents/100):.2f} {cur or 'USD'}</p>"
+            f"<p>Available Balance: {(total_available/100):.2f} {cur or 'USD'}</p>"
+            f"<p>Method: {method}</p>"
+            + (
+                f"<p>PayPal: {(payout.get('paypal') or {}).get('email')}</p>"
+                if method == 'paypal' else
+                f"<p>Bank Country: {(payout.get('bank') or {}).get('country')}</p>"
+                f"<p>Bank Fields: {', '.join([f'{k}={v}' for k,v in (payout.get('bank') or {}).get('fields', {}).items() if str(v).strip()])}</p>"
+            )
+            + "</div>"
+        )
+
+        send_email_smtp("hello@photomark.cloud", subject, html)
+        return {"ok": True, "amount_cents": amount_cents}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post('/slug')
