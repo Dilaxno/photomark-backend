@@ -207,3 +207,35 @@ async def collab_list(request: Request, db: Session = Depends(get_db)):
     except Exception as ex:
         logger.exception(f"collab_list failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/role/update")
+async def collab_role_update(
+    request: Request,
+    id: str = Body(..., embed=True),
+    role: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        new_role = (role or "").strip()
+        if new_role not in ALLOWED_ROLES:
+            return JSONResponse({"error": "Invalid role"}, status_code=400)
+        collab_id = (id or "").strip()
+        if not collab_id:
+            return JSONResponse({"error": "Missing collaborator id"}, status_code=400)
+        rec = db.query(Collaborator).filter(Collaborator.id == collab_id, Collaborator.owner_uid == uid).first()
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        rec.role = new_role
+        db.commit()
+        try:
+            db.refresh(rec)
+        except Exception:
+            pass
+        return {"ok": True, "item": rec.to_dict()}
+    except Exception as ex:
+        logger.exception(f"collab_role_update failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
