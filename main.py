@@ -20,7 +20,7 @@ warnings.filterwarnings(
 
 # Routers
 from routers import (
-    images, photos, auth, convert, vaults, voice, collab,
+    images, photos, auth, convert, vaults, voice,
     gallery_assistant, color_grading, admin, smart_resize,
     shop,
 )  # type: ignore
@@ -195,7 +195,6 @@ app.include_router(auth.router)
 app.include_router(convert.router)
 app.include_router(vaults.router)
 app.include_router(voice.router)
-app.include_router(collab.router)
 # Gallery assistant (chat + actions)
 app.include_router(gallery_assistant.router)
 # Color grading (LUT)

@@ -4,52 +4,29 @@ from PIL import Image
 import io
 import os
 import gc
-import torch
-import httpx
-from realesrgan import RealESRGAN
 from core.config import logger  # type: ignore
+
+try:
+    from transformers import pipeline as hf_pipeline  # type: ignore
+    HF_UPSCALER_AVAILABLE = True
+except Exception:
+    HF_UPSCALER_AVAILABLE = False
+    logger.warning("transformers pipeline not available for Swin2SR")
 
 router = APIRouter(prefix="/api/upscaler", tags=["upscaler"])
 
-_realesrgan = None
+_hf_upscaler = None
 
-def _weights_path() -> str:
-    base = os.path.expanduser(os.getenv("REAL_ESRGAN_HOME", "~/.realesrgan/weights"))
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(base, "RealESRGAN_x4plus.pth")
-
-async def _ensure_weights(path: str):
-    if os.path.isfile(path):
-        return
-    url = os.getenv("REAL_ESRGAN_WEIGHTS_URL", "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5/RealESRGAN_x4plus.pth")
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            with open(path, "wb") as f:
-                f.write(r.content)
-    except Exception as e:
-        logger.error(f"Failed to download RealESRGAN weights: {e}")
-        raise HTTPException(status_code=503, detail="Upscaler weights unavailable")
-
-async def _get_upscaler():
-    global _realesrgan
-    if _realesrgan is None:
-        path = _weights_path()
-        await _ensure_weights(path)
+def _get_upscaler():
+    global _hf_upscaler
+    if _hf_upscaler is None:
         try:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            model = RealESRGAN(device, scale=4)
-            model.load_weights(path)
-            _realesrgan = model
-            logger.info("RealESRGAN upscaler initialized")
+            _hf_upscaler = hf_pipeline("image-to-image", model="caidas/swin2SR-compressed-sr-x4-48", device=-1)
+            logger.info("Swin2SR upscaler pipeline loaded")
         except Exception as e:
-            logger.error(f"Failed to init RealESRGAN: {e}")
-            _realesrgan = None
-    return _realesrgan
+            logger.error(f"Failed to load Swin2SR pipeline: {e}")
+            _hf_upscaler = None
+    return _hf_upscaler
 
 def _resize_if_needed(img: Image.Image) -> Image.Image:
     try:
@@ -71,10 +48,10 @@ async def preview(image: UploadFile = File(...)):
         data = await image.read()
         inp = Image.open(io.BytesIO(data)).convert("RGB")
         inp = _resize_if_needed(inp)
-        model = await _get_upscaler()
-        if model is None:
+        pipe = _get_upscaler()
+        if pipe is None:
             raise HTTPException(status_code=503, detail="Upscaler model not available")
-        out = model.predict(inp)
+        out = pipe(inp)
         if not isinstance(out, Image.Image):
             raise HTTPException(status_code=500, detail="Upscaler did not return an image")
         buf = io.BytesIO()
@@ -105,10 +82,10 @@ async def download(image: UploadFile = File(...), output_format: str = Form("png
         data = await image.read()
         inp = Image.open(io.BytesIO(data)).convert("RGB")
         inp = _resize_if_needed(inp)
-        model = await _get_upscaler()
-        if model is None:
+        pipe = _get_upscaler()
+        if pipe is None:
             raise HTTPException(status_code=503, detail="Upscaler model not available")
-        out = model.predict(inp)
+        out = pipe(inp)
         if not isinstance(out, Image.Image):
             raise HTTPException(status_code=500, detail="Upscaler did not return an image")
         fmt = "PNG" if output_format.lower() == "png" else "JPEG"

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.database import Base, engine
 from models.shop import Shop, ShopSlug
-from models.user import User, CollaboratorAccess
+from models.user import User
 from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
 from models.pricing import PricingEvent, Subscription
 from models.replies import Reply
@@ -27,7 +27,6 @@ def init_database():
         print("  - shops")
         print("  - shop_slugs")
         print("  - users")
-        print("  - collaborator_access")
         print("  - affiliate_profiles")
         print("  - affiliate_attributions")
         print("  - affiliate_conversions")
