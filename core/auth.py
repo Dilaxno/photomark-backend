@@ -1,7 +1,7 @@
 import os
 from typing import Optional, Tuple
 from fastapi import Request
-from core.config import logger
+from core.config import logger, ADMIN_EMAILS
 from utils.storage import read_json_key
 
 def resolve_workspace_uid(request: Request) -> tuple[Optional[str], Optional[str]]:
@@ -103,3 +103,18 @@ def require_admin(request: Request, admin_emails: list[str]) -> Tuple[bool, str]
     except Exception as ex:
         logger.warning(f"require_admin failed: {ex}")
         return False, "error"
+
+
+def has_role_access(req_uid: Optional[str], eff_uid: Optional[str], action: str) -> bool:
+    try:
+        if not req_uid or not eff_uid:
+            return False
+        if req_uid == eff_uid:
+            return True
+        email = get_user_email_from_uid(req_uid) or ""
+        if email and (email in ADMIN_EMAILS):
+            return True
+        return False
+    except Exception as ex:
+        logger.warning(f"has_role_access failed: {ex}")
+        return False

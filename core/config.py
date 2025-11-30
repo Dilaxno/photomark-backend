@@ -90,17 +90,6 @@ GEOIP_LOOKUP_URL = os.getenv("GEOIP_LOOKUP_URL", "")
 ADMIN_ALLOWLIST_IPS = [ip.strip() for ip in (os.getenv("ADMIN_ALLOWLIST_IPS", "").split(",") if os.getenv("ADMIN_ALLOWLIST_IPS") else []) if ip.strip()]
 ADMIN_EMAILS = [e.strip().lower() for e in (os.getenv("ADMIN_EMAILS", "").split(",") if os.getenv("ADMIN_EMAILS") else []) if e.strip()]
 
-# Collaborator auth config
-COLLAB_JWT_SECRET = os.getenv("COLLAB_JWT_SECRET", "").strip()
-COLLAB_JWT_TTL_DAYS = int(os.getenv("COLLAB_JWT_TTL_DAYS", "30"))
-
-# Collaboration send limits and validation
-COLLAB_MAX_IMAGE_MB = int(os.getenv("COLLAB_MAX_IMAGE_MB", "25"))
-COLLAB_ALLOWED_EXTS = [e.strip().lower() for e in (os.getenv("COLLAB_ALLOWED_EXTS", ".jpg,.jpeg,.png,.webp,.heic,.tif,.tiff").split(",") if os.getenv("COLLAB_ALLOWED_EXTS") else [".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"]) if e.strip()]
-COLLAB_RATE_LIMIT_WINDOW_SEC = int(os.getenv("COLLAB_RATE_LIMIT_WINDOW_SEC", "3600"))
-COLLAB_RATE_LIMIT_MAX_ACTIONS = int(os.getenv("COLLAB_RATE_LIMIT_MAX_ACTIONS", "200"))  # actions ~ images sent
-COLLAB_MAX_RECIPIENTS = int(os.getenv("COLLAB_MAX_RECIPIENTS", "10"))
-
 # RapidAPI Camera DB
 RAPIDAPI_CAMERA_DB_KEY = os.getenv("RAPIDAPI_CAMERA_DB_KEY", "").strip()
 RAPIDAPI_CAMERA_DB_HOST = os.getenv("RAPIDAPI_CAMERA_DB_HOST", "camera-database.p.rapidapi.com").strip()

@@ -61,11 +61,6 @@ def init_db():
             if not chk.first():
                 conn.execute(text("ALTER TABLE public.shops ADD COLUMN IF NOT EXISTS domain JSONB NOT NULL DEFAULT '{}'::jsonb"))
 
-            # Ensure collaborator_access.password_plain exists
-            chk2 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='collaborator_access' AND column_name='password_plain'"))
-            if not chk2.first():
-                conn.execute(text("ALTER TABLE public.collaborator_access ADD COLUMN IF NOT EXISTS password_plain TEXT"))
-
             # Ensure customer enrichment columns exist on shop_sales
             chk3 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shop_sales' AND column_name='customer_name'"))
             if not chk3.first():
