@@ -60,6 +60,9 @@ class RetouchRequestPayload(BaseModel):
 # Local static dir used when s3 is not configured
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
 
+# Special vault name for grouping photos sent by friends/partners (safe identifier)
+FRIENDS_VAULT_SAFE = "Photos_sent_by_friends"
+
 
 def _share_key(token: str) -> str:
     return f"shares/{token}.json"
