@@ -15,6 +15,7 @@ from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateC
 from models.pricing import PricingEvent, Subscription
 from models.replies import Reply
 from models.prelaunch import PrelaunchSignup
+from models.collaborator import Collaborator
 
 def init_database():
     """Create all tables in the database"""
@@ -34,6 +35,7 @@ def init_database():
         print("  - subscriptions")
         print("  - replies")
         print("  - prelaunch_signups")
+        print("  - collaborators")
         
     except Exception as e:
         print(f"✗ Error creating tables: {e}")

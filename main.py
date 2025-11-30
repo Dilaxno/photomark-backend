@@ -340,6 +340,13 @@ try:
 except Exception as _ex:
     logger.warning(f"billing router not available: {_ex}")
 
+# Collaboration endpoints (owner-managed collaborators)
+try:
+    from routers import collab  # noqa: E402
+    app.include_router(collab.router)
+except Exception as _ex:
+    logger.warning(f"collab router not available: {_ex}")
+
 
 
 @app.get("/api/allow-domain")
