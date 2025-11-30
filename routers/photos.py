@@ -6,7 +6,7 @@ from datetime import datetime
 from io import BytesIO
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir, logger
-from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
+from core.auth import get_uid_from_request, resolve_workspace_uid
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
 from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
@@ -98,9 +98,7 @@ async def api_embed_refresh(request: Request):
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    # Gallery/manifests are considered 'gallery' area
-    if not has_role_access(req_uid, eff_uid, 'gallery'):
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    
     uid = eff_uid
     manifest = _build_manifest(uid)
     key = f"users/{uid}/embed/latest.json"
@@ -126,8 +124,7 @@ async def api_embed_myuploads_refresh(request: Request):
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if not has_role_access(req_uid, eff_uid, 'gallery'):
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    
     uid = eff_uid
 
     # Build simple external manifest (urls + names)

@@ -31,7 +31,7 @@ SELECT
     stripe_customer_id,
     subscription_status
 FROM users
-WHERE plan IN ('pro', 'business', 'enterprise', 'agencies', 'collaborator')
+WHERE plan IN ('pro', 'business', 'enterprise', 'agencies')
 ORDER BY created_at DESC;
 
 -- 4. Find user by email

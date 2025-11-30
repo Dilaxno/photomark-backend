@@ -82,7 +82,7 @@ ORDER BY l.pid;
 -- ANALYZE users;
 -- ANALYZE shops;
 -- ANALYZE shop_slugs;
--- ANALYZE collaborator_access;
+-- ANALYZE users;
 
 -- 9. Vacuum tables (reclaim space)
 -- VACUUM ANALYZE users;

@@ -26,17 +26,7 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
     # Gather name/email from client or Firebase Auth (best-effort)
     name_client = str(((payload or {}).get("name") if payload else "") or "").strip()
     email_client = str(((payload or {}).get("email") if payload else "") or "").strip()
-    # Optional collaborator signup flag from client; only used to set default plan on first create,
-    # or to upgrade an existing 'free' doc to 'collaborator' immediately after signup.
     collab_signup = False
-    try:
-        if payload:
-            flag = payload.get("collaborator_signup")
-            role = str(payload.get("role") or "").strip().lower()
-            plan_wanted = str(payload.get("plan") or "").strip().lower()
-            collab_signup = bool(flag) or role == "collaborator" or plan_wanted == "collaborator"
-    except Exception:
-        collab_signup = False
 
     name_auth = ""
     email_auth = ""
@@ -78,16 +68,14 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
             user.last_login_at = now
             user.updated_at = now
             
-            # If collaborator signup and current plan is free, upgrade to collaborator
-            if collab_signup and user.plan == "free":
-                user.plan = "collaborator"
+            
         else:
             # Create new user
             user = User(
                 uid=uid,
                 email=email or f"{uid}@temp.invalid",  # Fallback for missing email
                 display_name=name,
-                plan="collaborator" if collab_signup else "free",
+                plan="free",
                 created_at=now,
                 updated_at=now,
                 last_login_at=now,
@@ -122,8 +110,7 @@ async def get_entitlement(request: Request, db: Session = Depends(get_db)):
         if not user:
             return {"isPaid": False, "plan": "free"}
         
-        # Determine if paid based on plan
-        paid_plans = ["pro", "business", "enterprise", "agencies", "collaborator"]
+        paid_plans = ["pro", "business", "enterprise", "agencies"]
         is_paid = user.plan in paid_plans
         
         return {"isPaid": is_paid, "plan": user.plan}

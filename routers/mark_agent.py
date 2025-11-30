@@ -37,7 +37,7 @@ AGENT_FUNCTIONS = [
                     "page": {
                         "type": "string",
                         "enum": ["gallery", "settings", "billing", "software", "retouch", "style-transfer", 
-                                "smart-resize", "background-removal", "convert", "collaboration", "shop", 
+                                "smart-resize", "background-removal", "convert", "shop", 
                                 "color-grading", "home"],
                         "description": "The page to navigate to"
                     }

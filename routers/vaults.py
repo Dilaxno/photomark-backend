@@ -31,8 +31,7 @@ router = APIRouter(prefix="/api", tags=["vaults"])
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
     return get_presigned_url(key, expires_in=expires_in) or ""
 
-# Special vault machine name used historically for collaborator uploads
-FRIENDS_VAULT_SAFE = "Photos_sent_by_friends" 
+
 
 class CheckoutPayload(BaseModel):
     token: str
@@ -1017,7 +1016,7 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
         eff_limit = None
         if isinstance(limit, int) and limit > 0:
             eff_limit = max(1, min(limit, 1000))
-        # Hide collaborator-sent items from 'Photos sent by friends' vault
+        
         try:
             if vault == FRIENDS_VAULT_SAFE:
                 keys = [k for k in keys if ('/partners/' not in k and '-fromfriend' not in os.path.basename(k))]

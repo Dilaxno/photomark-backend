@@ -4,59 +4,12 @@ from fastapi import Request
 from core.config import logger
 from utils.storage import read_json_key
 
-# Collaboration helpers
-ALLOWED_ROLES = {"admin", "retoucher", "gallery_manager"}
-
-
-def _owner_ptr_key(member_uid: str) -> str:
-    return f"users/{member_uid}/collab/owner.json"
-
-
-def get_owner_uid_for(member_uid: str) -> Optional[str]:
-    try:
-        ptr = read_json_key(_owner_ptr_key(member_uid)) or {}
-        owner = ptr.get("owner_uid")
-        if isinstance(owner, str) and owner:
-            return owner
-    except Exception as ex:
-        logger.warning(f"get_owner_uid_for failed: {ex}")
-    return None
-
-
 def resolve_workspace_uid(request: Request) -> tuple[Optional[str], Optional[str]]:
-    """Return (effective_uid, requester_uid). If the requester is a collaborator,
-    switch to the owner's workspace; otherwise use requester's own uid."""
     req_uid = get_uid_from_request(request)
     if not req_uid:
         return None, None
-    owner = get_owner_uid_for(req_uid)
-    return (owner or req_uid), req_uid
+    return req_uid, req_uid
 
-
-def has_role_access(requester_uid: str, owner_uid: str, area: str) -> bool:
-    """area: 'retouch' | 'convert' | 'gallery' | 'all'"""
-    # Owner always has full access
-    if requester_uid == owner_uid:
-        return True
-    # Load team of owner and check member role
-    team = read_json_key(f"users/{owner_uid}/collab/team.json") or {}
-    members = team.get("members", []) or []
-    role = None
-    # Prefer uid match, fallback email
-    req_email = get_user_email_from_uid(requester_uid) or ""
-    for m in members:
-        if m.get("uid") == requester_uid or (req_email and (m.get("email") or "").lower() == req_email):
-            role = (m.get("role") or "").lower()
-            break
-    if not role:
-        return False
-    if role == "admin":
-        return True
-    if area in ("retouch", "convert") and role == "retoucher":
-        return True
-    if area == "gallery" and role == "gallery_manager":
-        return True
-    return False
 
 firebase_enabled = False
 try:
@@ -89,18 +42,8 @@ except Exception as ex:
     fb_fs = None  # type: ignore
 
 
-# Firestore client helper removed after Neon migration.
 
 
-def _parse_collab_uid(uid: str):
-    """Return (owner_uid, email) if uid is a synthetic collaborator uid, else (None, None)."""
-    try:
-        if uid and uid.startswith("collab:"):
-            _, owner_uid, email = uid.split(":", 2)
-            return owner_uid, email
-    except Exception:
-        pass
-    return None, None
 
 
 def get_uid_from_request(request: Request) -> Optional[str]:
@@ -110,18 +53,7 @@ def get_uid_from_request(request: Request) -> Optional[str]:
     token = auth_header.split(" ", 1)[1].strip()
     if not token:
         return None
-    # Try collaborator JWT first (HS256)
-    try:
-        from core.config import COLLAB_JWT_SECRET
-        import jwt  # type: ignore
-        if COLLAB_JWT_SECRET:
-            decoded = jwt.decode(token, COLLAB_JWT_SECRET, algorithms=["HS256"])  # raises on invalid
-            if decoded.get("kind") == "collab" and isinstance(decoded.get("sub"), str):
-                return decoded.get("sub")
-    except Exception:
-        # Not a valid collaborator token; fall through to Firebase
-        pass
-    # Firebase token
+    
     if not firebase_enabled or not fb_auth:
         return None
     try:
@@ -133,10 +65,6 @@ def get_uid_from_request(request: Request) -> Optional[str]:
 
 
 def get_user_email_from_uid(uid: str) -> Optional[str]:
-    # Collaborator synthetic uid support
-    owner_uid, email = _parse_collab_uid(uid)
-    if email:
-        return email.lower()
     try:
         if not firebase_enabled or not fb_auth:
             return None
