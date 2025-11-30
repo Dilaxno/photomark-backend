@@ -71,6 +71,11 @@ def init_db():
             chk5 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='shop_sales' AND column_name='customer_country'"))
             if not chk5.first():
                 conn.execute(text("ALTER TABLE public.shop_sales ADD COLUMN IF NOT EXISTS customer_country VARCHAR(64)"))
+
+            # Ensure collaborators.name column exists (idempotent)
+            chk6 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='collaborators' AND column_name='name'"))
+            if not chk6.first():
+                conn.execute(text("ALTER TABLE public.collaborators ADD COLUMN IF NOT EXISTS name VARCHAR(255)"))
     except Exception:
         # Swallow to avoid startup crash in constrained envs; logs handled by callers
         pass
