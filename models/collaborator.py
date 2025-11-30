@@ -12,7 +12,7 @@ class Collaborator(Base):
     name = Column(String(255), nullable=True)
     role = Column(String(64), nullable=False)
     password_hash = Column(String(255), nullable=False)
-    active = Column(Boolean, default=True)
+    active = Column('is_active', Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
