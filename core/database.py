@@ -76,6 +76,11 @@ def init_db():
             chk6 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='collaborators' AND column_name='name'"))
             if not chk6.first():
                 conn.execute(text("ALTER TABLE public.collaborators ADD COLUMN IF NOT EXISTS name VARCHAR(255)"))
+
+            # Ensure collaborators.last_login_at column exists (idempotent)
+            chk7 = conn.execute(text("SELECT 1 FROM information_schema.columns WHERE table_name='collaborators' AND column_name='last_login_at'"))
+            if not chk7.first():
+                conn.execute(text("ALTER TABLE public.collaborators ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ"))
     except Exception:
         # Swallow to avoid startup crash in constrained envs; logs handled by callers
         pass
