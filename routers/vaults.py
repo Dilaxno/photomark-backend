@@ -1340,6 +1340,14 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         rec['download_permission'] = perm_raw
     except Exception:
         rec['download_permission'] = 'none'
+    # Optional client role for share link
+    try:
+        role_raw = str((payload or {}).get('client_role') or '').strip().lower()
+        if role_raw not in ('viewer', 'editor', 'owner'):
+            role_raw = 'viewer'
+        rec['client_role'] = role_raw
+    except Exception:
+        rec['client_role'] = 'viewer'
     # Optional: password to unlock removal of invisible watermark (unmarked originals access)
     try:
         remove_pw = str((payload or {}).get('remove_password') or '').strip()
@@ -1622,6 +1630,14 @@ async def vaults_share_link(request: Request, payload: dict = Body(...)):
         rec['download_permission'] = perm_raw
     except Exception:
         rec['download_permission'] = 'none'
+    # Optional client role for public share link (defaults to viewer)
+    try:
+        role_raw = str((payload or {}).get('client_role') or '').strip().lower()
+        if role_raw not in ('viewer', 'editor', 'owner'):
+            role_raw = 'viewer'
+        rec['client_role'] = role_raw
+    except Exception:
+        rec['client_role'] = 'viewer'
     _write_json_key(_share_key(token), rec)
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
@@ -2114,7 +2130,13 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
         share['permission'] = str((rec or {}).get('download_permission') or 'none')
     except Exception:
         share['permission'] = 'none'
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission']}
+    # Include client role in response
+    try:
+        role = str((rec or {}).get('client_role') or 'viewer')
+    except Exception:
+        role = 'viewer'
+    share['client_role'] = role
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
@@ -2175,6 +2197,10 @@ async def vaults_shared_approve(payload: ApprovalPayload):
     client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
+    # Enforce client role permissions: only editor/owner may approve/deny
+    role = str((rec or {}).get('client_role') or 'viewer').lower()
+    if role not in ('editor', 'owner'):
+        return JSONResponse({"error": "action not permitted for your role"}, status_code=403)
 
     # Validate photo belongs to this uid and vault
     try:
@@ -2248,6 +2274,10 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
     client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
+    # Enforce client role permissions: only editor/owner may request retouch
+    role = str((rec or {}).get('client_role') or 'viewer').lower()
+    if role not in ('editor', 'owner'):
+        return JSONResponse({"error": "action not permitted for your role"}, status_code=403)
 
     # Validate photo belongs to this uid and vault
     try:
