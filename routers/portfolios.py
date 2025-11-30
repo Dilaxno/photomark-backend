@@ -8,6 +8,7 @@ from core.config import logger
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.storage import write_json_key, read_json_key, upload_bytes, get_presigned_url
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from core.database import get_db
 from models.user import User
 
@@ -31,17 +32,114 @@ def _normalize_owner_slug(user: User) -> str:
   return slug_from_name or local_safe or user.uid
 
 
+# Neon PostgreSQL helpers
+
+def _pg_ensure_table(db: Session):
+  db.execute(text(
+    """
+    CREATE TABLE IF NOT EXISTS portfolio_items (
+      id VARCHAR(64) PRIMARY KEY,
+      uid VARCHAR(64) NOT NULL,
+      key TEXT,
+      image_url TEXT,
+      title TEXT,
+      description TEXT,
+      taken_at DATE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_portfolio_items_uid ON portfolio_items(uid);
+    """
+  ))
+  db.commit()
+
+def _pg_list_items(db: Session, uid: str) -> List[dict]:
+  _pg_ensure_table(db)
+  rows = db.execute(text("SELECT id, key, image_url, title, description, taken_at FROM portfolio_items WHERE uid = :uid ORDER BY created_at DESC"), {"uid": uid}).mappings().all()
+  out: List[dict] = []
+  for r in rows:
+    out.append({
+      "id": r.get("id"),
+      "key": r.get("key"),
+      "imageUrl": r.get("image_url"),
+      "title": r.get("title") or "",
+      "description": r.get("description") or "",
+      "takenAt": r.get("taken_at").isoformat() if r.get("taken_at") else None,
+    })
+  return out
+
+def _pg_upsert_item(db: Session, uid: str, item: dict):
+  _pg_ensure_table(db)
+  db.execute(text(
+    """
+    INSERT INTO portfolio_items (id, uid, key, image_url, title, description, taken_at)
+    VALUES (:id, :uid, :key, :image_url, :title, :description, :taken_at)
+    ON CONFLICT (id) DO UPDATE SET
+      key = EXCLUDED.key,
+      image_url = EXCLUDED.image_url,
+      title = EXCLUDED.title,
+      description = EXCLUDED.description,
+      taken_at = EXCLUDED.taken_at,
+      updated_at = NOW();
+    """
+  ), {
+    "id": item.get("id"),
+    "uid": uid,
+    "key": item.get("key"),
+    "image_url": item.get("imageUrl"),
+    "title": item.get("title") or "",
+    "description": item.get("description") or "",
+    "taken_at": item.get("takenAt") or item.get("taken_at") or None,
+  })
+  db.commit()
+
+def _pg_update_item_fields(db: Session, uid: str, pid: str, fields: dict) -> bool:
+  _pg_ensure_table(db)
+  res = db.execute(text(
+    """
+    UPDATE portfolio_items
+    SET title = COALESCE(:title, title),
+        description = COALESCE(:description, description),
+        taken_at = COALESCE(:taken_at, taken_at),
+        updated_at = NOW()
+    WHERE id = :id AND uid = :uid
+    """
+  ), {
+    "id": pid,
+    "uid": uid,
+    "title": fields.get("title"),
+    "description": fields.get("description"),
+    "taken_at": fields.get("takenAt") or fields.get("taken_at"),
+  })
+  db.commit()
+  return res.rowcount > 0
+
+def _pg_delete_item(db: Session, uid: str, pid: str) -> bool:
+  _pg_ensure_table(db)
+  res = db.execute(text("DELETE FROM portfolio_items WHERE id = :id AND uid = :uid"), {"id": pid, "uid": uid})
+  db.commit()
+  return res.rowcount > 0
+
+
 @router.get("/portfolio")
-async def get_portfolio(request: Request):
+async def get_portfolio(request: Request, db: Session = Depends(get_db)):
   uid = get_uid_from_request(request)
   if not uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
-  items = read_json_key(_items_key(uid)) or {}
-  arr: List[dict] = list(items.get("items") or [])
+  arr: List[dict] = _pg_list_items(db, uid)
+  if not arr:
+    items = read_json_key(_items_key(uid)) or {}
+    arr = list(items.get("items") or [])
+    for it in arr:
+      try:
+        _pg_upsert_item(db, uid, it)
+      except Exception:
+        pass
   out: List[dict] = []
   for it in arr:
     k = str(it.get("key") or "").strip()
     url = str(it.get("imageUrl") or "").strip()
+    taken = it.get("takenAt") or it.get("taken_at") or None
     if k:
       try:
         fresher = get_presigned_url(k, expires_in=60 * 60)
@@ -54,13 +152,14 @@ async def get_portfolio(request: Request):
       "imageUrl": url,
       "title": it.get("title") or "",
       "description": it.get("description") or "",
+      "takenAt": taken,
       "key": k if k else None,
     })
   return {"items": out}
 
 
 @router.post("/portfolio/item")
-async def create_item(request: Request, file: UploadFile = File(...), title: str = Form(""), description: str = Form("")):
+async def create_item(request: Request, file: UploadFile = File(...), title: str = Form(""), description: str = Form(""), db: Session = Depends(get_db)):
   uid = get_uid_from_request(request)
   if not uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -75,11 +174,15 @@ async def create_item(request: Request, file: UploadFile = File(...), title: str
     url = upload_bytes(key, raw, content_type={
       '.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp','.heic':'image/heic','.tif':'image/tiff','.tiff':'image/tiff'
     }.get(ext, 'application/octet-stream'))
-    rec = {"id": pid, "key": key, "imageUrl": url, "title": title or '', "description": description or ''}
+    rec = {"id": pid, "key": key, "imageUrl": url, "title": title or '', "description": description or '', "takenAt": None}
     doc = read_json_key(_items_key(uid)) or {}
     arr: List[dict] = list(doc.get('items') or [])
     arr.insert(0, rec)
     write_json_key(_items_key(uid), {"items": arr})
+    try:
+      _pg_upsert_item(db, uid, rec)
+    except Exception:
+      pass
     return {"item": rec}
   except Exception as ex:
     logger.warning(f"portfolio create_item failed: {ex}")
@@ -87,10 +190,17 @@ async def create_item(request: Request, file: UploadFile = File(...), title: str
 
 
 @router.put("/portfolio/item/{pid}")
-async def update_item(request: Request, pid: str, payload: dict):
+async def update_item(request: Request, pid: str, payload: dict, db: Session = Depends(get_db)):
   uid = get_uid_from_request(request)
   if not uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  # Try Neon first
+  try:
+    ok = _pg_update_item_fields(db, uid, pid, payload)
+    if ok:
+      return {"ok": True}
+  except Exception:
+    pass
   doc = read_json_key(_items_key(uid)) or {}
   arr: List[dict] = list(doc.get('items') or [])
   changed = False
@@ -100,7 +210,14 @@ async def update_item(request: Request, pid: str, payload: dict):
         it['title'] = str(payload.get('title') or '')
       if 'description' in payload:
         it['description'] = str(payload.get('description') or '')
+      if 'takenAt' in payload or 'taken_at' in payload:
+        val = payload.get('takenAt') if 'takenAt' in payload else payload.get('taken_at')
+        it['takenAt'] = str(val or '')
       changed = True
+      try:
+        _pg_upsert_item(db, uid, it)
+      except Exception:
+        pass
       break
   if not changed:
     return JSONResponse({"error": "not found"}, status_code=404)
@@ -112,10 +229,14 @@ async def update_item(request: Request, pid: str, payload: dict):
 
 
 @router.delete("/portfolio/item/{pid}")
-async def delete_item(request: Request, pid: str):
+async def delete_item(request: Request, pid: str, db: Session = Depends(get_db)):
   uid = get_uid_from_request(request)
   if not uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  try:
+    _pg_delete_item(db, uid, pid)
+  except Exception:
+    pass
   doc = read_json_key(_items_key(uid)) or {}
   arr: List[dict] = list(doc.get('items') or [])
   next_arr = [it for it in arr if str(it.get('id') or '') != pid]
@@ -152,12 +273,15 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
           break
     if not target_uid:
       return JSONResponse({"error": "not found"}, status_code=404)
-    doc = read_json_key(_items_key(target_uid)) or {}
-    arr: List[dict] = list(doc.get('items') or [])
+    arr: List[dict] = _pg_list_items(db, target_uid)
+    if not arr:
+      doc = read_json_key(_items_key(target_uid)) or {}
+      arr = list(doc.get('items') or [])
     out: List[dict] = []
     for it in arr:
       k = str(it.get("key") or "").strip()
       url = str(it.get("imageUrl") or "").strip()
+      taken = it.get("takenAt") or it.get("taken_at") or None
       if k:
         try:
           fresher = get_presigned_url(k, expires_in=60 * 60)
@@ -170,6 +294,7 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
         "imageUrl": url,
         "title": it.get("title") or "",
         "description": it.get("description") or "",
+        "takenAt": taken,
       })
     return {"items": out}
   except Exception as ex:
@@ -178,7 +303,7 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
 
 
 @router.post("/portfolio/items/by_keys")
-async def add_items_by_keys(request: Request, payload: dict):
+async def add_items_by_keys(request: Request, payload: dict, db: Session = Depends(get_db)):
   uid = get_uid_from_request(request)
   if not uid:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -197,8 +322,12 @@ async def add_items_by_keys(request: Request, payload: dict):
         pid = uuid.uuid4().hex[:12]
         url = get_presigned_url(ks, expires_in=60 * 60) or f"/static/{ks}"
         title = os.path.basename(ks)
-        rec = {"id": pid, "key": ks, "imageUrl": url, "title": title, "description": ""}
+        rec = {"id": pid, "key": ks, "imageUrl": url, "title": title, "description": "", "takenAt": None}
         arr.insert(0, rec)
+        try:
+          _pg_upsert_item(db, uid, rec)
+        except Exception:
+          pass
         added += 1
       except Exception:
         continue
