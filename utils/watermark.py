@@ -164,7 +164,8 @@ def add_text_watermark(
     overlay = Image.new("RGBA", base_pil.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
 
-    base_size = max(18, int(min(width, height) * float(base_size_rel if base_size_rel is not None else 0.05)))
+    rel = 0.05
+    base_size = max(18, int(min(width, height) * rel))
     font = None
     font_candidates = [
         os.getenv("WATERMARK_TTF"),
