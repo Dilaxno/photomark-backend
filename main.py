@@ -219,6 +219,13 @@ if relight is not None:
 if hdr_merge is not None:
     app.include_router(hdr_merge.router)
 
+# Image upscaler router
+try:
+    from routers import upscaler  # noqa: E402
+    app.include_router(upscaler.router)
+except Exception as _ex:
+    logger.warning(f"upscaler router not available: {_ex}")
+
 # app.include_router(pricing_checkout.router)  # removed
 # embed iframe endpoints
 from routers import embed  # noqa: E402
