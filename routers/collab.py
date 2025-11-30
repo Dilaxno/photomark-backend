@@ -9,6 +9,7 @@ from core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: i
 from core.config import logger
 from core.database import get_db
 from models.collaborator import Collaborator
+from models.user import User
 from utils.emailing import render_email, send_email_smtp
 
 import bcrypt
@@ -122,6 +123,34 @@ async def collab_login(
         rec.last_login_at = datetime.utcnow()
         db.commit()
 
+        try:
+            owner = db.query(User).filter(User.uid == rec.owner_uid).first()
+            if owner and owner.email:
+                app_name = os.getenv("APP_NAME", "Photomark")
+                front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                subject = f"Collaborator connected to your {app_name} account"
+                intro = (
+                    f"A collaborator has signed in to your account.<br><br>"
+                    f"Name: <b>{rec.name or rec.email}</b><br>"
+                    f"Email: <b>{rec.email}</b><br>"
+                    f"Role: <b>{rec.role}</b><br>"
+                    f"Time: <b>{rec.last_login_at}</b><br><br>"
+                    f"Manage collaborators from the Collaboration page."
+                )
+                html = render_email(
+                    "email_basic.html",
+                    title="Collaborator Connected",
+                    intro=intro,
+                    button_label="Open Collaboration",
+                    button_url=f"{front}/collaboration",
+                )
+                try:
+                    send_email_smtp(owner.email, subject, html)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         token: Optional[str] = None
         if COLLAB_JWT_SECRET:
             payload = {
@@ -149,4 +178,32 @@ async def collab_login(
         return {"ok": True, "collab_token": token, "firebase_custom_token": custom_jwt, "role": rec.role, "owner_uid": rec.owner_uid}
     except Exception as ex:
         logger.exception(f"collab_login failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.get("/list")
+async def collab_list(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        rows = db.query(Collaborator).filter(Collaborator.owner_uid == uid).order_by(Collaborator.updated_at.desc()).limit(200).all()
+        items = []
+        for r in rows:
+            try:
+                items.append({
+                    "id": r.id,
+                    "email": r.email,
+                    "name": r.name,
+                    "role": r.role,
+                    "active": bool(r.active),
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                    "last_login_at": r.last_login_at.isoformat() if r.last_login_at else None,
+                })
+            except Exception:
+                continue
+        return {"ok": True, "items": items}
+    except Exception as ex:
+        logger.exception(f"collab_list failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
