@@ -26,17 +26,17 @@ try:
 except ImportError:
     from utils.storage import read_json_key
 
-# rembg import for background removal
+# Hugging Face RMBG pipeline
 try:
-    from rembg import remove, new_session
-    BG_REMOVER_AVAILABLE = True
-except ImportError:
-    BG_REMOVER_AVAILABLE = False
-    logger.warning("rembg not available")
+    from transformers import pipeline as hf_pipeline  # type: ignore
+    HF_RMBG_AVAILABLE = True
+except Exception:
+    HF_RMBG_AVAILABLE = False
+    logger.warning("transformers pipeline not available for RMBG-1.4")
 
 # Global state
 _sam_predictor = None
-_rembg_session = None
+_hf_rmbg = None
 
 # Create router
 router = APIRouter(prefix="/api/background-removal", tags=["background-removal"])
@@ -76,19 +76,16 @@ def _get_mobile_sam_predictor():
             return None
     return _sam_predictor
 
-def _get_bg_remover():
-    """Get or create rembg session"""
-    global _rembg_session
-    if _rembg_session is None:
+def _get_hf_rmbg():
+    global _hf_rmbg
+    if _hf_rmbg is None:
         try:
-            # Initialize rembg session with u2net model (default)
-            # Use 'u2net' for better quality or 'u2netp' for faster processing
-            _rembg_session = new_session('u2net')
-            logger.info(f"Rembg session loaded successfully with u2net model")
+            _hf_rmbg = hf_pipeline("image-segmentation", model="briaai/RMBG-1.4", trust_remote_code=True)
+            logger.info("RMBG-1.4 pipeline loaded")
         except Exception as e:
-            logger.error(f"Failed to load rembg session: {e}")
-            _rembg_session = None
-    return _rembg_session
+            logger.error(f"Failed to load RMBG-1.4 pipeline: {e}")
+            _hf_rmbg = None
+    return _hf_rmbg
 
 def _billing_uid_from_request(request: Request) -> str:
     eff_uid, _ = resolve_workspace_uid(request)
@@ -154,30 +151,20 @@ async def step1_rembg_cutout(
     Returns: Original image, mask, and preview with transparent background
     """
     try:
-        # Read image
         img_bytes = await image.read()
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        
-        # Apply background removal
-        session = _get_bg_remover()
-        if session is None:
+        pipe = _get_hf_rmbg()
+        if pipe is None:
             raise HTTPException(status_code=503, detail="Background removal model not available")
-        
-        # Process image with rembg (returns RGBA with transparent background)
-        output = remove(img, session=session)
-        
-        # Extract mask from alpha channel
-        if output.mode == "RGBA":
-            mask = np.array(output.split()[-1])
-        else:
-            # Fallback if no alpha
-            mask = np.ones((output.height, output.width), dtype=np.uint8) * 255
-        
-        # Create mask image
-        mask_img = Image.fromarray(mask, mode="L")
-        
-        # Create preview (image with transparent background)
-        preview = output.convert("RGBA")
+        mask_img = pipe(img, return_mask=True)
+        if not isinstance(mask_img, Image.Image):
+            raise HTTPException(status_code=500, detail="RMBG pipeline did not return a mask")
+        if mask_img.size != img.size:
+            mask_img = mask_img.resize(img.size, Image.LANCZOS)
+        preview = pipe(img)
+        if not isinstance(preview, Image.Image):
+            raise HTTPException(status_code=500, detail="RMBG pipeline did not return an image")
+        preview = preview.convert("RGBA")
         
         # Convert to base64 for JSON response
         original_b64 = _image_to_base64(img, "JPEG")

@@ -29,6 +29,10 @@ rembg[cpu]
 HDRutils
 imgdiet
 
+# RMBG-1.4 pipeline deps
+-r https://huggingface.co/briaai/RMBG-1.4/resolve/main/requirements.txt
+transformers>=4.39.1
+
 # LUT generation
 PyLUT==1.4.9
 
