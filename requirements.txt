@@ -54,3 +54,4 @@ google-generativeai==0.8.3
 
 wand>=0.6.11
 imageio==2.36.0
+realesrgan
