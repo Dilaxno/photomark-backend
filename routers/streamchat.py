@@ -87,7 +87,7 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
 
 
 @router.post("/group/create")
-async def group_create(request: Request, guid: str = Body(..., embed=True), name: str = Body("Collab Chat", embed=True), members: list[str] = Body(default=[])):
+async def group_create(request: Request, guid: str = Body(..., embed=True), name: str = Body("Collab Chat", embed=True), members: list[str] = Body(default=[]), topic: str = Body("", embed=True)):
     owner_uid = get_uid_from_request(request)
     if not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -98,7 +98,7 @@ async def group_create(request: Request, guid: str = Body(..., embed=True), name
             create_body = {
                 "type": "messaging",
                 "id": guid,
-                "data": {"name": name},
+                "data": {"name": name, **({"topic": topic} if topic else {})},
                 "created_by_id": owner_uid,
             }
             r = await client.post(f"{BASE_URL}/channels", headers=_headers(), params={"api_key": API_KEY}, json=create_body)
