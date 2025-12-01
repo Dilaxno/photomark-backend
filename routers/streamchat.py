@@ -1,4 +1,7 @@
 from fastapi import APIRouter, Request, Body, Depends
+import asyncio
+import httpx
+from httpx import Timeout
 from fastapi.responses import JSONResponse
 import os
 import httpx
@@ -87,14 +90,29 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
             payload_users[uidv] = data
         if not payload_users:
             return {"ok": True, "items": []}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(f"{BASE_URL}/users", headers=_headers(), params={"api_key": API_KEY}, json={"users": payload_users})
-            if r.status_code not in (200, 201):
+        async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0)) as client:
+            last_ex = None
+            for attempt in range(3):
                 try:
-                    data = r.json()
-                except Exception:
-                    data = {"error": r.text}
-                return JSONResponse({"error": data.get("message") or data.get("error") or "failed"}, status_code=r.status_code)
+                    r = await client.post(
+                        f"{BASE_URL}/users",
+                        headers=_headers(),
+                        params={"api_key": API_KEY},
+                        json={"users": payload_users}
+                    )
+                    if r.status_code in (200, 201):
+                        break
+                    try:
+                        data = r.json()
+                    except Exception:
+                        data = {"error": r.text}
+                    return JSONResponse({"error": data.get("message") or data.get("error") or "failed"}, status_code=r.status_code)
+                except Exception as ex:
+                    last_ex = ex
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
+            if last_ex:
+                return JSONResponse({"error": "stream_users_timeout"}, status_code=504)
         return {"ok": True, "items": list(payload_users.keys())}
     except Exception as ex:
         logger.exception(f"users_ensure failed: {ex}")
@@ -200,7 +218,7 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0)) as client:
             try:
                 display = ""
                 image = ""
@@ -211,12 +229,21 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
                         image = (urec.photo_url or "").strip()
                 except Exception:
                     pass
-                await client.post(
-                    f"{BASE_URL}/users",
-                    headers=_headers(),
-                    params={"api_key": API_KEY},
-                    json={"users": {uid: {"id": uid, **({"name": display} if display else {}), **({"image": image} if image else {})}}}
-                )
+                last_ex = None
+                for attempt in range(3):
+                    try:
+                        await client.post(
+                            f"{BASE_URL}/users",
+                            headers=_headers(),
+                            params={"api_key": API_KEY},
+                            json={"users": {uid: {"id": uid, **({"name": display} if display else {}), **({"image": image} if image else {})}}}
+                        )
+                        last_ex = None
+                        break
+                    except Exception as ex:
+                        last_ex = ex
+                        await asyncio.sleep(0.5 * (2 ** attempt))
+                        continue
             except Exception:
                 pass
             # Add member to channel
