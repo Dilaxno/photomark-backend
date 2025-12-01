@@ -233,17 +233,27 @@ async def _check_domain_dns(hostname: str, db: Session = None, uid: str = None) 
     if dns_verified:
         try:
             # Use longer timeout for SSL check as Caddy may need to issue certificate
+            # Use GET instead of HEAD as some routes don't support HEAD
             async with httpx.AsyncClient(timeout=10.0, verify=True) as client:
-                h = await client.head(f"https://{hostname}", follow_redirects=True)
-                ssl_status = "active" if h.status_code < 400 else "pending"
+                h = await client.get(f"https://{hostname}", follow_redirects=True)
+                # Any successful HTTPS connection means SSL is working
+                # 405 Method Not Allowed still means SSL is active
+                if h.status_code < 500:
+                    ssl_status = "active"
+                    logger.info(f"SSL check for {hostname}: status={h.status_code}, ssl=active")
+                else:
+                    ssl_status = "pending"
         except Exception as e:
             ssl_error = str(e)
-            # Check if it's a certificate error vs connection error
             err_str = str(e).lower()
+            # Check if it's a certificate error vs connection error
             if "certificate" in err_str or "ssl" in err_str or "tls" in err_str:
                 ssl_status = "pending"  # Certificate not yet issued
+                logger.info(f"SSL check for {hostname}: certificate error - {ssl_error}")
             else:
+                # Connection succeeded but other error - SSL might be working
                 ssl_status = "pending"
+                logger.info(f"SSL check for {hostname}: error - {ssl_error}")
     else:
         ssl_status = "blocked"
     
