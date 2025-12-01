@@ -397,7 +397,11 @@ async def domains_validate(request: Request):
     from fastapi.responses import PlainTextResponse
     domain = (request.query_params.get("domain") or request.query_params.get("host") or "").strip().lower().rstrip(".")
     if not domain:
+        logger.debug(f"Domain validation: no domain provided")
         return PlainTextResponse("no", status_code=403)
+    
+    logger.info(f"Domain validation request for: {domain}")
+    
     try:
         from core.database import get_db
         from sqlalchemy.orm import Session
@@ -406,44 +410,43 @@ async def domains_validate(request: Request):
         db: Session = next(get_db())
         try:
             from sqlalchemy import cast, String
+            
             # Check shop custom domains
-            shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
-            if shop:
-                enabled = bool((shop.domain or {}).get('enabled') or False)
-                dns_verified = bool((shop.domain or {}).get('dnsVerified') or False)
-                if enabled or dns_verified:
-                    return PlainTextResponse("ok", status_code=200)
+            try:
+                shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
+                if shop:
+                    enabled = bool((shop.domain or {}).get('enabled') or False)
+                    dns_verified = bool((shop.domain or {}).get('dnsVerified') or False)
+                    if enabled or dns_verified:
+                        logger.info(f"Domain {domain} validated via shop (enabled={enabled}, dns={dns_verified})")
+                        return PlainTextResponse("ok", status_code=200)
+            except Exception as e:
+                logger.debug(f"Shop domain query failed: {e}")
             
             # Check uploads custom domains (stored in user.extra_metadata.uploads_domain)
-            # Use JSON path query for efficiency
-            try:
-                user = db.query(User).filter(
-                    cast(User.extra_metadata['uploads_domain']['hostname'], String) == domain
-                ).first()
-                if user:
-                    uploads_domain = (user.extra_metadata or {}).get('uploads_domain') or {}
+            # Fallback approach that works with all databases
+            users = db.query(User).filter(User.extra_metadata.isnot(None)).all()
+            for user in users:
+                meta = user.extra_metadata or {}
+                uploads_domain = meta.get('uploads_domain') or {}
+                hostname = (uploads_domain.get('hostname') or '').lower().rstrip('.')
+                if hostname == domain:
                     enabled = bool(uploads_domain.get('enabled') or False)
                     dns_verified = bool(uploads_domain.get('dnsVerified') or False)
                     if enabled or dns_verified:
+                        logger.info(f"Domain {domain} validated via uploads (enabled={enabled}, dns={dns_verified})")
                         return PlainTextResponse("ok", status_code=200)
-            except Exception:
-                # Fallback: iterate users if JSON query fails
-                users = db.query(User).filter(User.extra_metadata.isnot(None)).limit(500).all()
-                for user in users:
-                    meta = user.extra_metadata or {}
-                    uploads_domain = meta.get('uploads_domain') or {}
-                    if uploads_domain.get('hostname', '').lower().rstrip('.') == domain:
-                        enabled = bool(uploads_domain.get('enabled') or False)
-                        dns_verified = bool(uploads_domain.get('dnsVerified') or False)
-                        if enabled or dns_verified:
-                            return PlainTextResponse("ok", status_code=200)
+                    else:
+                        logger.info(f"Domain {domain} found but not enabled/verified (enabled={enabled}, dns={dns_verified})")
         finally:
             try:
                 db.close()
             except Exception:
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Domain validation error for {domain}: {e}")
+    
+    logger.info(f"Domain {domain} not validated")
     return PlainTextResponse("no", status_code=403)
 async def _check_domain(hostname: str):
     dns_verified = False
