@@ -75,14 +75,29 @@ async def group_create(
         return JSONResponse({"error": "cometchat_not_configured"}, status_code=500)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            ids: list[str] = []
+            for m in [uid] + [x for x in members if x]:
+                if m and (m not in ids):
+                    ids.append(m)
+            for m in ids:
+                try:
+                    ur = await client.get(f"{_base_url()}/users/{m}", headers=_headers())
+                except Exception:
+                    ur = None
+                if ur is None or ur.status_code != 200:
+                    up = {"uid": m, "name": m}
+                    try:
+                        await client.post(f"{_base_url()}/users", headers=_headers(), json=up)
+                    except Exception:
+                        pass
             try:
                 r = await client.get(f"{_base_url()}/groups/{guid}", headers=_headers())
             except Exception:
                 r = None
             if r is None or r.status_code != 200:
-                payload = {"guid": guid, "name": name, "type": "private"}
-                await client.post(f"{_base_url()}/groups", headers=_headers(), json=payload)
-            add = [{"uid": m, "scope": "participant"} for m in members if m]
+                gp = {"guid": guid, "name": name, "type": "private"}
+                await client.post(f"{_base_url()}/groups", headers=_headers(), json=gp)
+            add = [{"uid": m, "scope": ("admin" if m == uid else "participant")} for m in ids]
             if add:
                 await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": add})
         return {"ok": True, "guid": guid, "name": name}
