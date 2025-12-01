@@ -426,18 +426,22 @@ async def domains_validate(request: Request):
             # Check uploads custom domains (stored in user.extra_metadata.uploads_domain)
             # Fallback approach that works with all databases
             users = db.query(User).filter(User.extra_metadata.isnot(None)).all()
+            logger.debug(f"Checking {len(users)} users for uploads domain {domain}")
             for user in users:
                 meta = user.extra_metadata or {}
                 uploads_domain = meta.get('uploads_domain') or {}
                 hostname = (uploads_domain.get('hostname') or '').lower().rstrip('.')
+                if hostname:
+                    logger.debug(f"User {user.uid[:8]}... has uploads domain: {hostname}, dnsVerified={uploads_domain.get('dnsVerified')}, enabled={uploads_domain.get('enabled')}")
                 if hostname == domain:
                     enabled = bool(uploads_domain.get('enabled') or False)
                     dns_verified = bool(uploads_domain.get('dnsVerified') or False)
+                    logger.info(f"Domain {domain} found for user {user.uid[:8]}... (enabled={enabled}, dns_verified={dns_verified})")
                     if enabled or dns_verified:
                         logger.info(f"Domain {domain} validated via uploads (enabled={enabled}, dns={dns_verified})")
                         return PlainTextResponse("ok", status_code=200)
                     else:
-                        logger.info(f"Domain {domain} found but not enabled/verified (enabled={enabled}, dns={dns_verified})")
+                        logger.info(f"Domain {domain} found but not enabled/verified yet")
         finally:
             try:
                 db.close()

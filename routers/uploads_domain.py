@@ -207,20 +207,27 @@ async def _check_domain_dns(hostname: str, db: Session = None, uid: str = None) 
     # This allows Caddy to issue SSL certificate on the SSL check request
     if dns_verified and db and uid:
         try:
+            from sqlalchemy.orm.attributes import flag_modified
             user = db.query(User).filter(User.uid == uid).first()
             if user:
-                meta = user.extra_metadata or {}
-                domain_config = meta.get('uploads_domain') or {}
-                if not domain_config.get('dnsVerified'):
-                    domain_config['dnsVerified'] = True
-                    domain_config['cnameObserved'] = cname_target
-                    domain_config['lastChecked'] = datetime.utcnow().isoformat()
-                    meta['uploads_domain'] = domain_config
-                    user.extra_metadata = meta
-                    db.commit()
-                    logger.info(f"DNS verified for {hostname}, updated database for SSL issuance")
+                meta = dict(user.extra_metadata or {})
+                domain_config = dict(meta.get('uploads_domain') or {})
+                domain_config['dnsVerified'] = True
+                domain_config['cnameObserved'] = cname_target
+                domain_config['hostname'] = hostname
+                domain_config['lastChecked'] = datetime.utcnow().isoformat()
+                meta['uploads_domain'] = domain_config
+                user.extra_metadata = meta
+                flag_modified(user, 'extra_metadata')
+                db.commit()
+                db.refresh(user)
+                logger.info(f"DNS verified for {hostname}, updated database for SSL issuance. dnsVerified={domain_config.get('dnsVerified')}")
         except Exception as e:
             logger.warning(f"Failed to update dnsVerified early: {e}")
+            try:
+                db.rollback()
+            except:
+                pass
     
     ssl_status = "unknown"
     if dns_verified:
