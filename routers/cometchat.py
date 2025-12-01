@@ -114,9 +114,17 @@ async def group_create(
                 await client.post(f"{_base_url()}/groups", headers=_headers(), json=gp)
             existing = await _existing_members(client, guid)
             to_add = [m for m in ids if m not in existing]
-            add = [{"uid": m, "scope": ("admin" if m == uid else "participant")} for m in to_add]
+            add = [{"uid": m, "scope": ("admin" if m == uid else "member")} for m in to_add]
             if add:
-                await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": add})
+                radd = await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": add})
+                if radd.status_code == 400:
+                    try:
+                        data = radd.json()
+                    except Exception:
+                        data = {"error": radd.text}
+                    msg = str(data.get("message") or data.get("error") or "")
+                    if "exist" not in msg.lower():
+                        return JSONResponse({"error": msg or "failed_to_add_members"}, status_code=400)
         return {"ok": True, "guid": guid, "name": name}
     except Exception as ex:
         logger.exception(f"group_create failed: {ex}")
@@ -126,7 +134,7 @@ async def group_create(
 async def group_join(
     request: Request,
     guid: str = Body(..., embed=True),
-    scope: str = Body("participant", embed=True),
+    scope: str = Body("member", embed=True),
 ):
     uid = get_uid_from_request(request)
     if not uid:
@@ -151,7 +159,7 @@ async def group_join(
                     await client.post(f"{_base_url()}/users", headers=_headers(), json=up)
                 except Exception:
                     pass
-            sc = ("admin" if scope == "admin" else "participant")
+            sc = ("admin" if scope == "admin" else "member")
             payload = {"members": [{"uid": uid, "scope": sc}]}
             r = await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json=payload)
             if r.status_code in (200, 201):
@@ -211,14 +219,22 @@ async def group_invite(
                         await client.post(f"{_base_url()}/users", headers=_headers(), json=up)
                     except Exception:
                         pass
-                members.append({"uid": cuid, "scope": "participant"})
+                members.append({"uid": cuid, "scope": "member"})
 
             if members:
                 try:
                     existing = await _existing_members(client, guid)
                     to_add = [m for m in members if (m.get("uid") or "") not in existing]
                     if to_add:
-                        await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": to_add})
+                        radd = await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": to_add})
+                        if radd.status_code == 400:
+                            try:
+                                data = radd.json()
+                            except Exception:
+                                data = {"error": radd.text}
+                            msg = str(data.get("message") or data.get("error") or "")
+                            if "exist" not in msg.lower():
+                                logger.warning(f"cometchat invite add members failed: {msg}")
                 except Exception:
                     pass
 
