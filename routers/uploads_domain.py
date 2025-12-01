@@ -176,8 +176,12 @@ async def enable_uploads_domain(request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=500, detail=f"Failed to enable domain: {str(e)}")
 
 
-async def _check_domain_dns(hostname: str) -> dict:
-    """Check DNS CNAME and TLS status using Cloudflare DNS over HTTPS"""
+async def _check_domain_dns(hostname: str, db: Session = None, uid: str = None) -> dict:
+    """Check DNS CNAME and TLS status using Cloudflare DNS over HTTPS.
+    
+    If db and uid are provided, updates dnsVerified in database immediately
+    so Caddy can issue SSL certificate on the next request.
+    """
     dns_verified = False
     cname_target = None
     ssl_error = None
@@ -199,15 +203,40 @@ async def _check_domain_dns(hostname: str) -> dict:
     except Exception:
         dns_verified = False
     
+    # If DNS is verified and we have db access, update immediately
+    # This allows Caddy to issue SSL certificate on the SSL check request
+    if dns_verified and db and uid:
+        try:
+            user = db.query(User).filter(User.uid == uid).first()
+            if user:
+                meta = user.extra_metadata or {}
+                domain_config = meta.get('uploads_domain') or {}
+                if not domain_config.get('dnsVerified'):
+                    domain_config['dnsVerified'] = True
+                    domain_config['cnameObserved'] = cname_target
+                    domain_config['lastChecked'] = datetime.utcnow().isoformat()
+                    meta['uploads_domain'] = domain_config
+                    user.extra_metadata = meta
+                    db.commit()
+                    logger.info(f"DNS verified for {hostname}, updated database for SSL issuance")
+        except Exception as e:
+            logger.warning(f"Failed to update dnsVerified early: {e}")
+    
     ssl_status = "unknown"
     if dns_verified:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            # Use longer timeout for SSL check as Caddy may need to issue certificate
+            async with httpx.AsyncClient(timeout=10.0, verify=True) as client:
                 h = await client.head(f"https://{hostname}", follow_redirects=True)
                 ssl_status = "active" if h.status_code < 400 else "pending"
         except Exception as e:
             ssl_error = str(e)
-            ssl_status = "pending"
+            # Check if it's a certificate error vs connection error
+            err_str = str(e).lower()
+            if "certificate" in err_str or "ssl" in err_str or "tls" in err_str:
+                ssl_status = "pending"  # Certificate not yet issued
+            else:
+                ssl_status = "pending"
     else:
         ssl_status = "blocked"
     
@@ -244,14 +273,16 @@ async def get_uploads_domain_status(
         if not hostname:
             raise HTTPException(status_code=400, detail="No hostname configured")
 
-        # Check DNS status
-        status = await _check_domain_dns(hostname)
+        # Check DNS status (pass db and uid so dnsVerified can be saved early for SSL)
+        status = await _check_domain_dns(hostname, db=db, uid=uid)
         
         # Update stored status
         domain_config['dnsVerified'] = status['dnsVerified']
         domain_config['sslStatus'] = status['sslStatus']
         domain_config['cnameObserved'] = status['cnameObserved']
         domain_config['lastChecked'] = datetime.utcnow().isoformat()
+        if status.get('error'):
+            domain_config['lastError'] = status['error']
         
         meta['uploads_domain'] = domain_config
         user.extra_metadata = meta
