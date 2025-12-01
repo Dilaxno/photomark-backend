@@ -113,6 +113,8 @@ async def collab_login(
         rec = db.query(Collaborator).filter(Collaborator.email == em, Collaborator.active == True).first()
         if not rec:
             return JSONResponse({"error": "not_found"}, status_code=404)
+        if not getattr(rec, "password_hash", None) or len(str(rec.password_hash).strip()) < 20:
+            return JSONResponse({"error": "password_unavailable", "message": "This collaborator password is not available. Please contact the owner for the right password."}, status_code=422)
         try:
             ok = bcrypt.checkpw(pw.encode("utf-8"), rec.password_hash.encode("utf-8"))
         except Exception:
