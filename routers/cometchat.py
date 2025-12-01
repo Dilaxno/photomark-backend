@@ -220,3 +220,57 @@ async def group_invite(
         logger.exception(f"group_invite failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
+@router.post("/group/delete")
+async def group_delete(request: Request, guid: str = Body(..., embed=True)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not APP_ID or not API_KEY or not REGION:
+        return JSONResponse({"error": "cometchat_not_configured"}, status_code=500)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                gr = await client.get(f"{_base_url()}/groups/{guid}", headers=_headers())
+            except Exception:
+                gr = None
+            if gr is None or gr.status_code != 200:
+                return JSONResponse({"error": "group_not_found"}, status_code=404)
+            r = await client.delete(f"{_base_url()}/groups/{guid}", headers=_headers())
+            if r.status_code in (200, 204):
+                return {"ok": True}
+            try:
+                data = r.json()
+            except Exception:
+                data = {"error": r.text}
+            return JSONResponse({"error": data.get("message") or data.get("error")}, status_code=400)
+    except Exception as ex:
+        logger.exception(f"group_delete failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+@router.post("/group/leave")
+async def group_leave(request: Request, guid: str = Body(..., embed=True)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not APP_ID or not API_KEY or not REGION:
+        return JSONResponse({"error": "cometchat_not_configured"}, status_code=500)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                gr = await client.get(f"{_base_url()}/groups/{guid}", headers=_headers())
+            except Exception:
+                gr = None
+            if gr is None or gr.status_code != 200:
+                return JSONResponse({"error": "group_not_found"}, status_code=404)
+            r = await client.delete(f"{_base_url()}/groups/{guid}/members/{uid}", headers=_headers())
+            if r.status_code in (200, 204):
+                return {"ok": True}
+            try:
+                data = r.json()
+            except Exception:
+                data = {"error": r.text}
+            return JSONResponse({"error": data.get("message") or data.get("error")}, status_code=400)
+    except Exception as ex:
+        logger.exception(f"group_leave failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
