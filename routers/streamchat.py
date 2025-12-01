@@ -95,11 +95,13 @@ async def group_create(request: Request, guid: str = Body(..., embed=True), name
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            body = {
+            create_body = {
+                "type": "messaging",
+                "id": guid,
                 "data": {"name": name},
                 "created_by_id": owner_uid,
             }
-            r = await client.post(f"{BASE_URL}/channels/messaging/{guid}", headers=_headers(), params={"api_key": API_KEY}, json=body)
+            r = await client.post(f"{BASE_URL}/channels", headers=_headers(), params={"api_key": API_KEY}, json=create_body)
             if r.status_code not in (200, 201):
                 try:
                     data = r.json()
@@ -108,7 +110,7 @@ async def group_create(request: Request, guid: str = Body(..., embed=True), name
                 return JSONResponse({"error": data.get("message") or data.get("error") or "failed"}, status_code=r.status_code)
             if members:
                 try:
-                    await client.post(f"{BASE_URL}/channels/messaging/{guid}", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": list(set(members + [owner_uid]))})
+                    await client.post(f"{BASE_URL}/channels/messaging/{guid}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": list(set(members + [owner_uid]))})
                 except Exception:
                     pass
         return {"ok": True, "guid": guid, "name": name}
@@ -145,7 +147,7 @@ async def group_invite(request: Request, guid: str = Body(..., embed=True), emai
             # Add to channel
             if ids:
                 try:
-                    await client.post(f"{BASE_URL}/channels/messaging/{guid}", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": ids})
+                    await client.post(f"{BASE_URL}/channels/messaging/{guid}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": ids})
                 except Exception:
                     pass
 
@@ -190,7 +192,7 @@ async def group_join(request: Request, guid: str = Body(..., embed=True)):
             except Exception:
                 pass
             # Add member to channel
-            r = await client.post(f"{BASE_URL}/channels/messaging/{guid}", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": [uid]})
+            r = await client.post(f"{BASE_URL}/channels/messaging/{guid}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": [uid]})
             if r.status_code not in (200, 201):
                 try:
                     data = r.json()
