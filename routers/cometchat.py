@@ -4,6 +4,7 @@ import os
 import httpx
 from core.auth import get_uid_from_request
 from core.config import logger
+from utils.emailing import render_email, send_email_smtp
 
 router = APIRouter(prefix="/api/chat/cometchat", tags=["cometchat"]) 
 
@@ -146,5 +147,75 @@ async def group_join(
             return JSONResponse({"error": data.get("message") or data.get("error")}, status_code=400)
     except Exception as ex:
         logger.exception(f"group_join failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+@router.post("/group/invite")
+async def group_invite(
+    request: Request,
+    guid: str = Body(..., embed=True),
+    emails: list[str] = Body(..., embed=True),
+    note: str = Body("", embed=True),
+):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not APP_ID or not API_KEY or not REGION:
+        return JSONResponse({"error": "cometchat_not_configured"}, status_code=500)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                gr = await client.get(f"{_base_url()}/groups/{guid}", headers=_headers())
+            except Exception:
+                gr = None
+            if gr is None or gr.status_code != 200:
+                return JSONResponse({"error": "group_not_found"}, status_code=404)
+
+            def norm(e: str) -> str:
+                return (e or "").lower().replace("[^a-z0-9]", "_")
+
+            members = []
+            for em in emails:
+                emv = str(em or "").strip()
+                if not emv:
+                    continue
+                cuid = emv.lower()
+                cuid = "".join([c if c.isalnum() else "_" for c in cuid])[:64]
+                up = {"uid": cuid, "name": emv}
+                try:
+                    ur = await client.get(f"{_base_url()}/users/{cuid}", headers=_headers())
+                except Exception:
+                    ur = None
+                if ur is None or ur.status_code != 200:
+                    try:
+                        await client.post(f"{_base_url()}/users", headers=_headers(), json=up)
+                    except Exception:
+                        pass
+                members.append({"uid": cuid, "scope": "participant"})
+
+            if members:
+                try:
+                    await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": members})
+                except Exception:
+                    pass
+
+        origin = (os.getenv("FRONTEND_ORIGIN", "") or "").strip() or ""
+        join_url = f"{origin}/collab-chat?guid={guid}" if origin else f"/collab-chat?guid={guid}"
+        subject = "You've been invited to a collaboration chat"
+        html_body = render_email(
+            subject,
+            f"You have been invited to join a collaboration chat. Click the button below to join. {('' if not note else '<br><br>Note from owner: ' + note)}",
+            cta_text="Join Chat",
+            cta_url=join_url,
+        )
+        sent = 0
+        for em in emails:
+            try:
+                send_email_smtp(to_email=em, subject=subject, html=html_body)
+                sent += 1
+            except Exception as ex:
+                logger.warning(f"chat invite email failed to {em}: {ex}")
+        return {"ok": True, "sent": sent, "guid": guid}
+    except Exception as ex:
+        logger.exception(f"group_invite failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
