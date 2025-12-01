@@ -30,6 +30,10 @@ ALLOWED_ROLES = {
 COLLAB_JWT_SECRET = (os.getenv("COLLAB_JWT_SECRET", "") or os.getenv("SECRET_KEY", "")).strip()
 COLLAB_JWT_ISSUER = os.getenv("COLLAB_JWT_ISSUER", "photomark.collab")
 
+# SECURITY: Warn if JWT secret is weak
+if COLLAB_JWT_SECRET and len(COLLAB_JWT_SECRET) < 32:
+    logger.warning("[SECURITY] COLLAB_JWT_SECRET is too short - use at least 32 characters")
+
 
 @router.post("/invite")
 async def collab_invite(
@@ -101,14 +105,31 @@ async def collab_invite(
 
 @router.post("/login")
 async def collab_login(
+    request: Request,
     email: str = Body(..., embed=True),
     password: str = Body(..., embed=True),
     db: Session = Depends(get_db),
 ):
+    from utils.rate_limit import login_throttle
+    
     em = (email or "").strip().lower()
     pw = (password or "").strip()
     if not em or not pw:
         return JSONResponse({"error": "email and password required"}, status_code=400)
+    
+    # Rate limit by IP to prevent brute force attacks
+    ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    
+    try:
+        result = login_throttle.limit(f"collab_login:{ip}", cost=1)
+        if result.limited:
+            logger.warning(f"[collab.login] Rate limited for IP: {ip}")
+            return JSONResponse({"error": "Too many login attempts. Please try again later."}, status_code=429)
+    except Exception as ex:
+        logger.warning(f"[collab.login] Rate limit check failed: {ex}")
     try:
         any_rec = db.query(Collaborator).filter(Collaborator.email == em).first()
         if not any_rec:

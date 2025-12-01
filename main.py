@@ -64,8 +64,10 @@ _default_origins = ",".join([
 ])
 _origins_env = os.getenv("ALLOWED_ORIGINS") or os.getenv("CORS_ORIGINS") or os.getenv("FRONTEND_ORIGIN") or _default_origins
 ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
-# Optional regex to match any photomark.cloud subdomain and scheme
-_origin_regex_env = os.getenv("ALLOWED_ORIGINS_REGEX") or os.getenv("CORS_ORIGIN_REGEX") or r".*"
+# Optional regex to match specific domains - SECURITY: Never use .* in production!
+_origin_regex_raw = os.getenv("ALLOWED_ORIGINS_REGEX") or os.getenv("CORS_ORIGIN_REGEX") or ""
+# Reject overly permissive patterns that would allow any origin
+_origin_regex_env = _origin_regex_raw if (_origin_regex_raw and _origin_regex_raw.strip() not in (".*", "^.*$", ".+")) else None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -94,13 +96,21 @@ async def add_security_headers(request, call_next):
         else:
             response.headers.setdefault("X-Frame-Options", "DENY")
 
+        # CSP: In production, consider removing 'unsafe-inline' and 'unsafe-eval' 
+        # by using nonces or hashes for inline scripts/styles
+        is_dev = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+        script_src = "'self' 'unsafe-inline' 'unsafe-eval' https:" if is_dev else "'self' https://cdn.jsdelivr.net https://www.google.com https://www.gstatic.com"
+        style_src = "'self' 'unsafe-inline' https:" if is_dev else "'self' 'unsafe-inline' https://fonts.googleapis.com"
         csp = (
             "default-src 'self'; "
             "img-src 'self' data: blob: https:; "
-            "style-src 'self' 'unsafe-inline' https:; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
-            "font-src 'self' data: https:; "
-            "connect-src 'self' https: http://localhost:5173 http://127.0.0.1:5173; "
+            f"style-src {style_src}; "
+            f"script-src {script_src}; "
+            "font-src 'self' data: https://fonts.gstatic.com; "
+            "connect-src 'self' https:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
             f"frame-ancestors {embed_ancestors}"
         )
         response.headers["Content-Security-Policy"] = csp

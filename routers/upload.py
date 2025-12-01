@@ -9,6 +9,32 @@ from PIL import Image
 import zipfile
 
 from core.config import MAX_FILES, logger
+
+# SECURITY: File magic bytes for image validation
+IMAGE_MAGIC_BYTES = {
+    b'\xff\xd8\xff': 'image/jpeg',  # JPEG
+    b'\x89PNG\r\n\x1a\n': 'image/png',  # PNG
+    b'RIFF': 'image/webp',  # WebP (partial - also check for WEBP)
+    b'GIF87a': 'image/gif',  # GIF87a
+    b'GIF89a': 'image/gif',  # GIF89a
+    b'II*\x00': 'image/tiff',  # TIFF (little-endian)
+    b'MM\x00*': 'image/tiff',  # TIFF (big-endian)
+}
+
+def _validate_image_content(data: bytes) -> bool:
+    """Validate that file content matches expected image magic bytes."""
+    if not data or len(data) < 8:
+        return False
+    for magic, _ in IMAGE_MAGIC_BYTES.items():
+        if data[:len(magic)] == magic:
+            return True
+    # Additional WebP check (RIFF....WEBP)
+    if data[:4] == b'RIFF' and len(data) > 11 and data[8:12] == b'WEBP':
+        return True
+    # HEIC/HEIF check (ftyp box)
+    if len(data) > 11 and data[4:8] == b'ftyp':
+        return True
+    return False
 from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
 from utils.watermark import (
     add_text_watermark,
@@ -91,6 +117,12 @@ async def upload(
             raw = await uf.read()
             if not raw:
                 continue
+            
+            # SECURITY: Validate file content matches image magic bytes
+            if not _validate_image_content(raw):
+                logger.warning(f"[upload] Invalid image content for {getattr(uf, 'filename', 'unknown')}")
+                continue
+            
             img = Image.open(io.BytesIO(raw)).convert("RGB")
 
             # Determine original file extension and content-type
@@ -272,6 +304,12 @@ async def upload_external(
             raw = await uf.read()
             if not raw:
                 continue
+            
+            # SECURITY: Validate file content matches image magic bytes
+            if not _validate_image_content(raw):
+                logger.warning(f"[upload.external] Invalid image content for {getattr(uf, 'filename', 'unknown')}")
+                continue
+            
             # Determine original file extension and content-type
             orig_ext = (os.path.splitext(uf.filename or '')[1] or '.jpg').lower()
             if not orig_ext.startswith('.') or len(orig_ext) > 8:

@@ -197,9 +197,21 @@ async def auth_password_reset_request(request: Request, payload: dict = Body(...
     Body: { "email": str }
     Returns: { ok: true }
     """
+    from utils.rate_limit import password_reset_throttle
+    
     email = (payload or {}).get("email", "").strip().lower()
     if not email:
         return JSONResponse({"error": "email required"}, status_code=400)
+    
+    # Rate limit by email to prevent enumeration/abuse
+    try:
+        result = password_reset_throttle.limit(f"pw_reset:{email}", cost=1)
+        if result.limited:
+            logger.warning(f"[auth.password_reset] Rate limited for email: {email}")
+            return JSONResponse({"error": "Too many password reset requests. Please try again later."}, status_code=429)
+    except Exception as ex:
+        logger.warning(f"[auth.password_reset] Rate limit check failed: {ex}")
+    
     if not firebase_enabled or not fb_auth:
         return JSONResponse({"error": "password reset unavailable"}, status_code=500)
 

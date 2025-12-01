@@ -18,7 +18,11 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])  # secure endpoints via 
 # --- Security helpers ---
 
 def _get_admin_secret() -> str:
-    return (os.getenv("ADMIN_SECRET") or "").strip()
+    secret = (os.getenv("ADMIN_SECRET") or "").strip()
+    # SECURITY: Warn if admin secret is too weak (less than 16 chars or all numeric)
+    if secret and (len(secret) < 16 or secret.isdigit()):
+        logger.warning("[SECURITY] ADMIN_SECRET is weak - use a strong random string (min 32 chars)")
+    return secret
 
 
 def _extract_secret(request: Request, explicit: Optional[str] = None) -> str:
@@ -42,11 +46,13 @@ def _extract_secret(request: Request, explicit: Optional[str] = None) -> str:
 
 
 def _require_admin(request: Request, secret: Optional[str] = None) -> Optional[JSONResponse]:
+    import hmac
     configured = _get_admin_secret()
     if not configured:
         return JSONResponse({"error": "admin_not_configured"}, status_code=503)
     provided = _extract_secret(request, secret)
-    if not provided or provided != configured:
+    # Use timing-safe comparison to prevent timing attacks
+    if not provided or not hmac.compare_digest(provided.encode(), configured.encode()):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         if ADMIN_ALLOWLIST_IPS:
