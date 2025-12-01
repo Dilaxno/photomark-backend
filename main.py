@@ -341,12 +341,12 @@ try:
 except Exception as _ex:
     logger.warning(f"collab router not available: {_ex}")
 
-# CometChat endpoints (invite-only private chats)
+# Stream Chat endpoints (invite-only private chats)
 try:
-    from routers import cometchat  # noqa: E402
-    app.include_router(cometchat.router)
+    from routers import streamchat  # noqa: E402
+    app.include_router(streamchat.router)
 except Exception as _ex:
-    logger.warning(f"cometchat router not available: {_ex}")
+    logger.warning(f"streamchat router not available: {_ex}")
 
 
 
