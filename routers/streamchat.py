@@ -90,7 +90,7 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
             payload_users[uidv] = data
         if not payload_users:
             return {"ok": True, "items": []}
-        async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0)) as client:
+        async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0)) as client:
             last_ex = None
             for attempt in range(3):
                 try:
@@ -218,7 +218,7 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
     try:
-        async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0)) as client:
+        async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0)) as client:
             try:
                 display = ""
                 image = ""
