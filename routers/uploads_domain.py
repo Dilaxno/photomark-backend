@@ -386,7 +386,15 @@ async def get_public_uploads(
         
         if not domain:
             logger.warning(f"No enabled domain found for uid: {uid}")
-            raise HTTPException(status_code=404, detail="No public uploads available")
+            return JSONResponse(
+                content={'error': 'No public uploads available', 'photos': []},
+                status_code=404,
+                headers={
+                    'Access-Control-Allow-Origin': origin,
+                    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                    'Access-Control-Allow-Headers': '*',
+                }
+            )
         
         logger.info(f"Found enabled domain {domain.hostname} for uid: {uid}")
         
@@ -396,7 +404,8 @@ async def get_public_uploads(
         
         try:
             # Import R2 client from photos router
-            from routers.photos import s3, R2_BUCKET, _get_url_for_key
+            from core.config import s3, R2_BUCKET
+            from routers.photos import _get_url_for_key
             
             logger.info(f"R2 configured: s3={s3 is not None}, bucket={R2_BUCKET}, prefix={prefix}")
             
@@ -451,9 +460,23 @@ async def get_public_uploads(
                 )
         except Exception as ex:
             logger.error(f"R2 error for public uploads {uid}: {ex}")
-            raise HTTPException(status_code=500, detail="Storage error")
-    except HTTPException:
-        raise
+            return JSONResponse(
+                content={'error': 'Storage error', 'photos': []},
+                status_code=500,
+                headers={
+                    'Access-Control-Allow-Origin': origin,
+                    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                    'Access-Control-Allow-Headers': '*',
+                }
+            )
     except Exception as e:
         logger.error(f"Failed to get public uploads for {uid}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load uploads")
+        return JSONResponse(
+            content={'error': 'Failed to load uploads', 'photos': []},
+            status_code=500,
+            headers={
+                'Access-Control-Allow-Origin': origin,
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Headers': '*',
+            }
+        )
