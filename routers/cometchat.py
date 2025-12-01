@@ -170,9 +170,6 @@ async def group_invite(
             if gr is None or gr.status_code != 200:
                 return JSONResponse({"error": "group_not_found"}, status_code=404)
 
-            def norm(e: str) -> str:
-                return (e or "").lower().replace("[^a-z0-9]", "_")
-
             members = []
             for em in emails:
                 emv = str(em or "").strip()
@@ -202,10 +199,14 @@ async def group_invite(
         join_url = f"{origin}/collab-chat?guid={guid}" if origin else f"/collab-chat?guid={guid}"
         subject = "You've been invited to a collaboration chat"
         html_body = render_email(
-            subject,
-            f"You have been invited to join a collaboration chat. Click the button below to join. {('' if not note else '<br><br>Note from owner: ' + note)}",
-            cta_text="Join Chat",
-            cta_url=join_url,
+            "email_basic.html",
+            title="Collaboration Chat Invitation",
+            intro=(
+                "You have been invited to join a collaboration chat. Click the button below to join." +
+                ("" if not note else ("<br><br>Note from owner: " + note))
+            ),
+            button_label="Join Chat",
+            button_url=join_url,
         )
         sent = 0
         for em in emails:
