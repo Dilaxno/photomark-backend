@@ -105,3 +105,46 @@ async def group_create(
         logger.exception(f"group_create failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
+@router.post("/group/join")
+async def group_join(
+    request: Request,
+    guid: str = Body(..., embed=True),
+    scope: str = Body("participant", embed=True),
+):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not APP_ID or not API_KEY or not REGION:
+        return JSONResponse({"error": "cometchat_not_configured"}, status_code=500)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                gr = await client.get(f"{_base_url()}/groups/{guid}", headers=_headers())
+            except Exception:
+                gr = None
+            if gr is None or gr.status_code != 200:
+                return JSONResponse({"error": "group_not_found"}, status_code=404)
+            try:
+                ur = await client.get(f"{_base_url()}/users/{uid}", headers=_headers())
+            except Exception:
+                ur = None
+            if ur is None or ur.status_code != 200:
+                up = {"uid": uid, "name": uid}
+                try:
+                    await client.post(f"{_base_url()}/users", headers=_headers(), json=up)
+                except Exception:
+                    pass
+            sc = ("admin" if scope == "admin" else "participant")
+            payload = {"members": [{"uid": uid, "scope": sc}]}
+            r = await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json=payload)
+            if r.status_code in (200, 201):
+                return {"ok": True, "guid": guid, "uid": uid, "scope": sc}
+            try:
+                data = r.json()
+            except Exception:
+                data = {"error": r.text}
+            return JSONResponse({"error": data.get("message") or data.get("error")}, status_code=400)
+    except Exception as ex:
+        logger.exception(f"group_join failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
