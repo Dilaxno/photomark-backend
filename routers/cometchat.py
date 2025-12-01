@@ -14,13 +14,12 @@ REGION = (os.getenv("COMETCHAT_REGION", "") or "").strip()
 def _base_url() -> str:
     if not APP_ID or not REGION:
         return ""
-    return f"https://{REGION}.cometchat.io/v3"
+    return f"https://{APP_ID}.api-{REGION}.cometchat.io/v3"
 
 def _headers() -> dict:
     return {
         "accept": "application/json",
         "content-type": "application/json",
-        "appId": APP_ID,
         "apiKey": API_KEY,
     }
 
