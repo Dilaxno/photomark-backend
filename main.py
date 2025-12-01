@@ -402,15 +402,41 @@ async def domains_validate(request: Request):
         from core.database import get_db
         from sqlalchemy.orm import Session
         from models.shop import Shop
+        from models.user import User
         db: Session = next(get_db())
         try:
             from sqlalchemy import cast, String
+            # Check shop custom domains
             shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == domain).first()
             if shop:
                 enabled = bool((shop.domain or {}).get('enabled') or False)
                 dns_verified = bool((shop.domain or {}).get('dnsVerified') or False)
                 if enabled or dns_verified:
                     return PlainTextResponse("ok", status_code=200)
+            
+            # Check uploads custom domains (stored in user.extra_metadata.uploads_domain)
+            # Use JSON path query for efficiency
+            try:
+                user = db.query(User).filter(
+                    cast(User.extra_metadata['uploads_domain']['hostname'], String) == domain
+                ).first()
+                if user:
+                    uploads_domain = (user.extra_metadata or {}).get('uploads_domain') or {}
+                    enabled = bool(uploads_domain.get('enabled') or False)
+                    dns_verified = bool(uploads_domain.get('dnsVerified') or False)
+                    if enabled or dns_verified:
+                        return PlainTextResponse("ok", status_code=200)
+            except Exception:
+                # Fallback: iterate users if JSON query fails
+                users = db.query(User).filter(User.extra_metadata.isnot(None)).limit(500).all()
+                for user in users:
+                    meta = user.extra_metadata or {}
+                    uploads_domain = meta.get('uploads_domain') or {}
+                    if uploads_domain.get('hostname', '').lower().rstrip('.') == domain:
+                        enabled = bool(uploads_domain.get('enabled') or False)
+                        dns_verified = bool(uploads_domain.get('dnsVerified') or False)
+                        if enabled or dns_verified:
+                            return PlainTextResponse("ok", status_code=200)
         finally:
             try:
                 db.close()
