@@ -110,9 +110,12 @@ async def collab_login(
     if not em or not pw:
         return JSONResponse({"error": "email and password required"}, status_code=400)
     try:
-        rec = db.query(Collaborator).filter(Collaborator.email == em, Collaborator.active == True).first()
-        if not rec:
-            return JSONResponse({"error": "not_found"}, status_code=404)
+        any_rec = db.query(Collaborator).filter(Collaborator.email == em).first()
+        if not any_rec:
+            return JSONResponse({"error": "email_unavailable", "message": "This collaborator email is not available. Please contact the owner for the right email."}, status_code=404)
+        if not bool(any_rec.active):
+            return JSONResponse({"error": "inactive", "message": "Collaborator account is inactive. Please contact the owner."}, status_code=403)
+        rec = any_rec
         if not getattr(rec, "password_hash", None) or len(str(rec.password_hash).strip()) < 20:
             return JSONResponse({"error": "password_unavailable", "message": "This collaborator password is not available. Please contact the owner for the right password."}, status_code=422)
         try:
