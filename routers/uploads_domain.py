@@ -354,6 +354,8 @@ async def get_public_uploads(
     import os
     from datetime import datetime
     
+    logger.info(f"Public uploads request for uid: {uid}")
+    
     try:
         # Verify the user has an enabled custom domain
         domain = db.query(UploadsDomain).filter(
@@ -362,7 +364,10 @@ async def get_public_uploads(
         ).first()
         
         if not domain:
+            logger.warning(f"No enabled domain found for uid: {uid}")
             raise HTTPException(status_code=404, detail="No public uploads available")
+        
+        logger.info(f"Found enabled domain {domain.hostname} for uid: {uid}")
         
         # Get the user's external photos from R2
         photos = []
@@ -371,6 +376,8 @@ async def get_public_uploads(
         try:
             # Import R2 client from photos router
             from routers.photos import s3, R2_BUCKET, _get_url_for_key
+            
+            logger.info(f"R2 configured: s3={s3 is not None}, bucket={R2_BUCKET}, prefix={prefix}")
             
             if s3 and R2_BUCKET:
                 client = s3.meta.client
@@ -383,7 +390,10 @@ async def get_public_uploads(
                     params['ContinuationToken'] = cursor
                 
                 resp = client.list_objects_v2(**params)
-                for obj in resp.get('Contents', []) or []:
+                contents = resp.get('Contents', []) or []
+                logger.info(f"R2 returned {len(contents)} objects for prefix {prefix}")
+                
+                for obj in contents:
                     key = obj.get('Key', '')
                     if not key or key.endswith('/') or key.endswith('/_history.txt'):
                         continue
@@ -399,6 +409,7 @@ async def get_public_uploads(
                         'last_modified': obj.get('LastModified', datetime.utcnow()).isoformat()
                     })
                 
+                logger.info(f"Returning {len(photos)} photos for uid {uid}")
                 next_token = resp.get('NextContinuationToken') or None
                 return {'photos': photos, 'next_cursor': next_token}
             else:
