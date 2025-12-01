@@ -340,8 +340,25 @@ async def get_uploads_domain_status(
         raise HTTPException(status_code=500, detail=f"Failed to check domain status: {str(e)}")
 
 
+@router.options('/public/{uid}')
+async def options_public_uploads(request: Request, uid: str):
+    """Handle CORS preflight for public uploads endpoint"""
+    from fastapi.responses import Response
+    origin = request.headers.get('origin', '*')
+    return Response(
+        status_code=200,
+        headers={
+            'Access-Control-Allow-Origin': origin,
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+            'Access-Control-Max-Age': '86400',
+        }
+    )
+
+
 @router.get('/public/{uid}')
 async def get_public_uploads(
+    request: Request,
     uid: str,
     limit: int = 50,
     cursor: str | None = None,
@@ -353,8 +370,12 @@ async def get_public_uploads(
     """
     import os
     from datetime import datetime
+    from fastapi.responses import JSONResponse
     
     logger.info(f"Public uploads request for uid: {uid}")
+    
+    # Get the origin for CORS
+    origin = request.headers.get('origin', '*')
     
     try:
         # Verify the user has an enabled custom domain
@@ -411,9 +432,23 @@ async def get_public_uploads(
                 
                 logger.info(f"Returning {len(photos)} photos for uid {uid}")
                 next_token = resp.get('NextContinuationToken') or None
-                return {'photos': photos, 'next_cursor': next_token}
+                return JSONResponse(
+                    content={'photos': photos, 'next_cursor': next_token},
+                    headers={
+                        'Access-Control-Allow-Origin': origin,
+                        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                        'Access-Control-Allow-Headers': '*',
+                    }
+                )
             else:
-                return {'photos': [], 'next_cursor': None}
+                return JSONResponse(
+                    content={'photos': [], 'next_cursor': None},
+                    headers={
+                        'Access-Control-Allow-Origin': origin,
+                        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                        'Access-Control-Allow-Headers': '*',
+                    }
+                )
         except Exception as ex:
             logger.error(f"R2 error for public uploads {uid}: {ex}")
             raise HTTPException(status_code=500, detail="Storage error")

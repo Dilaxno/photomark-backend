@@ -180,8 +180,10 @@ async def custom_domain_routing(request: Request, call_next):
             return await call_next(request)
         
         # Skip static assets - let them be proxied to frontend directly
-        static_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.map', '.json', '.webp', '.avif')
-        if path.startswith('/assets/') or path.startswith('/static/') or any(path.endswith(ext) for ext in static_extensions):
+        static_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.otf', '.map', '.json', '.webp', '.avif', '.webmanifest')
+        static_paths = ('/assets/', '/static/', '/fonts/', '/images/', '/icons/')
+        is_static = any(path.startswith(p) for p in static_paths) or any(path.endswith(ext) for ext in static_extensions)
+        if is_static:
             # For custom domains, proxy static assets to the frontend
             host = _get_request_host(request)
             if host:
