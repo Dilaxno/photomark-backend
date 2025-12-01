@@ -154,6 +154,19 @@ def _find_shop_by_host(db, host: str):
     except Exception:
         return None
 
+
+def _find_uploads_domain_by_host(db, host: str):
+    """Find uploads domain record by hostname"""
+    try:
+        from models.uploads_domain import UploadsDomain
+        host_l = (host or "").strip().lower().rstrip(".")
+        domain = db.query(UploadsDomain).filter(UploadsDomain.hostname == host_l).first()
+        if domain and domain.enabled:
+            return domain
+        return None
+    except Exception:
+        return None
+
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
     try:
@@ -161,7 +174,7 @@ async def custom_domain_routing(request: Request, call_next):
             path = request.url.path or ""
         except Exception:
             path = ""
-        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/shop/"):
+        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/shop/") or path.startswith("/api/"):
             return await call_next(request)
 
         host = _get_request_host(request)
@@ -171,6 +184,7 @@ async def custom_domain_routing(request: Request, call_next):
             from models.shop import Shop
             db: Session = next(get_db())
             try:
+                # Check for shop custom domain first
                 shop = _find_shop_by_host(db, host)
                 if shop:
                     if _should_redirect_shop(shop):
@@ -182,6 +196,24 @@ async def custom_domain_routing(request: Request, call_next):
                             inject = f"<script>try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}</script>" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
                             return Response(content=html, media_type="text/html", status_code=200)
+                
+                # Check for uploads custom domain
+                uploads_domain = _find_uploads_domain_by_host(db, host)
+                if uploads_domain:
+                    # Serve the uploads preview page for this user
+                    uid = uploads_domain.uid
+                    front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        r = await client.get(f"{front}/", follow_redirects=True)
+                        html = r.text
+                        # Inject script to set uploads preview mode with user UID
+                        inject = f"""<script>
+                            window.__UPLOADS_CUSTOM_DOMAIN__ = true;
+                            window.__UPLOADS_OWNER_UID__ = "{uid}";
+                            try{{history.replaceState(null,'','/external-uploads')}}catch(e){{}}
+                        </script>"""
+                        html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
+                        return Response(content=html, media_type="text/html", status_code=200)
             finally:
                 try:
                     db.close()

@@ -338,3 +338,76 @@ async def get_uploads_domain_status(
         db.rollback()
         logger.error(f"Failed to check domain status for {uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check domain status: {str(e)}")
+
+
+@router.get('/public/{uid}')
+async def get_public_uploads(
+    uid: str,
+    limit: int = 50,
+    cursor: str | None = None,
+    db: Session = Depends(get_db)
+):
+    """Get public uploads for a user (used by custom domain pages).
+    No authentication required - this is for public viewing.
+    Only works if user has an enabled custom domain.
+    """
+    import os
+    from datetime import datetime
+    
+    try:
+        # Verify the user has an enabled custom domain
+        domain = db.query(UploadsDomain).filter(
+            UploadsDomain.uid == uid,
+            UploadsDomain.enabled == True
+        ).first()
+        
+        if not domain:
+            raise HTTPException(status_code=404, detail="No public uploads available")
+        
+        # Get the user's external photos from R2
+        photos = []
+        prefix = f"users/{uid}/external/"
+        
+        try:
+            # Import R2 client from photos router
+            from routers.photos import s3, R2_BUCKET, _get_url_for_key
+            
+            if s3 and R2_BUCKET:
+                client = s3.meta.client
+                params = {
+                    'Bucket': R2_BUCKET,
+                    'Prefix': prefix,
+                    'MaxKeys': max(1, min(int(limit or 50), 100)),
+                }
+                if cursor:
+                    params['ContinuationToken'] = cursor
+                
+                resp = client.list_objects_v2(**params)
+                for obj in resp.get('Contents', []) or []:
+                    key = obj.get('Key', '')
+                    if not key or key.endswith('/') or key.endswith('/_history.txt'):
+                        continue
+                    name = os.path.basename(key)
+                    if '-fromfriend' in name.lower():
+                        continue
+                    url = _get_url_for_key(key, expires_in=3600)
+                    photos.append({
+                        'key': key,
+                        'url': url,
+                        'name': name,
+                        'size': obj.get('Size', 0),
+                        'last_modified': obj.get('LastModified', datetime.utcnow()).isoformat()
+                    })
+                
+                next_token = resp.get('NextContinuationToken') or None
+                return {'photos': photos, 'next_cursor': next_token}
+            else:
+                return {'photos': [], 'next_cursor': None}
+        except Exception as ex:
+            logger.error(f"R2 error for public uploads {uid}: {ex}")
+            raise HTTPException(status_code=500, detail="Storage error")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get public uploads for {uid}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load uploads")
