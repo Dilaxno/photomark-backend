@@ -174,7 +174,36 @@ async def custom_domain_routing(request: Request, call_next):
             path = request.url.path or ""
         except Exception:
             path = ""
+        
+        # Skip paths that should not be intercepted
         if path.startswith("/.well-known/acme-challenge/") or path.startswith("/shop/") or path.startswith("/api/"):
+            return await call_next(request)
+        
+        # Skip static assets - let them be proxied to frontend directly
+        static_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.map', '.json', '.webp', '.avif')
+        if path.startswith('/assets/') or path.startswith('/static/') or any(path.endswith(ext) for ext in static_extensions):
+            # For custom domains, proxy static assets to the frontend
+            host = _get_request_host(request)
+            if host:
+                from core.database import get_db
+                from sqlalchemy.orm import Session
+                db: Session = next(get_db())
+                try:
+                    shop = _find_shop_by_host(db, host)
+                    uploads_domain = _find_uploads_domain_by_host(db, host) if not shop else None
+                    if shop or uploads_domain:
+                        # Proxy static asset request to frontend
+                        front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(f"{front}{path}", follow_redirects=True)
+                            # Determine content type from response or path
+                            content_type = r.headers.get('content-type', 'application/octet-stream')
+                            return Response(content=r.content, media_type=content_type, status_code=r.status_code)
+                finally:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
             return await call_next(request)
 
         host = _get_request_host(request)
