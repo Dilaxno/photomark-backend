@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request, Body, Depends
 from fastapi.responses import JSONResponse
 import os
 import httpx
@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 from core.auth import get_uid_from_request
 from core.config import logger
 from utils.emailing import render_email, send_email_smtp
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.user import User
 
 router = APIRouter(prefix="/api/chat/stream", tags=["streamchat"]) 
 
@@ -67,9 +70,21 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
         for u in (users or []):
             uidv = str((u or {}).get("id") or (u or {}).get("uid") or "").strip()
             name = str((u or {}).get("name") or "").strip()
+            image = str((u or {}).get("image") or (u or {}).get("photo_url") or "").strip()
+            email = str((u or {}).get("email") or "").strip()
+            presence_state = str((u or {}).get("presence_state") or "").strip()
             if not uidv:
                 continue
-            payload_users[uidv] = {"id": uidv, **({"name": name} if name else {})}
+            data = {"id": uidv}
+            if name:
+                data["name"] = name
+            if image:
+                data["image"] = image
+            if email:
+                data["email"] = email
+            if presence_state:
+                data["presence_state"] = presence_state
+            payload_users[uidv] = data
         if not payload_users:
             return {"ok": True, "items": []}
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -178,7 +193,7 @@ async def group_invite(request: Request, guid: str = Body(..., embed=True), emai
 
 
 @router.post("/group/join")
-async def group_join(request: Request, guid: str = Body(..., embed=True)):
+async def group_join(request: Request, guid: str = Body(..., embed=True), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -186,9 +201,22 @@ async def group_join(request: Request, guid: str = Body(..., embed=True)):
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Ensure user exists
             try:
-                await client.post(f"{BASE_URL}/users", headers=_headers(), params={"api_key": API_KEY}, json={"users": {uid: {"id": uid}}})
+                display = ""
+                image = ""
+                try:
+                    urec = db.query(User).filter(User.uid == uid).first() if db else None
+                    if urec:
+                        display = (urec.display_name or "").strip()
+                        image = (urec.photo_url or "").strip()
+                except Exception:
+                    pass
+                await client.post(
+                    f"{BASE_URL}/users",
+                    headers=_headers(),
+                    params={"api_key": API_KEY},
+                    json={"users": {uid: {"id": uid, **({"name": display} if display else {}), **({"image": image} if image else {})}}}
+                )
             except Exception:
                 pass
             # Add member to channel

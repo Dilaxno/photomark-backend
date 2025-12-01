@@ -30,12 +30,14 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
 
     name_auth = ""
     email_auth = ""
+    photo_auth = ""
     user = None
     if firebase_enabled and fb_auth:
         try:
             user = fb_auth.get_user(uid)
             name_auth = (getattr(user, "display_name", None) or "").strip()
             email_auth = (getattr(user, "email", None) or "").strip()
+            photo_auth = (getattr(user, "photo_url", None) or "").strip()
         except Exception as ex:
             logger.warning(f"users/sync get_user failed for {uid}: {ex}")
 
@@ -65,6 +67,8 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
             # Update existing user
             user.display_name = name or user.display_name
             user.email = email or user.email
+            if photo_auth or (payload or {}).get("photo_url"):
+                user.photo_url = (payload or {}).get("photo_url") or photo_auth or user.photo_url
             user.last_login_at = now
             user.updated_at = now
             
@@ -75,6 +79,7 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
                 uid=uid,
                 email=email or f"{uid}@temp.invalid",  # Fallback for missing email
                 display_name=name,
+                photo_url=((payload or {}).get("photo_url") or photo_auth or None),
                 plan="free",
                 created_at=now,
                 updated_at=now,
