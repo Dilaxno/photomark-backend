@@ -52,6 +52,11 @@ def init_db():
     Initialize database tables
     Call this on application startup
     """
+    # Import all models so SQLAlchemy knows about them
+    from models.user import User  # noqa: F401
+    from models.shop import Shop, ShopSlug  # noqa: F401
+    from models.uploads_domain import UploadsDomain  # noqa: F401
+    
     Base.metadata.create_all(bind=engine)
     # Run idempotent DDL inside a transaction so changes are committed
     try:

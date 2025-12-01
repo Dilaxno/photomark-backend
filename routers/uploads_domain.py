@@ -1,17 +1,18 @@
 """
 Uploads Domain Router - Custom domain management for uploads preview page
+Uses dedicated uploads_domains table for better security and performance
 """
 from fastapi import APIRouter, HTTPException, Request, Depends, Body
-from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import datetime
 import re
 import httpx
+import uuid
 
 from core.auth import get_uid_from_request
 from core.database import get_db
 from core.config import logger
-from models.user import User
+from models.uploads_domain import UploadsDomain
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads-domain"])
 
@@ -24,24 +25,23 @@ def _normalize_domain(dom: str | None) -> str | None:
 
 @router.get('/domain/config')
 async def get_uploads_domain_config(request: Request, db: Session = Depends(get_db)):
-    """Get current uploads domain configuration"""
+    """Get current uploads domain configuration for the authenticated user"""
     uid = get_uid_from_request(request)
     if not uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
-        user = db.query(User).filter(User.uid == uid).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Query by user UID - ensures user can only see their own domain
+        domain = db.query(UploadsDomain).filter(UploadsDomain.uid == uid).first()
         
-        # Store uploads domain config in user's extra_metadata (JSON field)
-        meta = user.extra_metadata or {}
-        domain_config = meta.get('uploads_domain') or {}
+        if not domain:
+            return {"domain": {}}
         
-        return {"domain": domain_config}
+        return {"domain": domain.to_dict()}
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Failed to get domain config for {uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get domain config: {str(e)}")
 
 
@@ -65,49 +65,61 @@ async def set_uploads_domain(
         raise HTTPException(status_code=400, detail="invalid hostname")
 
     try:
-        user = db.query(User).filter(User.uid == uid).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        meta = user.extra_metadata or {}
-        existing = meta.get('uploads_domain') or {}
-        current_host = _normalize_domain(existing.get('hostname'))
+        # Check if user already has a domain configured
+        existing = db.query(UploadsDomain).filter(UploadsDomain.uid == uid).first()
         
-        if current_host and current_host != hostname:
-            raise HTTPException(status_code=409, detail="domain_already_set")
-
-        now = datetime.utcnow().isoformat()
-        domain_config = {
-            "hostname": hostname,
-            "dnsTarget": "api.photomark.cloud",
-            "dnsVerified": False,
-            "sslStatus": "unknown",
-            "lastChecked": now,
-            "enabled": False,
-        }
+        if existing:
+            if existing.hostname != hostname:
+                raise HTTPException(status_code=409, detail="domain_already_set")
+            # Same hostname, just return current config
+            return {
+                "success": True,
+                "message": "Domain already configured.",
+                "instructions": {
+                    "recordType": "CNAME",
+                    "name": hostname,
+                    "value": "api.photomark.cloud",
+                    "ttl": 300
+                },
+                "domain": existing.to_dict()
+            }
         
-        meta['uploads_domain'] = domain_config
-        user.extra_metadata = meta
-        user.updated_at = datetime.utcnow()
+        # Check if hostname is already taken by another user
+        hostname_taken = db.query(UploadsDomain).filter(UploadsDomain.hostname == hostname).first()
+        if hostname_taken:
+            raise HTTPException(status_code=409, detail="hostname_already_taken")
+        
+        # Create new domain record
+        domain = UploadsDomain(
+            id=str(uuid.uuid4()),
+            uid=uid,
+            hostname=hostname,
+            dns_verified=False,
+            ssl_status='unknown',
+            enabled=False
+        )
+        db.add(domain)
         db.commit()
-
-        instructions = {
-            "recordType": "CNAME",
-            "name": hostname,
-            "value": "api.photomark.cloud",
-            "ttl": 300
-        }
+        db.refresh(domain)
+        
+        logger.info(f"Created uploads domain {hostname} for user {uid[:8]}...")
 
         return {
             "success": True,
             "message": "Custom domain saved. Create the CNAME record and check status.",
-            "instructions": instructions,
-            "domain": domain_config
+            "instructions": {
+                "recordType": "CNAME",
+                "name": hostname,
+                "value": "api.photomark.cloud",
+                "ttl": 300
+            },
+            "domain": domain.to_dict()
         }
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
+        logger.error(f"Failed to set custom domain for {uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to set custom domain: {str(e)}")
 
 
@@ -119,21 +131,21 @@ async def remove_uploads_domain(request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
-        user = db.query(User).filter(User.uid == uid).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Only delete domain owned by this user
+        domain = db.query(UploadsDomain).filter(UploadsDomain.uid == uid).first()
         
-        meta = user.extra_metadata or {}
-        meta['uploads_domain'] = {}
-        user.extra_metadata = meta
-        user.updated_at = datetime.utcnow()
-        db.commit()
+        if domain:
+            hostname = domain.hostname
+            db.delete(domain)
+            db.commit()
+            logger.info(f"Removed uploads domain {hostname} for user {uid[:8]}...")
         
         return {"ok": True}
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
+        logger.error(f"Failed to remove domain for {uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove domain: {str(e)}")
 
 
@@ -145,40 +157,31 @@ async def enable_uploads_domain(request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
-        user = db.query(User).filter(User.uid == uid).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Only enable domain owned by this user
+        domain = db.query(UploadsDomain).filter(UploadsDomain.uid == uid).first()
         
-        meta = user.extra_metadata or {}
-        domain_config = dict(meta.get('uploads_domain') or {})
-        hostname = _normalize_domain(domain_config.get('hostname'))
+        if not domain:
+            raise HTTPException(status_code=404, detail="No domain configured")
         
-        if not hostname:
-            raise HTTPException(status_code=400, detail="No hostname configured")
+        logger.info(f"Enable domain {domain.hostname}: dnsVerified={domain.dns_verified}, sslStatus={domain.ssl_status}")
         
-        dns_ok = bool(domain_config.get('dnsVerified'))
-        ssl_ok = str(domain_config.get('sslStatus') or '').strip().lower() == 'active'
+        if not domain.dns_verified:
+            raise HTTPException(status_code=412, detail=f"domain_not_ready: dns=False")
         
-        logger.info(f"Enable domain {hostname}: dnsVerified={dns_ok}, sslStatus={domain_config.get('sslStatus')}, ssl_ok={ssl_ok}")
+        if domain.ssl_status != 'active':
+            raise HTTPException(status_code=412, detail=f"domain_not_ready: ssl={domain.ssl_status}")
         
-        if not (dns_ok and ssl_ok):
-            raise HTTPException(status_code=412, detail=f"domain_not_ready: dns={dns_ok}, ssl={ssl_ok}")
-        
-        from sqlalchemy.orm.attributes import flag_modified
-        domain_config['enabled'] = True
-        meta = dict(meta)
-        meta['uploads_domain'] = domain_config
-        user.extra_metadata = meta
-        user.updated_at = datetime.utcnow()
-        flag_modified(user, 'extra_metadata')
+        domain.enabled = True
+        domain.updated_at = datetime.utcnow()
         db.commit()
         
-        logger.info(f"Domain {hostname} enabled successfully")
-        return {"ok": True, "domain": domain_config}
+        logger.info(f"Domain {domain.hostname} enabled successfully for user {uid[:8]}...")
+        return {"ok": True, "domain": domain.to_dict()}
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
+        logger.error(f"Failed to enable domain for {uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to enable domain: {str(e)}")
 
 
@@ -206,28 +209,21 @@ async def _check_domain_dns(hostname: str, db: Session = None, uid: str = None) 
                     if cname_target == "api.photomark.cloud":
                         dns_verified = True
                         break
-    except Exception:
+    except Exception as e:
+        logger.warning(f"DNS check failed for {hostname}: {e}")
         dns_verified = False
     
     # If DNS is verified and we have db access, update immediately
     # This allows Caddy to issue SSL certificate on the SSL check request
     if dns_verified and db and uid:
         try:
-            from sqlalchemy.orm.attributes import flag_modified
-            user = db.query(User).filter(User.uid == uid).first()
-            if user:
-                meta = dict(user.extra_metadata or {})
-                domain_config = dict(meta.get('uploads_domain') or {})
-                domain_config['dnsVerified'] = True
-                domain_config['cnameObserved'] = cname_target
-                domain_config['hostname'] = hostname
-                domain_config['lastChecked'] = datetime.utcnow().isoformat()
-                meta['uploads_domain'] = domain_config
-                user.extra_metadata = meta
-                flag_modified(user, 'extra_metadata')
+            domain = db.query(UploadsDomain).filter(UploadsDomain.uid == uid).first()
+            if domain and not domain.dns_verified:
+                domain.dns_verified = True
+                domain.cname_observed = cname_target
+                domain.last_checked = datetime.utcnow()
                 db.commit()
-                db.refresh(user)
-                logger.info(f"DNS verified for {hostname}, updated database for SSL issuance. dnsVerified={domain_config.get('dnsVerified')}")
+                logger.info(f"DNS verified for {hostname}, updated database for SSL issuance")
         except Exception as e:
             logger.warning(f"Failed to update dnsVerified early: {e}")
             try:
@@ -239,11 +235,9 @@ async def _check_domain_dns(hostname: str, db: Session = None, uid: str = None) 
     if dns_verified:
         try:
             # Use longer timeout for SSL check as Caddy may need to issue certificate
-            # Use GET instead of HEAD as some routes don't support HEAD
             async with httpx.AsyncClient(timeout=10.0, verify=True) as client:
                 h = await client.get(f"https://{hostname}", follow_redirects=True)
                 # Any successful HTTPS connection means SSL is working
-                # 405 Method Not Allowed still means SSL is active
                 if h.status_code < 500:
                     ssl_status = "active"
                     logger.info(f"SSL check for {hostname}: status={h.status_code}, ssl=active")
@@ -252,12 +246,10 @@ async def _check_domain_dns(hostname: str, db: Session = None, uid: str = None) 
         except Exception as e:
             ssl_error = str(e)
             err_str = str(e).lower()
-            # Check if it's a certificate error vs connection error
             if "certificate" in err_str or "ssl" in err_str or "tls" in err_str:
-                ssl_status = "pending"  # Certificate not yet issued
+                ssl_status = "pending"
                 logger.info(f"SSL check for {hostname}: certificate error - {ssl_error}")
             else:
-                # Connection succeeded but other error - SSL might be working
                 ssl_status = "pending"
                 logger.info(f"SSL check for {hostname}: error - {ssl_error}")
     else:
@@ -283,59 +275,66 @@ async def get_uploads_domain_status(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
-        user = db.query(User).filter(User.uid == uid).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Get domain owned by this user
+        domain = db.query(UploadsDomain).filter(UploadsDomain.uid == uid).first()
         
-        meta = user.extra_metadata or {}
-        domain_config = meta.get('uploads_domain') or {}
-        
-        # Use provided hostname or get from config
-        hostname = _normalize_domain(hostname) or _normalize_domain(domain_config.get('hostname'))
+        # Use provided hostname or get from database
+        hostname = _normalize_domain(hostname)
+        if not hostname and domain:
+            hostname = domain.hostname
         
         if not hostname:
             raise HTTPException(status_code=400, detail="No hostname configured")
+        
+        # Security check: if domain exists, ensure it belongs to this user
+        if domain and domain.hostname != hostname:
+            raise HTTPException(status_code=403, detail="Hostname mismatch")
 
         # Check DNS status (pass db and uid so dnsVerified can be saved early for SSL)
         status = await _check_domain_dns(hostname, db=db, uid=uid)
         
-        # Update stored status
-        from sqlalchemy.orm.attributes import flag_modified
-        domain_config = dict(domain_config)  # Ensure it's a new dict
-        domain_config['hostname'] = hostname
-        domain_config['dnsVerified'] = status['dnsVerified']
-        domain_config['sslStatus'] = status['sslStatus']
-        domain_config['cnameObserved'] = status['cnameObserved']
-        domain_config['lastChecked'] = datetime.utcnow().isoformat()
-        if status.get('error'):
-            domain_config['lastError'] = status['error']
+        # Update or create domain record
+        if not domain:
+            domain = UploadsDomain(
+                id=str(uuid.uuid4()),
+                uid=uid,
+                hostname=hostname,
+                dns_verified=status['dnsVerified'],
+                ssl_status=status['sslStatus'],
+                cname_observed=status['cnameObserved'],
+                last_error=status.get('error'),
+                last_checked=datetime.utcnow(),
+                enabled=False
+            )
+            db.add(domain)
+        else:
+            domain.dns_verified = status['dnsVerified']
+            domain.ssl_status = status['sslStatus']
+            domain.cname_observed = status['cnameObserved']
+            domain.last_error = status.get('error')
+            domain.last_checked = datetime.utcnow()
         
-        meta = dict(meta)  # Ensure it's a new dict
-        meta['uploads_domain'] = domain_config
-        user.extra_metadata = meta
-        user.updated_at = datetime.utcnow()
-        flag_modified(user, 'extra_metadata')
         db.commit()
+        db.refresh(domain)
         
         logger.info(f"Saved domain status for {hostname}: dnsVerified={status['dnsVerified']}, sslStatus={status['sslStatus']}")
-
-        instructions = {
-            "recordType": "CNAME",
-            "name": hostname,
-            "value": "api.photomark.cloud",
-            "ttl": 300
-        }
 
         return {
             "hostname": hostname,
             "dnsVerified": status['dnsVerified'],
             "sslStatus": status['sslStatus'],
             "cnameObserved": status['cnameObserved'],
-            "enabled": bool(domain_config.get('enabled')),
-            "instructions": instructions
+            "enabled": domain.enabled,
+            "instructions": {
+                "recordType": "CNAME",
+                "name": hostname,
+                "value": "api.photomark.cloud",
+                "ttl": 300
+            }
         }
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
+        logger.error(f"Failed to check domain status for {uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check domain status: {str(e)}")

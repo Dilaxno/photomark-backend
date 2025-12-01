@@ -394,6 +394,9 @@ async def allow_domain(request: Request):
 
 @app.get("/api/domains/validate")
 async def domains_validate(request: Request):
+    """Validate custom domains for Caddy on-demand TLS.
+    Called by Caddy before issuing SSL certificates.
+    """
     from fastapi.responses import PlainTextResponse
     domain = (request.query_params.get("domain") or request.query_params.get("host") or "").strip().lower().rstrip(".")
     if not domain:
@@ -406,7 +409,7 @@ async def domains_validate(request: Request):
         from core.database import get_db
         from sqlalchemy.orm import Session
         from models.shop import Shop
-        from models.user import User
+        from models.uploads_domain import UploadsDomain
         db: Session = next(get_db())
         try:
             from sqlalchemy import cast, String
@@ -423,25 +426,18 @@ async def domains_validate(request: Request):
             except Exception as e:
                 logger.debug(f"Shop domain query failed: {e}")
             
-            # Check uploads custom domains (stored in user.extra_metadata.uploads_domain)
-            # Fallback approach that works with all databases
-            users = db.query(User).filter(User.extra_metadata.isnot(None)).all()
-            logger.debug(f"Checking {len(users)} users for uploads domain {domain}")
-            for user in users:
-                meta = user.extra_metadata or {}
-                uploads_domain = meta.get('uploads_domain') or {}
-                hostname = (uploads_domain.get('hostname') or '').lower().rstrip('.')
-                if hostname:
-                    logger.debug(f"User {user.uid[:8]}... has uploads domain: {hostname}, dnsVerified={uploads_domain.get('dnsVerified')}, enabled={uploads_domain.get('enabled')}")
-                if hostname == domain:
-                    enabled = bool(uploads_domain.get('enabled') or False)
-                    dns_verified = bool(uploads_domain.get('dnsVerified') or False)
-                    logger.info(f"Domain {domain} found for user {user.uid[:8]}... (enabled={enabled}, dns_verified={dns_verified})")
-                    if enabled or dns_verified:
-                        logger.info(f"Domain {domain} validated via uploads (enabled={enabled}, dns={dns_verified})")
+            # Check uploads custom domains (using dedicated table)
+            try:
+                uploads_domain = db.query(UploadsDomain).filter(UploadsDomain.hostname == domain).first()
+                if uploads_domain:
+                    logger.info(f"Domain {domain} found in uploads_domains (enabled={uploads_domain.enabled}, dns_verified={uploads_domain.dns_verified})")
+                    if uploads_domain.enabled or uploads_domain.dns_verified:
+                        logger.info(f"Domain {domain} validated via uploads_domains table")
                         return PlainTextResponse("ok", status_code=200)
                     else:
                         logger.info(f"Domain {domain} found but not enabled/verified yet")
+            except Exception as e:
+                logger.warning(f"Uploads domain query failed: {e}")
         finally:
             try:
                 db.close()
