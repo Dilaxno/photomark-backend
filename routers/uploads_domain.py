@@ -159,15 +159,21 @@ async def enable_uploads_domain(request: Request, db: Session = Depends(get_db))
         dns_ok = bool(domain_config.get('dnsVerified'))
         ssl_ok = str(domain_config.get('sslStatus') or '').strip().lower() == 'active'
         
-        if not (dns_ok and ssl_ok):
-            raise HTTPException(status_code=412, detail="domain_not_ready")
+        logger.info(f"Enable domain {hostname}: dnsVerified={dns_ok}, sslStatus={domain_config.get('sslStatus')}, ssl_ok={ssl_ok}")
         
+        if not (dns_ok and ssl_ok):
+            raise HTTPException(status_code=412, detail=f"domain_not_ready: dns={dns_ok}, ssl={ssl_ok}")
+        
+        from sqlalchemy.orm.attributes import flag_modified
         domain_config['enabled'] = True
+        meta = dict(meta)
         meta['uploads_domain'] = domain_config
         user.extra_metadata = meta
         user.updated_at = datetime.utcnow()
+        flag_modified(user, 'extra_metadata')
         db.commit()
         
+        logger.info(f"Domain {hostname} enabled successfully")
         return {"ok": True, "domain": domain_config}
     except HTTPException:
         raise
@@ -294,6 +300,9 @@ async def get_uploads_domain_status(
         status = await _check_domain_dns(hostname, db=db, uid=uid)
         
         # Update stored status
+        from sqlalchemy.orm.attributes import flag_modified
+        domain_config = dict(domain_config)  # Ensure it's a new dict
+        domain_config['hostname'] = hostname
         domain_config['dnsVerified'] = status['dnsVerified']
         domain_config['sslStatus'] = status['sslStatus']
         domain_config['cnameObserved'] = status['cnameObserved']
@@ -301,10 +310,14 @@ async def get_uploads_domain_status(
         if status.get('error'):
             domain_config['lastError'] = status['error']
         
+        meta = dict(meta)  # Ensure it's a new dict
         meta['uploads_domain'] = domain_config
         user.extra_metadata = meta
         user.updated_at = datetime.utcnow()
+        flag_modified(user, 'extra_metadata')
         db.commit()
+        
+        logger.info(f"Saved domain status for {hostname}: dnsVerified={status['dnsVerified']}, sslStatus={status['sslStatus']}")
 
         instructions = {
             "recordType": "CNAME",
