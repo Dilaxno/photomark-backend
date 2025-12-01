@@ -6,6 +6,9 @@ from datetime import datetime
 from io import BytesIO
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, STATIC_DIR as static_dir, logger
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.gallery import GalleryAsset
 from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
 from utils.invisible_mark import detect_signature, PAYLOAD_LEN
@@ -846,7 +849,7 @@ async def api_photos_originals(request: Request):
 
 
 @router.post("/photos/delete")
-async def api_photos_delete(request: Request, keys: List[str] = Body(..., embed=True)):
+async def api_photos_delete(request: Request, keys: List[str] = Body(..., embed=True), db: Session = Depends(get_db)):
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -1014,6 +1017,15 @@ async def api_photos_delete(request: Request, keys: List[str] = Body(..., embed=
     except Exception as ex:
         logger.warning(f"Failed to purge vault references: {ex}")
 
+    try:
+        if deleted:
+            db.query(GalleryAsset).filter(GalleryAsset.user_uid == uid, GalleryAsset.key.in_(deleted)).delete(synchronize_session=False)
+            db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
     return {"deleted": deleted, "errors": errors}
 
 

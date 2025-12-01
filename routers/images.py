@@ -10,6 +10,10 @@ from PIL import Image
 from core.config import MAX_FILES, logger
 from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
 from utils.storage import upload_bytes
+from sqlalchemy.orm import Session
+from fastapi import Depends
+from core.database import get_db
+from models.gallery import GalleryAsset
 from utils.watermark import add_text_watermark, add_signature_watermark
 from utils.invisible_mark import detect_signature, payload_matches_uid, PAYLOAD_LEN
 
@@ -31,6 +35,7 @@ async def images_upload(
     artist: str | None = Form(None),
     source: str | None = Form(None),
     no_original: str | None = Form(None),
+    db: Session = Depends(get_db),
 ):
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
@@ -105,6 +110,31 @@ async def images_upload(
 
         if save_original and original_key:
             resp.update({"original_key": original_key, "original_url": results[0]})
+        try:
+            # Persist watermarked size
+            wm_bytes = buf.getvalue()
+            ex = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+            if ex:
+                ex.user_uid = uid
+                ex.vault = None
+                ex.size_bytes = len(wm_bytes)
+            else:
+                db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(wm_bytes)))
+            # Persist original size if saved
+            if save_original and original_key:
+                eo = db.query(GalleryAsset).filter(GalleryAsset.key == original_key).first()
+                if eo:
+                    eo.user_uid = uid
+                    eo.vault = None
+                    eo.size_bytes = len(raw)
+                else:
+                    db.add(GalleryAsset(user_uid=uid, vault=None, key=original_key, size_bytes=len(raw)))
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
         return resp
 
@@ -124,6 +154,7 @@ async def images_watermark(
     color: Optional[str] = Form(None),
     opacity: Optional[float] = Form(None),
     artist: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
 ):
     """Apply text or signature watermark and store the result.
     - If use_signature=True and a signature file is provided, overlay the signature.
@@ -197,7 +228,30 @@ async def images_watermark(
     oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
     key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-{suffix}-o{oext_token}.jpg"
 
-    url = upload_bytes(key, buf.getvalue(), content_type="image/jpeg")
+    data_wm = buf.getvalue()
+    url = upload_bytes(key, data_wm, content_type="image/jpeg")
+    try:
+        # Record both assets
+        ex = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+        if ex:
+            ex.user_uid = uid
+            ex.vault = None
+            ex.size_bytes = len(data_wm)
+        else:
+            db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(data_wm)))
+        eo = db.query(GalleryAsset).filter(GalleryAsset.key == original_key).first()
+        if eo:
+            eo.user_uid = uid
+            eo.vault = None
+            eo.size_bytes = len(raw)
+        else:
+            db.add(GalleryAsset(user_uid=uid, vault=None, key=original_key, size_bytes=len(raw)))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
     return {"key": key, "url": url, "original_key": original_key, "original_url": original_url}
 
 

@@ -3,7 +3,7 @@ import io
 import os
 from datetime import datetime as _dt
 
-from fastapi import APIRouter, Request, UploadFile, File, Form
+from fastapi import APIRouter, Request, UploadFile, File, Form, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 import zipfile
@@ -18,6 +18,9 @@ from utils.watermark import (
 )
 from utils.storage import upload_bytes, read_json_key
 from utils.invisible_mark import embed_signature as embed_invisible, build_payload_for_uid
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.gallery import GalleryAsset
 
 # Import vault helpers to update vaults after upload
 from routers.vaults import (
@@ -56,6 +59,7 @@ async def upload(
     vault_name: Optional[str] = Form(None),
     vault_protect: Optional[str] = Form(None),  # '1' to protect new vault
     vault_password: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
 ):
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
@@ -171,10 +175,25 @@ async def upload(
 
             # Upload only the WATERMARKED jpeg (no original to save storage and bandwidth)
             key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-{suffix}.jpg"
-            url = upload_bytes(key, buf.getvalue(), content_type='image/jpeg')
+            data = buf.getvalue()
+            url = upload_bytes(key, data, content_type='image/jpeg')
 
             uploaded.append({"key": key, "url": url})
             idx += 1
+            try:
+                existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+                if existing:
+                    existing.user_uid = uid
+                    existing.vault = None
+                    existing.size_bytes = len(data)
+                else:
+                    db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(data)))
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         except Exception as ex:
             logger.warning(f"upload failed for {getattr(uf,'filename', '')}: {ex}")
             continue
@@ -209,6 +228,7 @@ async def upload(
 async def upload_external(
     request: Request,
     files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
 ):
     """Upload raw user photos (no watermark) into users/{uid}/external/.
     - Requires gallery access for the effective workspace.
@@ -271,6 +291,20 @@ async def upload_external(
             key = f"users/{uid}/external/{date_prefix}/{base}-{stamp}{orig_ext}"
             url = upload_bytes(key, raw, content_type=orig_ct)
             uploaded.append({"key": key, "url": url, "name": os.path.basename(key)})
+            try:
+                existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+                if existing:
+                    existing.user_uid = uid
+                    existing.vault = None
+                    existing.size_bytes = len(raw)
+                else:
+                    db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(raw)))
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         except Exception as ex:
             logger.warning(f"external upload failed for {getattr(uf,'filename', '')}: {ex}")
             continue

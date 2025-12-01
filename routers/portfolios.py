@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from core.config import logger
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.storage import write_json_key, read_json_key, upload_bytes, get_presigned_url
+from models.gallery import GalleryAsset
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from core.database import get_db
@@ -183,6 +184,20 @@ async def create_item(request: Request, file: UploadFile = File(...), title: str
       _pg_upsert_item(db, uid, rec)
     except Exception:
       pass
+    try:
+      ex = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+      if ex:
+        ex.user_uid = uid
+        ex.vault = None
+        ex.size_bytes = len(raw)
+      else:
+        db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(raw)))
+      db.commit()
+    except Exception:
+      try:
+        db.rollback()
+      except Exception:
+        pass
     return {"item": rec}
   except Exception as ex:
     logger.warning(f"portfolio create_item failed: {ex}")
