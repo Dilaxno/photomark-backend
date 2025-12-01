@@ -23,6 +23,22 @@ COLLAB_JWT_SECRET = (os.getenv("COLLAB_JWT_SECRET", "") or os.getenv("SECRET_KEY
 
 BASE_URL = "https://chat.stream-io-api.com"
 
+# Simple in-process dedupe for /users posts to avoid bursts of identical ensures
+_RECENT_USER_POSTS: dict[str, float] = {}
+_RECENT_TTL_SECONDS = 8.0
+
+def _dedupe_key(uidv: str, presence_state: str | None) -> str:
+    return f"{uidv}|{presence_state or ''}"
+
+def _should_post(uidv: str, presence_state: str | None) -> bool:
+    k = _dedupe_key(uidv, presence_state)
+    now = datetime.utcnow().timestamp()
+    last = _RECENT_USER_POSTS.get(k, 0)
+    if now - last < _RECENT_TTL_SECONDS:
+        return False
+    _RECENT_USER_POSTS[k] = now
+    return True
+
 def _server_token() -> str:
     if not API_SECRET:
         return ""
@@ -124,6 +140,8 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
             presence_state = str((u or {}).get("presence_state") or "").strip()
             if not uidv:
                 continue
+            if not _should_post(uidv, presence_state or None):
+                continue
             data = {"id": uidv}
             if name:
                 data["name"] = name
@@ -217,7 +235,10 @@ async def group_invite(request: Request, guid: str = Body(..., embed=True), emai
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Ensure users
-            payload_users = {uidv: {"id": uidv} for uidv in ids}
+            payload_users = {}
+            for uidv in ids:
+                if _should_post(uidv, None):
+                    payload_users[uidv] = {"id": uidv}
             if payload_users:
                 try:
                     await client.post(f"{BASE_URL}/users", headers=_headers(), params={"api_key": API_KEY}, json={"users": payload_users})
@@ -278,12 +299,13 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
                 last_ex = None
                 for attempt in range(3):
                     try:
-                        await client.post(
-                            f"{BASE_URL}/users",
-                            headers=_headers(),
-                            params={"api_key": API_KEY},
-                            json={"users": {uid: {"id": uid, **({"name": display} if display else {}), **({"image": image} if image else {})}}}
-                        )
+                        if _should_post(uid, None):
+                            await client.post(
+                                f"{BASE_URL}/users",
+                                headers=_headers(),
+                                params={"api_key": API_KEY},
+                                json={"users": {uid: {"id": uid, **({"name": display} if display else {}), **({"image": image} if image else {})}}}
+                            )
                         last_ex = None
                         break
                     except Exception as ex:
