@@ -19,6 +19,7 @@ router = APIRouter(prefix="/api/chat/stream", tags=["streamchat"])
 
 API_KEY = (os.getenv("STREAM_API_KEY", "") or "").strip()
 API_SECRET = (os.getenv("STREAM_API_SECRET", "") or "").strip()
+COLLAB_JWT_SECRET = (os.getenv("COLLAB_JWT_SECRET", "") or os.getenv("SECRET_KEY", "")).strip()
 
 BASE_URL = "https://chat.stream-io-api.com"
 
@@ -43,9 +44,54 @@ def _headers() -> dict:
     }
 
 
+def _get_uid_from_any(request: Request) -> str | None:
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        tok = auth_header.split(" ", 1)[1].strip()
+        # Try session token (signed with STREAM_API_SECRET)
+        if API_SECRET:
+            try:
+                payload = jwt.decode(tok, API_SECRET, algorithms=["HS256"])  # type: ignore
+                uid = str(payload.get("uid") or payload.get("owner_uid") or "").strip()
+                if uid:
+                    return uid
+            except Exception:
+                pass
+        # Try collaborator token
+        if COLLAB_JWT_SECRET:
+            try:
+                payload = jwt.decode(tok, COLLAB_JWT_SECRET, algorithms=["HS256"])  # type: ignore
+                uid = str(payload.get("owner_uid") or payload.get("uid") or "").strip()
+                if uid:
+                    return uid
+            except Exception:
+                pass
+    # Fallback to Firebase ID token
+    return get_uid_from_request(request)
+
+
+@router.post("/session")
+async def chat_session(request: Request, ttl_seconds: int = Body(1800, embed=True)):
+    """Issue a short-lived session token for chat endpoints to reduce Firebase verification in hot loops."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not API_SECRET:
+        return JSONResponse({"error": "stream_not_configured"}, status_code=500)
+    try:
+        ttl = max(300, int(ttl_seconds or 0))
+        exp = int((datetime.utcnow() + timedelta(seconds=ttl)).timestamp())
+        payload = {"uid": uid, "exp": exp}
+        token = jwt.encode(payload, API_SECRET, algorithm="HS256")
+        tok = token if isinstance(token, str) else token.decode("utf-8")
+        return {"ok": True, "token": tok, "expires_in": ttl}
+    except Exception as ex:
+        logger.exception(f"chat_session failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
 @router.post("/token")
 async def stream_token(request: Request, user_id: str = Body(..., embed=True), expire_seconds: int = Body(24 * 3600, embed=True)):
-    uid = get_uid_from_request(request)
+    uid = _get_uid_from_any(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
@@ -63,7 +109,7 @@ async def stream_token(request: Request, user_id: str = Body(..., embed=True), e
 
 @router.post("/users/ensure")
 async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
-    uid = get_uid_from_request(request)
+    uid = _get_uid_from_any(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
@@ -121,7 +167,7 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
 
 @router.post("/group/create")
 async def group_create(request: Request, guid: str = Body(..., embed=True), name: str = Body("Collab Chat", embed=True), members: list[str] = Body(default=[]), topic: str = Body("", embed=True)):
-    owner_uid = get_uid_from_request(request)
+    owner_uid = _get_uid_from_any(request)
     if not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
@@ -154,7 +200,7 @@ async def group_create(request: Request, guid: str = Body(..., embed=True), name
 
 @router.post("/group/invite")
 async def group_invite(request: Request, guid: str = Body(..., embed=True), emails: list[str] = Body(default=[]), note: str = Body("", embed=True)):
-    owner_uid = get_uid_from_request(request)
+    owner_uid = _get_uid_from_any(request)
     if not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
@@ -212,7 +258,7 @@ async def group_invite(request: Request, guid: str = Body(..., embed=True), emai
 
 @router.post("/group/join")
 async def group_join(request: Request, guid: str = Body(..., embed=True), db: Session = Depends(get_db)):
-    uid = get_uid_from_request(request)
+    uid = _get_uid_from_any(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
@@ -265,7 +311,7 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
 
 @router.post("/group/delete")
 async def group_delete(request: Request, guid: str = Body(..., embed=True)):
-    uid = get_uid_from_request(request)
+    uid = _get_uid_from_any(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
