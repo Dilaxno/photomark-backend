@@ -1,12 +1,15 @@
 import os
 import secrets
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, Depends
 from fastapi.responses import JSONResponse
 
 from core.config import s3, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, s3_presign_client
 from utils.storage import presign_custom_domain_bucket
 from utils.storage import read_json_key, get_presigned_url
+from sqlalchemy.orm import Session
+from core.database import get_db
+from models.gallery import GalleryAsset
 
 router = APIRouter(prefix="/api/vaults/shared", tags=["shared"])
 
@@ -24,7 +27,8 @@ def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
 async def upload_marked_photo(
     file: UploadFile = File(...),
     token: str = Form(...),
-    photo_key: str = Form(...)
+    photo_key: str = Form(...),
+    db: Session = Depends(get_db)
 ):
     """Upload a marked-up photo from client (for retouch requests)."""
     token = token.strip()
@@ -73,6 +77,21 @@ async def upload_marked_photo(
             ACL='private',
             CacheControl='public, max-age=604800'
         )
+        try:
+            existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+            if existing:
+                existing.user_uid = uid
+                existing.vault = vault
+                existing.size_bytes = len(raw)
+            else:
+                rec = GalleryAsset(user_uid=uid, vault=vault, key=key, size_bytes=len(raw))
+                db.add(rec)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
         
         # Generate URL
         url = _get_url_for_key(key)

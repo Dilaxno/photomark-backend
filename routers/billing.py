@@ -1,11 +1,13 @@
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 from datetime import datetime
 
 from core.auth import get_uid_from_request
 from core.database import get_db
 from models.user import User
+from models.gallery import GalleryAsset
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -77,4 +79,48 @@ async def billing_info(request: Request, db: Session = Depends(get_db)):
         raise
     except Exception as ex:
         return JSONResponse({"error": f"Failed to fetch billing info: {ex}"}, status_code=500)
+
+
+@router.get("/usage")
+async def billing_usage(request: Request, db: Session = Depends(get_db)):
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+
+        plan = (user.plan or "free").strip().lower()
+        count = db.query(GalleryAsset).filter(GalleryAsset.user_uid == uid).count()
+        try:
+            total_bytes = int(
+                db.query(GalleryAsset)
+                  .filter(GalleryAsset.user_uid == uid)
+                  .with_entities(func.coalesce(func.sum(GalleryAsset.size_bytes), 0))
+                  .scalar() or 0
+            )
+        except Exception:
+            total_bytes = 0
+
+        # Plan storage limits
+        limit_bytes = None
+        unlimited = False
+        if plan in ("free", "trial"):
+            limit_bytes = 5 * 1024 * 1024 * 1024
+        elif plan in ("individual", "photographers"):
+            limit_bytes = 1024 * 1024 * 1024 * 1024
+        elif plan in ("studios", "agencies"):
+            unlimited = True
+
+        return {
+            "photosUploaded": int(count or 0),
+            "storageUsedBytes": int(total_bytes or 0),
+            "storageLimitBytes": int(limit_bytes) if (limit_bytes is not None) else None,
+            "unlimitedStorage": unlimited,
+        }
+    except HTTPException:
+        raise
+    except Exception as ex:
+        return JSONResponse({"error": f"Failed to fetch usage: {ex}"}, status_code=500)
 

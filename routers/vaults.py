@@ -24,6 +24,8 @@ from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from core.database import get_db
+from models.gallery import GalleryAsset
+from models.gallery import GalleryAsset
 
 router = APIRouter(prefix="/api", tags=["vaults"])
 
@@ -626,7 +628,8 @@ async def vaults_upload(
     request: Request,
     files: List[UploadFile] = File(...),
     vault: str = Form(...),
-    password: Optional[str] = Form(None)
+    password: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
 ):
     """Upload files directly to a vault (not to general uploads area)"""
     uid = get_uid_from_request(request)
@@ -687,6 +690,26 @@ async def vaults_upload(
                 "filename": orig_filename,
                 "size": len(raw)
             })
+            try:
+                existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+                if existing:
+                    existing.user_uid = uid
+                    existing.vault = _vault_key(uid, vault)[1]
+                    existing.size_bytes = len(raw)
+                else:
+                    rec = GalleryAsset(
+                        user_uid=uid,
+                        vault=_vault_key(uid, vault)[1],
+                        key=key,
+                        size_bytes=len(raw),
+                    )
+                    db.add(rec)
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             
         except Exception as ex:
             logger.error(f"Failed to upload file {uf.filename}: {ex}")
@@ -714,7 +737,7 @@ async def vaults_upload(
 
 
 @router.post("/vaults/remove")
-async def vaults_remove(request: Request, vault: str = Body(..., embed=True), keys: List[str] = Body(..., embed=True), password: Optional[str] = Body(None, embed=True), delete_from_r2: Optional[bool] = Body(False, embed=True)):
+async def vaults_remove(request: Request, vault: str = Body(..., embed=True), keys: List[str] = Body(..., embed=True), password: Optional[str] = Body(None, embed=True), delete_from_r2: Optional[bool] = Body(False, embed=True), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -724,6 +747,15 @@ async def vaults_remove(request: Request, vault: str = Body(..., embed=True), ke
         to_remove = set(keys)
         remain = [k for k in exist if k not in to_remove]
         _write_vault(uid, vault, remain)
+        try:
+            if to_remove:
+                db.query(GalleryAsset).filter(GalleryAsset.user_uid == uid, GalleryAsset.key.in_(list(to_remove))).delete(synchronize_session=False)
+                db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
         deleted: list[str] = []
         errors: list[str] = []
@@ -2744,6 +2776,26 @@ async def retouch_upload_final(request: Request, id: str = Form(...), file: Uplo
         except Exception as ex:
             logger.warning(f"retouch final upload failed for {key}: {ex}")
             return JSONResponse({"error": "upload failed"}, status_code=500)
+        # Update stored size for this asset (best-effort)
+        try:
+            db: Session = next(get_db())
+            try:
+                rec = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+                if rec:
+                    rec.size_bytes = len(data)
+                    db.commit()
+                else:
+                    # Create if missing (rare)
+                    rec2 = GalleryAsset(user_uid=uid, vault=vault, key=key, size_bytes=len(data))
+                    db.add(rec2)
+                    db.commit()
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Update queue status to done
         try:
             for it in items:

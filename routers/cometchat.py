@@ -24,6 +24,20 @@ def _headers() -> dict:
         "apiKey": API_KEY,
     }
 
+async def _existing_members(client: httpx.AsyncClient, guid: str) -> set:
+    try:
+        r = await client.get(f"{_base_url()}/groups/{guid}/members", headers=_headers(), params={"perPage": "100"})
+        if r.status_code != 200:
+            return set()
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        items = data.get("data") or []
+        return {str((m or {}).get("uid") or "") for m in items if m}
+    except Exception:
+        return set()
+
 @router.post("/users/ensure")
 async def ensure_users(request: Request, users: list[dict] = Body(...)):
     uid = get_uid_from_request(request)
@@ -98,7 +112,9 @@ async def group_create(
             if r is None or r.status_code != 200:
                 gp = {"guid": guid, "name": name, "type": "private"}
                 await client.post(f"{_base_url()}/groups", headers=_headers(), json=gp)
-            add = [{"uid": m, "scope": ("admin" if m == uid else "participant")} for m in ids]
+            existing = await _existing_members(client, guid)
+            to_add = [m for m in ids if m not in existing]
+            add = [{"uid": m, "scope": ("admin" if m == uid else "participant")} for m in to_add]
             if add:
                 await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": add})
         return {"ok": True, "guid": guid, "name": name}
@@ -140,6 +156,14 @@ async def group_join(
             r = await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json=payload)
             if r.status_code in (200, 201):
                 return {"ok": True, "guid": guid, "uid": uid, "scope": sc}
+            if r.status_code == 400:
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {"error": r.text}
+                msg = str(data.get("message") or data.get("error") or "")
+                if "exist" in msg.lower():
+                    return {"ok": True, "guid": guid, "uid": uid, "scope": sc}
             try:
                 data = r.json()
             except Exception:
@@ -191,7 +215,10 @@ async def group_invite(
 
             if members:
                 try:
-                    await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": members})
+                    existing = await _existing_members(client, guid)
+                    to_add = [m for m in members if (m.get("uid") or "") not in existing]
+                    if to_add:
+                        await client.post(f"{_base_url()}/groups/{guid}/members", headers=_headers(), json={"members": to_add})
                 except Exception:
                     pass
 
