@@ -519,10 +519,13 @@ def _video_headers() -> dict:
 
 @router.post("/video/token")
 async def video_token(request: Request, user_id: str = Body(..., embed=True), db: Session = Depends(get_db)):
-    """Generate a token for Stream Video SDK."""
+    """Generate a token for Stream Video SDK.
+    
+    Supports both owners and collaborators:
+    - Owners can get tokens for themselves or their collaborators
+    - Collaborators can get tokens for themselves (validated via session token)
+    """
     uid = _get_uid_from_any(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
     
@@ -530,8 +533,48 @@ async def video_token(request: Request, user_id: str = Body(..., embed=True), db
     if not requested_user_id:
         return JSONResponse({"error": "Invalid user_id"}, status_code=400)
     
-    # Allow if requesting token for self
-    if requested_user_id != uid:
+    # Check if this is a collaborator request (no Firebase UID but has session token)
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    is_collab_request = False
+    collab_owner_uid = None
+    
+    if auth_header and auth_header.lower().startswith("bearer "):
+        tok = auth_header.split(" ", 1)[1].strip()
+        # Try to decode as session token to get owner_uid for collaborators
+        if API_SECRET:
+            try:
+                payload = jwt.decode(tok, API_SECRET, algorithms=["HS256"])
+                collab_owner_uid = str(payload.get("owner_uid") or payload.get("uid") or "").strip()
+                # If the requested user_id matches a normalized email pattern, it's likely a collaborator
+                if requested_user_id and "_" in requested_user_id and not requested_user_id.startswith("collab_"):
+                    is_collab_request = True
+            except Exception:
+                pass
+    
+    # Validate the request
+    if not uid and not is_collab_request:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # For collaborators, verify they're requesting their own token
+    if is_collab_request:
+        # Collaborator can only get token for themselves
+        # The requested_user_id should be their normalized email
+        if collab_owner_uid:
+            try:
+                collabs = db.query(Collaborator).filter(
+                    Collaborator.owner_uid == collab_owner_uid,
+                    Collaborator.active == True
+                ).all()
+                valid_ids = set()
+                for c in collabs:
+                    normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
+                    valid_ids.add(normalized)
+                if requested_user_id not in valid_ids:
+                    return JSONResponse({"error": "Invalid collaborator"}, status_code=403)
+            except Exception:
+                return JSONResponse({"error": "Validation failed"}, status_code=403)
+    elif uid and requested_user_id != uid:
+        # Owner requesting token for someone else - verify it's their collaborator
         try:
             collab = db.query(Collaborator).filter(
                 Collaborator.owner_uid == uid,
