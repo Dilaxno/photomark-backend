@@ -1,22 +1,18 @@
-from fastapi import APIRouter, Request, Body, Depends, Query
+from fastapi import APIRouter, Request, Body, Depends
 import asyncio
 import httpx
 from httpx import Timeout
 from fastapi.responses import JSONResponse
 import os
 import jwt
-import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List
 
 from core.auth import get_uid_from_request
 from core.config import logger
 from utils.emailing import render_email, send_email_smtp
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
 from core.database import get_db
 from models.user import User
-from models.chat_message import ChatMessage
 from models.collaborator import Collaborator
 
 router = APIRouter(prefix="/api/chat/stream", tags=["streamchat"]) 
@@ -373,6 +369,13 @@ async def group_invite(request: Request, guid: str = Body(..., embed=True), emai
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
+def _extract_owner_uid_from_channel(channel_id: str) -> str:
+    """Extract owner UID from channel ID format: collab_{owner_uid}"""
+    if channel_id.startswith("collab_"):
+        return channel_id[7:]  # Remove "collab_" prefix
+    return ""
+
+
 @router.post("/group/join")
 async def group_join(request: Request, guid: str = Body(..., embed=True), db: Session = Depends(get_db)):
     uid = _get_uid_from_any(request)
@@ -481,294 +484,4 @@ async def group_delete(request: Request, guid: str = Body(..., embed=True)):
         return {"ok": True}
     except Exception as ex:
         logger.exception(f"group_delete failed: {ex}")
-        return JSONResponse({"error": str(ex)}, status_code=500)
-
-
-
-# ============================================================================
-# Message Persistence Endpoints - Store messages in Neon DB for persistence
-# ============================================================================
-
-def _extract_owner_uid_from_channel(channel_id: str) -> str:
-    """Extract owner UID from channel ID format: collab_{owner_uid}"""
-    if channel_id.startswith("collab_"):
-        return channel_id[7:]  # Remove "collab_" prefix
-    return ""
-
-
-def _get_owner_uid_for_access(request: Request, channel_id: str, db: Session) -> tuple[str | None, str | None]:
-    """
-    Verify access to a channel and return (requester_uid, owner_uid).
-    Returns (None, None) if unauthorized.
-    
-    Access rules:
-    - Owner can access their own channel
-    - Active collaborators can access their owner's channel
-    """
-    uid = _get_uid_from_any(request)
-    if not uid:
-        return None, None
-    
-    # Sanitize channel_id
-    channel_id_clean = str(channel_id or "").strip()[:128]
-    owner_uid = _extract_owner_uid_from_channel(channel_id_clean)
-    if not owner_uid:
-        return None, None
-    
-    # Check if requester is the owner
-    if uid == owner_uid:
-        return uid, owner_uid
-    
-    # Check if requester is an ACTIVE collaborator of this owner
-    try:
-        collab = db.query(Collaborator).filter(
-            Collaborator.owner_uid == owner_uid,
-            Collaborator.active == True
-        ).all()
-        
-        # Check if the uid matches any collaborator's normalized email
-        for c in collab:
-            # Normalize email same way as frontend does
-            normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
-            # Also check the format used in normalizeUid: lowercase, only alphanumeric and underscore
-            normalized_v2 = "".join([ch for ch in (c.email or "").lower() if ch.isalnum() or ch == "_"])[:64]
-            if uid == normalized or uid == normalized_v2 or uid == c.email:
-                return uid, owner_uid
-    except Exception as ex:
-        logger.warning(f"Error checking collaborator access: {ex}")
-    
-    return None, None
-
-
-@router.post("/messages/save")
-async def save_message(
-    request: Request,
-    channel_id: str = Body(...),
-    message_id: str = Body(None),
-    sender_id: str = Body(...),
-    sender_name: str = Body(None),
-    sender_image: str = Body(None),
-    text: str = Body(None),
-    attachments: list = Body(None),
-    db: Session = Depends(get_db)
-):
-    """Save a chat message to the database. Secured by owner_uid."""
-    requester_uid, owner_uid = _get_owner_uid_for_access(request, channel_id, db)
-    if not requester_uid or not owner_uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
-    # SECURITY: Sanitize and validate all inputs
-    channel_id_clean = str(channel_id or "").strip()[:128]
-    msg_id = str(message_id or uuid.uuid4()).strip()[:64]
-    sender_id_clean = str(sender_id or "").strip()[:128]
-    sender_name_clean = str(sender_name or "").strip()[:255] if sender_name else None
-    sender_image_clean = str(sender_image or "").strip()[:512] if sender_image else None
-    text_clean = str(text or "").strip()[:10000]  # Limit message length to 10KB
-    
-    # SECURITY: Validate sender_id matches requester (can only save own messages)
-    # Allow normalized variations of the sender_id
-    sender_normalized = sender_id_clean.lower().replace("@", "_").replace(".", "_")[:64]
-    requester_normalized = requester_uid.lower().replace("@", "_").replace(".", "_")[:64]
-    if sender_id_clean != requester_uid and sender_normalized != requester_normalized:
-        return JSONResponse({"error": "Can only save your own messages"}, status_code=403)
-    
-    # SECURITY: Validate attachments structure
-    attachments_clean = []
-    if attachments and isinstance(attachments, list):
-        for att in attachments[:10]:  # Limit to 10 attachments
-            if isinstance(att, dict):
-                clean_att = {}
-                for k in ["type", "image_url", "thumb_url", "asset_url", "title", "file_size"]:
-                    if k in att:
-                        val = str(att[k])[:1000] if isinstance(att[k], str) else att[k]
-                        clean_att[k] = val
-                if clean_att:
-                    attachments_clean.append(clean_att)
-    
-    try:
-        # Check if message already exists (idempotency)
-        existing = db.query(ChatMessage).filter(ChatMessage.id == msg_id).first()
-        if existing:
-            return {"ok": True, "id": msg_id, "exists": True}
-        
-        msg = ChatMessage(
-            id=msg_id,
-            owner_uid=owner_uid,
-            channel_id=channel_id_clean,
-            sender_id=sender_id_clean,
-            sender_name=sender_name_clean,
-            sender_image=sender_image_clean,
-            text=text_clean,
-            attachments=attachments_clean if attachments_clean else None
-        )
-        db.add(msg)
-        db.commit()
-        
-        return {"ok": True, "id": msg_id, "message": msg.to_dict()}
-    except Exception as ex:
-        logger.exception(f"save_message failed: {ex}")
-        db.rollback()
-        return JSONResponse({"error": str(ex)}, status_code=500)
-
-
-@router.get("/messages/list")
-async def list_messages(
-    request: Request,
-    channel_id: str = Query(...),
-    limit: int = Query(100, ge=1, le=500),
-    before: Optional[str] = Query(None),  # ISO timestamp for pagination
-    db: Session = Depends(get_db)
-):
-    """Retrieve chat messages for a channel. Secured by owner_uid."""
-    requester_uid, owner_uid = _get_owner_uid_for_access(request, channel_id, db)
-    if not requester_uid or not owner_uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
-    try:
-        query = db.query(ChatMessage).filter(
-            ChatMessage.channel_id == channel_id,
-            ChatMessage.owner_uid == owner_uid
-        )
-        
-        if before:
-            try:
-                before_dt = datetime.fromisoformat(before.replace("Z", "+00:00"))
-                query = query.filter(ChatMessage.created_at < before_dt)
-            except Exception:
-                pass
-        
-        messages = query.order_by(desc(ChatMessage.created_at)).limit(limit).all()
-        
-        # Reverse to get chronological order
-        messages = list(reversed(messages))
-        
-        return {
-            "ok": True,
-            "messages": [m.to_dict() for m in messages],
-            "count": len(messages),
-            "has_more": len(messages) == limit
-        }
-    except Exception as ex:
-        logger.exception(f"list_messages failed: {ex}")
-        return JSONResponse({"error": str(ex)}, status_code=500)
-
-
-@router.post("/messages/sync")
-async def sync_messages(
-    request: Request,
-    channel_id: str = Body(...),
-    messages: List[dict] = Body(default=[]),
-    db: Session = Depends(get_db)
-):
-    """Bulk sync messages to the database. Used for initial sync or recovery."""
-    requester_uid, owner_uid = _get_owner_uid_for_access(request, channel_id, db)
-    if not requester_uid or not owner_uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
-    # SECURITY: Sanitize channel_id
-    channel_id_clean = str(channel_id or "").strip()[:128]
-    
-    # SECURITY: Limit number of messages per sync
-    messages_to_sync = (messages or [])[:500]
-    
-    try:
-        saved = 0
-        skipped = 0
-        
-        for msg_data in messages_to_sync:
-            if not isinstance(msg_data, dict):
-                skipped += 1
-                continue
-                
-            msg_id = str(msg_data.get("id") or msg_data.get("message_id") or uuid.uuid4())[:64]
-            
-            # Check if exists
-            existing = db.query(ChatMessage).filter(ChatMessage.id == msg_id).first()
-            if existing:
-                skipped += 1
-                continue
-            
-            user_data = msg_data.get("user") or {}
-            sender_id = str(user_data.get("id") or msg_data.get("sender_id") or "unknown")[:128]
-            sender_name = str(user_data.get("name") or msg_data.get("sender_name") or "")[:255]
-            sender_image = str(user_data.get("image") or msg_data.get("sender_image") or "")[:512]
-            text = str(msg_data.get("text") or "")[:10000]
-            
-            # SECURITY: Validate attachments
-            attachments_clean = []
-            raw_attachments = msg_data.get("attachments") or []
-            if isinstance(raw_attachments, list):
-                for att in raw_attachments[:10]:
-                    if isinstance(att, dict):
-                        clean_att = {}
-                        for k in ["type", "image_url", "thumb_url", "asset_url", "title", "file_size"]:
-                            if k in att:
-                                val = str(att[k])[:1000] if isinstance(att[k], str) else att[k]
-                                clean_att[k] = val
-                        if clean_att:
-                            attachments_clean.append(clean_att)
-            
-            # Parse created_at
-            created_at = None
-            raw_created = msg_data.get("created_at")
-            if raw_created:
-                try:
-                    if isinstance(raw_created, str):
-                        created_at = datetime.fromisoformat(raw_created.replace("Z", "+00:00"))
-                    elif isinstance(raw_created, (int, float)):
-                        created_at = datetime.fromtimestamp(raw_created / 1000 if raw_created > 1e12 else raw_created)
-                except Exception:
-                    pass
-            
-            msg = ChatMessage(
-                id=msg_id,
-                owner_uid=owner_uid,
-                channel_id=channel_id_clean,
-                sender_id=sender_id,
-                sender_name=sender_name or None,
-                sender_image=sender_image or None,
-                text=text,
-                attachments=attachments_clean if attachments_clean else None
-            )
-            if created_at:
-                msg.created_at = created_at
-            
-            db.add(msg)
-            saved += 1
-        
-        db.commit()
-        
-        return {"ok": True, "saved": saved, "skipped": skipped}
-    except Exception as ex:
-        logger.exception(f"sync_messages failed: {ex}")
-        db.rollback()
-        return JSONResponse({"error": str(ex)}, status_code=500)
-
-
-@router.delete("/messages/clear")
-async def clear_messages(
-    request: Request,
-    channel_id: str = Body(..., embed=True),
-    db: Session = Depends(get_db)
-):
-    """Clear all messages for a channel. Only owner can do this."""
-    uid = _get_uid_from_any(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
-    owner_uid = _extract_owner_uid_from_channel(channel_id)
-    if not owner_uid or uid != owner_uid:
-        return JSONResponse({"error": "Only channel owner can clear messages"}, status_code=403)
-    
-    try:
-        deleted = db.query(ChatMessage).filter(
-            ChatMessage.channel_id == channel_id,
-            ChatMessage.owner_uid == owner_uid
-        ).delete()
-        db.commit()
-        
-        return {"ok": True, "deleted": deleted}
-    except Exception as ex:
-        logger.exception(f"clear_messages failed: {ex}")
-        db.rollback()
         return JSONResponse({"error": str(ex)}, status_code=500)
