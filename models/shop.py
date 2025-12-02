@@ -37,6 +37,9 @@ class Shop(Base):
     # Custom domain configuration and status
     domain = Column(JSON, nullable=False, default={})
     
+    # Published status - if False, only owner can view the shop
+    published = Column(Boolean, nullable=False, default=False)
+    
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -52,6 +55,7 @@ class Shop(Base):
                 "ownerName": self.owner_name,
                 "theme": self.theme,
                 "domain": self.domain or {},
+                "published": self.published,
                 "createdAt": self.created_at.isoformat() if self.created_at else None,
                 "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
             },

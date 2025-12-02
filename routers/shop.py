@@ -258,8 +258,8 @@ async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
 
 
 @router.get('/slug/{slug}', response_model=ShopDataSchema)
-async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
-    """Get shop data by slug (for public viewing)"""
+async def get_shop_by_slug(slug: str, request: Request, db: Session = Depends(get_db)):
+    """Get shop data by slug (for public viewing or owner preview)"""
     try:
         key = (slug or "").strip()
         if not key:
@@ -277,6 +277,19 @@ async def get_shop_by_slug(slug: str, db: Session = Depends(get_db)):
 
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
+
+        # Check if shop is published or if requester is the owner
+        if not shop.published:
+            # Try to get the requesting user's UID
+            requester_uid = None
+            try:
+                requester_uid = get_uid_from_request(request)
+            except:
+                pass
+            
+            # If not the owner, deny access
+            if not requester_uid or (requester_uid != shop.owner_uid and requester_uid != shop.uid):
+                raise HTTPException(status_code=403, detail="Shop not published. Only the owner can preview this shop.")
 
         return shop.to_dict()
     except HTTPException:
@@ -352,6 +365,9 @@ async def save_shop_settings(
             shop.description = settings.get('description', shop.description)
             shop.owner_name = settings.get('ownerName', shop.owner_name)
             shop.theme = settings.get('theme', shop.theme)
+            # Handle published field
+            if 'published' in settings:
+                shop.published = bool(settings.get('published'))
             shop.updated_at = now
         else:
             # Create new shop
@@ -364,6 +380,7 @@ async def save_shop_settings(
                 owner_name=settings.get('ownerName'),
                 theme=settings.get('theme', {}),
                 products=[],
+                published=bool(settings.get('published', False)),
                 created_at=now,
                 updated_at=now
             )
@@ -439,6 +456,9 @@ async def save_shop_data(
             shop.owner_name = settings.get('ownerName', shop.owner_name)
             shop.theme = settings.get('theme', shop.theme)
             shop.products = products
+            # Handle published field
+            if 'published' in settings:
+                shop.published = bool(settings.get('published'))
             shop.updated_at = now
         else:
             # Create new shop
@@ -451,6 +471,7 @@ async def save_shop_data(
                 owner_name=settings.get('ownerName'),
                 theme=settings.get('theme', {}),
                 products=products,
+                published=bool(settings.get('published', False)),
                 created_at=now,
                 updated_at=now
             )
