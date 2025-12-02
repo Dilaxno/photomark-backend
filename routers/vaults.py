@@ -18,7 +18,7 @@ import bcrypt
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
-from core.auth import get_uid_from_request, get_user_email_from_uid
+from core.auth import get_uid_from_request, get_user_email_from_uid, get_fs_client
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
 from sqlalchemy.orm import Session
@@ -1518,6 +1518,228 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         return JSONResponse({"error": "Failed to send email"}, status_code=500)
 
     return {"ok": True, "link": link, "expires_at": expires_at_iso}
+
+
+# Twilio SMS/RCS configuration
+TWILIO_ACCOUNT_SID = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+TWILIO_AUTH_TOKEN = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+TWILIO_PHONE_NUMBER = (os.getenv("TWILIO_PHONE_NUMBER") or "").strip()
+TWILIO_RCS_SENDER_ID = (os.getenv("TWILIO_RCS_SENDER_ID") or "").strip()
+
+
+async def _send_twilio_sms(to_phone: str, body: str, media_url: str | None = None) -> dict:
+    """Send SMS via Twilio API"""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
+        return {"ok": False, "error": "Twilio not configured"}
+    
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    data = {
+        "To": to_phone,
+        "From": TWILIO_PHONE_NUMBER,
+        "Body": body,
+    }
+    if media_url:
+        data["MediaUrl"] = media_url
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url,
+                data=data,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            )
+            result = resp.json()
+            if resp.status_code in (200, 201):
+                return {"ok": True, "sid": result.get("sid")}
+            return {"ok": False, "error": result.get("message") or str(result)}
+    except Exception as ex:
+        logger.error(f"Twilio SMS error: {ex}")
+        return {"ok": False, "error": str(ex)}
+
+
+async def _send_twilio_rcs(to_phone: str, body: str, media_url: str | None = None, button_text: str | None = None, button_url: str | None = None) -> dict:
+    """Send RCS Business Message via Twilio Content API"""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        return {"ok": False, "error": "Twilio not configured"}
+    
+    # Use RCS sender ID if available, otherwise fall back to phone number
+    from_id = TWILIO_RCS_SENDER_ID or TWILIO_PHONE_NUMBER
+    if not from_id:
+        return {"ok": False, "error": "No Twilio sender configured"}
+    
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    
+    # Build content for RCS rich card
+    data = {
+        "To": to_phone,
+        "From": from_id,
+        "Body": body,
+    }
+    
+    # Add media if provided
+    if media_url:
+        data["MediaUrl"] = media_url
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url,
+                data=data,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            )
+            result = resp.json()
+            if resp.status_code in (200, 201):
+                return {"ok": True, "sid": result.get("sid"), "channel": "rcs"}
+            # If RCS fails, it may fall back to SMS automatically
+            return {"ok": False, "error": result.get("message") or str(result)}
+    except Exception as ex:
+        logger.error(f"Twilio RCS error: {ex}")
+        return {"ok": False, "error": str(ex)}
+
+
+@router.post("/vaults/share/sms")
+async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Share vault via SMS/RCS text message using Twilio"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    vault = str((payload or {}).get('vault') or '').strip()
+    phone = str((payload or {}).get('phone') or '').strip()
+    client_name = str((payload or {}).get('client_name') or '').strip()
+    use_rcs = bool((payload or {}).get('use_rcs', True))  # Default to RCS
+    
+    if not vault or not phone:
+        return JSONResponse({"error": "vault and phone required"}, status_code=400)
+    
+    # Normalize phone number (ensure E.164 format)
+    phone_clean = ''.join(c for c in phone if c.isdigit() or c == '+')
+    if not phone_clean.startswith('+'):
+        # Assume US number if no country code
+        if len(phone_clean) == 10:
+            phone_clean = '+1' + phone_clean
+        elif len(phone_clean) == 11 and phone_clean.startswith('1'):
+            phone_clean = '+' + phone_clean
+        else:
+            phone_clean = '+' + phone_clean
+    
+    # Validate vault exists
+    try:
+        keys = _read_vault(uid, vault)
+        safe_vault = _vault_key(uid, vault)[1]
+    except Exception as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
+    
+    # Create share token
+    expires_in_days = (payload or {}).get('expires_in_days')
+    now = datetime.utcnow()
+    days = int(expires_in_days or 7)
+    exp = now + timedelta(days=days)
+    
+    token = secrets.token_urlsafe(24)
+    rec = {
+        "token": token,
+        "uid": uid,
+        "vault": safe_vault,
+        "phone": phone_clean,
+        "expires_at": exp.isoformat(),
+        "used": False,
+        "created_at": now.isoformat(),
+        "max_uses": 1,
+        "client_name": client_name,
+        "shared_via": "sms",
+    }
+    
+    # Download permission
+    try:
+        perm_raw = str((payload or {}).get('download_permission') or '').strip().lower()
+        if perm_raw not in ('none', 'low', 'high'):
+            perm_raw = 'none'
+        rec['download_permission'] = perm_raw
+    except Exception:
+        rec['download_permission'] = 'none'
+    
+    _write_json_key(_share_key(token), rec)
+    
+    try:
+        _pg_upsert_vault_meta(db, uid, safe_vault, {}, visibility="shared")
+    except Exception:
+        pass
+    
+    # Build share link
+    front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+    link = f"{front}/#share?token={token}"
+    
+    # Get studio name
+    studio_name = None
+    try:
+        fs_db = get_fs_client()
+        if fs_db:
+            doc = fs_db.collection('users').document(uid).get()
+            data = doc.to_dict() if getattr(doc, 'exists', False) else {}
+            studio_name = (
+                data.get('studioName')
+                or data.get('businessName')
+                or data.get('brand_name')
+                or data.get('name')
+                or data.get('displayName')
+            )
+    except Exception:
+        pass
+    if not studio_name:
+        try:
+            owner_email = (get_user_email_from_uid(uid) or '').strip()
+            studio_name = (owner_email.split('@')[0] if '@' in owner_email else owner_email) or "Photomark"
+        except Exception:
+            studio_name = "Photomark"
+    
+    # Photo count
+    count = len(keys)
+    noun = "photo" if count == 1 else "photos"
+    
+    # Build message
+    greeting = f"Hi {client_name}! " if client_name else ""
+    message = (
+        f"{greeting}{studio_name} has shared {count} {noun} with you for review.\n\n"
+        f"View your photos: {link}\n\n"
+        f"This link expires in {days} days."
+    )
+    
+    # Get first photo thumbnail for RCS media (optional)
+    media_url = None
+    if use_rcs and keys:
+        try:
+            first_key = keys[0]
+            media_url = _get_url_for_key(first_key, expires_in=3600)
+        except Exception:
+            pass
+    
+    # Send via RCS first, fall back to SMS
+    result = None
+    if use_rcs and TWILIO_RCS_SENDER_ID:
+        result = await _send_twilio_rcs(
+            phone_clean, 
+            message, 
+            media_url=media_url,
+            button_text="View Photos",
+            button_url=link
+        )
+    
+    # Fall back to SMS if RCS failed or not configured
+    if not result or not result.get("ok"):
+        result = await _send_twilio_sms(phone_clean, message, media_url=media_url if use_rcs else None)
+    
+    if not result.get("ok"):
+        logger.error(f"Failed to send SMS: {result.get('error')}")
+        return JSONResponse({"error": result.get("error") or "Failed to send message"}, status_code=500)
+    
+    return {
+        "ok": True, 
+        "link": link, 
+        "expires_at": exp.isoformat(),
+        "channel": result.get("channel", "sms"),
+        "message_sid": result.get("sid")
+    }
 
 
 @router.post("/vaults/publish")
