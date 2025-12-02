@@ -1138,6 +1138,64 @@ async def api_photos_presign(request: Request, key: str):
         return JSONResponse({"error": "Failed"}, status_code=500)
 
 
+@router.get("/photos/proxy/{key:path}")
+async def api_photos_proxy(request: Request, key: str):
+    """Proxy endpoint for images with CORS headers - used for color extraction."""
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+    key = (key or '').strip().lstrip('/')
+    if not key.startswith(f"users/{uid}/"):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    
+    origin = request.headers.get('origin', '*')
+    cors_headers = {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+    
+    if s3 and R2_BUCKET:
+        try:
+            obj = s3.Object(R2_BUCKET, key)
+            res = obj.get()
+            body = res.get("Body")
+            ct = res.get("ContentType") or "image/jpeg"
+            
+            # Read the image data
+            data = body.read()
+            return Response(content=data, media_type=ct, headers=cors_headers)
+        except Exception as ex:
+            logger.exception(f"Proxy error for {key}: {ex}")
+            return JSONResponse({"error": "Not found"}, status_code=404, headers=cors_headers)
+    else:
+        path = os.path.join(static_dir, key)
+        if not os.path.isfile(path):
+            return JSONResponse({"error": "Not found"}, status_code=404, headers=cors_headers)
+        with open(path, 'rb') as f:
+            data = f.read()
+        ct = mimetypes.guess_type(path)[0] or "image/jpeg"
+        return Response(content=data, media_type=ct, headers=cors_headers)
+
+
+@router.options("/photos/proxy/{key:path}")
+async def api_photos_proxy_options(request: Request, key: str):
+    """CORS preflight for proxy endpoint."""
+    origin = request.headers.get('origin', '*')
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
+
+
 @router.get("/photos/meta/{key:path}")
 async def api_photos_meta(request: Request, key: str):
     eff_uid, req_uid = resolve_workspace_uid(request)
