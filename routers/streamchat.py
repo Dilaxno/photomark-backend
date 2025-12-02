@@ -110,15 +110,40 @@ async def chat_session(request: Request, ttl_seconds: int = Body(1800, embed=Tru
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 @router.post("/token")
-async def stream_token(request: Request, user_id: str = Body(..., embed=True), expire_seconds: int = Body(24 * 3600, embed=True)):
+async def stream_token(request: Request, user_id: str = Body(..., embed=True), expire_seconds: int = Body(24 * 3600, embed=True), db: Session = Depends(get_db)):
     uid = _get_uid_from_any(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
+    
+    # SECURITY: Verify user can only get token for themselves or their collaborators
+    requested_user_id = str(user_id or "").strip()[:128]
+    if not requested_user_id:
+        return JSONResponse({"error": "Invalid user_id"}, status_code=400)
+    
+    # Allow if requesting token for self
+    if requested_user_id != uid:
+        # Check if requester is owner and requested_user_id is their collaborator
+        try:
+            collab = db.query(Collaborator).filter(
+                Collaborator.owner_uid == uid,
+                Collaborator.active == True
+            ).all()
+            normalized_ids = set()
+            for c in collab:
+                normalized_ids.add((c.email or "").lower().replace("@", "_").replace(".", "_")[:64])
+                normalized_ids.add(c.email)
+            if requested_user_id not in normalized_ids:
+                return JSONResponse({"error": "Cannot request token for other users"}, status_code=403)
+        except Exception:
+            return JSONResponse({"error": "Cannot request token for other users"}, status_code=403)
+    
     try:
-        exp = int((datetime.utcnow() + timedelta(seconds=max(60, int(expire_seconds or 0)))).timestamp())
-        payload = {"user_id": user_id, "exp": exp}
+        # Cap expire_seconds to 24 hours max
+        exp_secs = min(max(60, int(expire_seconds or 0)), 86400)
+        exp = int((datetime.utcnow() + timedelta(seconds=exp_secs)).timestamp())
+        payload = {"user_id": requested_user_id, "exp": exp}
         token = jwt.encode(payload, API_SECRET, algorithm="HS256")
         tok = token if isinstance(token, str) else token.decode("utf-8")
         return {"ok": True, "token": tok, "api_key": API_KEY}
@@ -188,18 +213,47 @@ async def users_ensure(request: Request, users: list[dict] = Body(default=[])):
 
 
 @router.post("/group/create")
-async def group_create(request: Request, guid: str = Body(..., embed=True), name: str = Body("Collab Chat", embed=True), members: list[str] = Body(default=[]), topic: str = Body("", embed=True)):
+async def group_create(request: Request, guid: str = Body(..., embed=True), name: str = Body("Collab Chat", embed=True), members: list[str] = Body(default=[]), topic: str = Body("", embed=True), db: Session = Depends(get_db)):
     owner_uid = _get_uid_from_any(request)
     if not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
+    
+    # SECURITY: Validate and sanitize inputs
+    guid_clean = str(guid or "").strip()[:128]
+    name_clean = str(name or "Collab Chat").strip()[:100]
+    topic_clean = str(topic or "").strip()[:200]
+    
+    # SECURITY: Enforce channel naming convention - must be collab_{owner_uid}
+    expected_guid = f"collab_{owner_uid}"
+    if guid_clean != expected_guid:
+        return JSONResponse({"error": "Channel ID must match your user ID"}, status_code=403)
+    
+    # SECURITY: Validate members are collaborators of this owner
+    valid_members = [owner_uid]
+    if members:
+        try:
+            collabs = db.query(Collaborator).filter(
+                Collaborator.owner_uid == owner_uid,
+                Collaborator.active == True
+            ).all()
+            valid_collab_ids = set()
+            for c in collabs:
+                valid_collab_ids.add((c.email or "").lower().replace("@", "_").replace(".", "_")[:64])
+            for m in members:
+                m_clean = str(m or "").strip()[:128]
+                if m_clean and m_clean in valid_collab_ids:
+                    valid_members.append(m_clean)
+        except Exception as ex:
+            logger.warning(f"Error validating members: {ex}")
+    
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             create_body = {
                 "type": "messaging",
-                "id": guid,
-                "data": {"name": name, **({"topic": topic} if topic else {})},
+                "id": guid_clean,
+                "data": {"name": name_clean, **({"topic": topic_clean} if topic_clean else {})},
                 "created_by_id": owner_uid,
             }
             r = await client.post(f"{BASE_URL}/channels", headers=_headers(), params={"api_key": API_KEY}, json=create_body)
@@ -209,33 +263,67 @@ async def group_create(request: Request, guid: str = Body(..., embed=True), name
                 except Exception:
                     data = {"error": r.text}
                 return JSONResponse({"error": data.get("message") or data.get("error") or "failed"}, status_code=r.status_code)
-            if members:
+            if valid_members:
                 try:
-                    await client.post(f"{BASE_URL}/channels/messaging/{guid}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": list(set(members + [owner_uid]))})
+                    await client.post(f"{BASE_URL}/channels/messaging/{guid_clean}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": list(set(valid_members))})
                 except Exception:
                     pass
-        return {"ok": True, "guid": guid, "name": name}
+        return {"ok": True, "guid": guid_clean, "name": name_clean}
     except Exception as ex:
         logger.exception(f"group_create failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
+def _sanitize_html(text: str) -> str:
+    """Escape HTML special characters to prevent XSS."""
+    if not text:
+        return ""
+    return (text
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#x27;"))
+
+
 @router.post("/group/invite")
-async def group_invite(request: Request, guid: str = Body(..., embed=True), emails: list[str] = Body(default=[]), note: str = Body("", embed=True)):
+async def group_invite(request: Request, guid: str = Body(..., embed=True), emails: list[str] = Body(default=[]), note: str = Body("", embed=True), db: Session = Depends(get_db)):
     owner_uid = _get_uid_from_any(request)
     if not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
+    
+    # SECURITY: Verify owner can only invite to their own channel
+    guid_clean = str(guid or "").strip()[:128]
+    expected_guid = f"collab_{owner_uid}"
+    if guid_clean != expected_guid:
+        return JSONResponse({"error": "Can only invite to your own channel"}, status_code=403)
+    
+    # SECURITY: Validate emails are collaborators of this owner
+    valid_emails = []
+    try:
+        collabs = db.query(Collaborator).filter(
+            Collaborator.owner_uid == owner_uid,
+            Collaborator.active == True
+        ).all()
+        collab_emails = {(c.email or "").lower() for c in collabs}
+        for em in (emails or [])[:50]:  # Limit to 50 emails
+            em_clean = str(em or "").strip().lower()[:255]
+            if em_clean and "@" in em_clean and em_clean in collab_emails:
+                valid_emails.append(em_clean)
+    except Exception as ex:
+        logger.warning(f"Error validating invite emails: {ex}")
+    
+    if not valid_emails:
+        return JSONResponse({"error": "No valid collaborator emails provided"}, status_code=400)
+    
     try:
         # Normalize emails -> user ids
         ids = []
-        for em in (emails or []):
-            q = str(em or "").strip().lower()
-            if not q:
-                continue
-            local = q.split("@")[0]
-            ids.append("".join([c for c in local if c.isalnum() or c == "_"]))
+        for em in valid_emails:
+            local = em.split("@")[0]
+            ids.append("".join([c for c in local if c.isalnum() or c == "_"])[:64])
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Ensure users
@@ -251,31 +339,35 @@ async def group_invite(request: Request, guid: str = Body(..., embed=True), emai
             # Add to channel
             if ids:
                 try:
-                    await client.post(f"{BASE_URL}/channels/messaging/{guid}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": ids})
+                    await client.post(f"{BASE_URL}/channels/messaging/{guid_clean}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": ids})
                 except Exception:
                     pass
 
         origin = (os.getenv("FRONTEND_ORIGIN", "") or "").strip() or ""
-        join_url = f"{origin}/collab-chat?guid={guid}" if origin else f"/collab-chat?guid={guid}"
+        join_url = f"{origin}/collab-chat?guid={guid_clean}" if origin else f"/collab-chat?guid={guid_clean}"
         subject = "You've been invited to a collaboration chat"
+        
+        # SECURITY: Sanitize note to prevent XSS
+        note_clean = _sanitize_html(str(note or "").strip()[:500])
+        
         html_body = render_email(
             "email_basic.html",
             title="Collaboration Chat Invitation",
             intro=(
                 "You have been invited to join a collaboration chat. Click the button below to join." +
-                ("" if not note else ("<br><br>Note from owner: " + note))
+                ("" if not note_clean else (f"<br><br>Note from owner: {note_clean}"))
             ),
             button_label="Join Chat",
             button_url=join_url,
         )
         sent = 0
-        for em in emails or []:
+        for em in valid_emails:
             try:
                 send_email_smtp(to_email=em, subject=subject, html=html_body)
                 sent += 1
             except Exception as ex:
                 logger.warning(f"chat invite email failed to {em}: {ex}")
-        return {"ok": True, "sent": sent, "guid": guid}
+        return {"ok": True, "sent": sent, "guid": guid_clean}
     except Exception as ex:
         logger.exception(f"group_invite failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
@@ -288,6 +380,34 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
+    
+    # SECURITY: Validate guid format and extract owner
+    guid_clean = str(guid or "").strip()[:128]
+    owner_uid = _extract_owner_uid_from_channel(guid_clean)
+    if not owner_uid:
+        return JSONResponse({"error": "Invalid channel ID"}, status_code=400)
+    
+    # SECURITY: Verify user is either the owner or a collaborator
+    is_owner = (uid == owner_uid)
+    is_collaborator = False
+    
+    if not is_owner:
+        try:
+            collabs = db.query(Collaborator).filter(
+                Collaborator.owner_uid == owner_uid,
+                Collaborator.active == True
+            ).all()
+            for c in collabs:
+                normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
+                if uid == normalized or uid == c.email:
+                    is_collaborator = True
+                    break
+        except Exception as ex:
+            logger.warning(f"Error checking collaborator status: {ex}")
+    
+    if not is_owner and not is_collaborator:
+        return JSONResponse({"error": "Not authorized to join this channel"}, status_code=403)
+    
     try:
         async with httpx.AsyncClient(timeout=Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0)) as client:
             try:
@@ -296,8 +416,8 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
                 try:
                     urec = db.query(User).filter(User.uid == uid).first() if db else None
                     if urec:
-                        display = (urec.display_name or "").strip()
-                        image = (urec.photo_url or "").strip()
+                        display = (urec.display_name or "").strip()[:100]
+                        image = (urec.photo_url or "").strip()[:500]
                 except Exception:
                     pass
                 last_ex = None
@@ -319,7 +439,7 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
             except Exception:
                 pass
             # Add member to channel
-            r = await client.post(f"{BASE_URL}/channels/messaging/{guid}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": [uid]})
+            r = await client.post(f"{BASE_URL}/channels/messaging/{guid_clean}/update", headers=_headers(), params={"api_key": API_KEY}, json={"add_members": [uid]})
             if r.status_code not in (200, 201):
                 try:
                     data = r.json()
@@ -329,7 +449,7 @@ async def group_join(request: Request, guid: str = Body(..., embed=True), db: Se
                 msg = str(data.get("message") or data.get("error") or "")
                 if "already" not in msg.lower():
                     return JSONResponse({"error": msg or "failed"}, status_code=400)
-        return {"ok": True, "guid": guid, "uid": uid}
+        return {"ok": True, "guid": guid_clean, "uid": uid}
     except Exception as ex:
         logger.exception(f"group_join failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
@@ -342,9 +462,16 @@ async def group_delete(request: Request, guid: str = Body(..., embed=True)):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not API_KEY or not API_SECRET:
         return JSONResponse({"error": "stream_not_configured"}, status_code=500)
+    
+    # SECURITY: Only owner can delete their channel
+    guid_clean = str(guid or "").strip()[:128]
+    expected_guid = f"collab_{uid}"
+    if guid_clean != expected_guid:
+        return JSONResponse({"error": "Can only delete your own channel"}, status_code=403)
+    
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.delete(f"{BASE_URL}/channels/messaging/{guid}", headers=_headers(), params={"api_key": API_KEY})
+            r = await client.delete(f"{BASE_URL}/channels/messaging/{guid_clean}", headers=_headers(), params={"api_key": API_KEY})
             if r.status_code not in (200, 204):
                 try:
                     data = r.json()
@@ -376,13 +503,15 @@ def _get_owner_uid_for_access(request: Request, channel_id: str, db: Session) ->
     
     Access rules:
     - Owner can access their own channel
-    - Collaborators can access their owner's channel
+    - Active collaborators can access their owner's channel
     """
     uid = _get_uid_from_any(request)
     if not uid:
         return None, None
     
-    owner_uid = _extract_owner_uid_from_channel(channel_id)
+    # Sanitize channel_id
+    channel_id_clean = str(channel_id or "").strip()[:128]
+    owner_uid = _extract_owner_uid_from_channel(channel_id_clean)
     if not owner_uid:
         return None, None
     
@@ -390,8 +519,7 @@ def _get_owner_uid_for_access(request: Request, channel_id: str, db: Session) ->
     if uid == owner_uid:
         return uid, owner_uid
     
-    # Check if requester is a collaborator of this owner
-    # For collaborators, uid is normalized email, so we need to check collaborator table
+    # Check if requester is an ACTIVE collaborator of this owner
     try:
         collab = db.query(Collaborator).filter(
             Collaborator.owner_uid == owner_uid,
@@ -400,8 +528,11 @@ def _get_owner_uid_for_access(request: Request, channel_id: str, db: Session) ->
         
         # Check if the uid matches any collaborator's normalized email
         for c in collab:
+            # Normalize email same way as frontend does
             normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
-            if uid == normalized or uid == c.email:
+            # Also check the format used in normalizeUid: lowercase, only alphanumeric and underscore
+            normalized_v2 = "".join([ch for ch in (c.email or "").lower() if ch.isalnum() or ch == "_"])[:64]
+            if uid == normalized or uid == normalized_v2 or uid == c.email:
                 return uid, owner_uid
     except Exception as ex:
         logger.warning(f"Error checking collaborator access: {ex}")
@@ -426,9 +557,35 @@ async def save_message(
     if not requester_uid or not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
+    # SECURITY: Sanitize and validate all inputs
+    channel_id_clean = str(channel_id or "").strip()[:128]
+    msg_id = str(message_id or uuid.uuid4()).strip()[:64]
+    sender_id_clean = str(sender_id or "").strip()[:128]
+    sender_name_clean = str(sender_name or "").strip()[:255] if sender_name else None
+    sender_image_clean = str(sender_image or "").strip()[:512] if sender_image else None
+    text_clean = str(text or "").strip()[:10000]  # Limit message length to 10KB
+    
+    # SECURITY: Validate sender_id matches requester (can only save own messages)
+    # Allow normalized variations of the sender_id
+    sender_normalized = sender_id_clean.lower().replace("@", "_").replace(".", "_")[:64]
+    requester_normalized = requester_uid.lower().replace("@", "_").replace(".", "_")[:64]
+    if sender_id_clean != requester_uid and sender_normalized != requester_normalized:
+        return JSONResponse({"error": "Can only save your own messages"}, status_code=403)
+    
+    # SECURITY: Validate attachments structure
+    attachments_clean = []
+    if attachments and isinstance(attachments, list):
+        for att in attachments[:10]:  # Limit to 10 attachments
+            if isinstance(att, dict):
+                clean_att = {}
+                for k in ["type", "image_url", "thumb_url", "asset_url", "title", "file_size"]:
+                    if k in att:
+                        val = str(att[k])[:1000] if isinstance(att[k], str) else att[k]
+                        clean_att[k] = val
+                if clean_att:
+                    attachments_clean.append(clean_att)
+    
     try:
-        msg_id = message_id or str(uuid.uuid4())
-        
         # Check if message already exists (idempotency)
         existing = db.query(ChatMessage).filter(ChatMessage.id == msg_id).first()
         if existing:
@@ -437,12 +594,12 @@ async def save_message(
         msg = ChatMessage(
             id=msg_id,
             owner_uid=owner_uid,
-            channel_id=channel_id,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            sender_image=sender_image,
-            text=text or "",
-            attachments=attachments or []
+            channel_id=channel_id_clean,
+            sender_id=sender_id_clean,
+            sender_name=sender_name_clean,
+            sender_image=sender_image_clean,
+            text=text_clean,
+            attachments=attachments_clean if attachments_clean else None
         )
         db.add(msg)
         db.commit()
@@ -508,12 +665,22 @@ async def sync_messages(
     if not requester_uid or not owner_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
+    # SECURITY: Sanitize channel_id
+    channel_id_clean = str(channel_id or "").strip()[:128]
+    
+    # SECURITY: Limit number of messages per sync
+    messages_to_sync = (messages or [])[:500]
+    
     try:
         saved = 0
         skipped = 0
         
-        for msg_data in (messages or []):
-            msg_id = str(msg_data.get("id") or msg_data.get("message_id") or uuid.uuid4())
+        for msg_data in messages_to_sync:
+            if not isinstance(msg_data, dict):
+                skipped += 1
+                continue
+                
+            msg_id = str(msg_data.get("id") or msg_data.get("message_id") or uuid.uuid4())[:64]
             
             # Check if exists
             existing = db.query(ChatMessage).filter(ChatMessage.id == msg_id).first()
@@ -522,11 +689,24 @@ async def sync_messages(
                 continue
             
             user_data = msg_data.get("user") or {}
-            sender_id = str(user_data.get("id") or msg_data.get("sender_id") or "unknown")
-            sender_name = str(user_data.get("name") or msg_data.get("sender_name") or "")
-            sender_image = str(user_data.get("image") or msg_data.get("sender_image") or "")
-            text = str(msg_data.get("text") or "")
-            attachments = msg_data.get("attachments") or []
+            sender_id = str(user_data.get("id") or msg_data.get("sender_id") or "unknown")[:128]
+            sender_name = str(user_data.get("name") or msg_data.get("sender_name") or "")[:255]
+            sender_image = str(user_data.get("image") or msg_data.get("sender_image") or "")[:512]
+            text = str(msg_data.get("text") or "")[:10000]
+            
+            # SECURITY: Validate attachments
+            attachments_clean = []
+            raw_attachments = msg_data.get("attachments") or []
+            if isinstance(raw_attachments, list):
+                for att in raw_attachments[:10]:
+                    if isinstance(att, dict):
+                        clean_att = {}
+                        for k in ["type", "image_url", "thumb_url", "asset_url", "title", "file_size"]:
+                            if k in att:
+                                val = str(att[k])[:1000] if isinstance(att[k], str) else att[k]
+                                clean_att[k] = val
+                        if clean_att:
+                            attachments_clean.append(clean_att)
             
             # Parse created_at
             created_at = None
@@ -543,12 +723,12 @@ async def sync_messages(
             msg = ChatMessage(
                 id=msg_id,
                 owner_uid=owner_uid,
-                channel_id=channel_id,
+                channel_id=channel_id_clean,
                 sender_id=sender_id,
                 sender_name=sender_name or None,
                 sender_image=sender_image or None,
                 text=text,
-                attachments=attachments if attachments else None
+                attachments=attachments_clean if attachments_clean else None
             )
             if created_at:
                 msg.created_at = created_at
