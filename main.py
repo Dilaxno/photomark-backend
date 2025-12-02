@@ -488,6 +488,11 @@ async def domains_validate(request: Request):
                         return PlainTextResponse("ok", status_code=200)
             except Exception as e:
                 logger.debug(f"Shop domain query failed: {e}")
+                # Rollback to clear the failed transaction state
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             
             # Check uploads custom domains (using dedicated table)
             try:
@@ -501,6 +506,11 @@ async def domains_validate(request: Request):
                         logger.info(f"Domain {domain} found but not enabled/verified yet")
             except Exception as e:
                 logger.warning(f"Uploads domain query failed: {e}")
+                # Rollback to clear the failed transaction state
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         finally:
             try:
                 db.close()
