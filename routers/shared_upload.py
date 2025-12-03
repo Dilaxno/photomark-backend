@@ -68,19 +68,25 @@ async def upload_marked_photo(
         try:
             # Load the overlay image
             overlay_img = Image.open(io.BytesIO(overlay_raw)).convert('RGBA')
+            print(f"[markup] Overlay image loaded: {overlay_img.size}, mode={overlay_img.mode}")
             
             # Try to fetch the original image from R2
             try:
+                print(f"[markup] Fetching original image from R2: {photo_key}")
                 original_obj = s3.get_object(Bucket=R2_BUCKET, Key=photo_key)
                 original_raw = original_obj['Body'].read()
+                print(f"[markup] Original image fetched: {len(original_raw)} bytes")
                 original_img = Image.open(io.BytesIO(original_raw)).convert('RGBA')
+                print(f"[markup] Original image loaded: {original_img.size}, mode={original_img.mode}")
                 
                 # Resize overlay to match original if needed
                 if overlay_img.size != original_img.size:
+                    print(f"[markup] Resizing overlay from {overlay_img.size} to {original_img.size}")
                     overlay_img = overlay_img.resize(original_img.size, Image.Resampling.LANCZOS)
                 
                 # Composite: original image + annotation overlay
                 composite = Image.alpha_composite(original_img, overlay_img)
+                print(f"[markup] Composite created: {composite.size}")
                 
                 # Convert to RGB for JPEG output (smaller file size)
                 composite_rgb = composite.convert('RGB')
@@ -90,15 +96,20 @@ async def upload_marked_photo(
                 composite_rgb.save(output, format='JPEG', quality=90)
                 final_image_bytes = output.getvalue()
                 content_type = 'image/jpeg'
+                print(f"[markup] Final composited image: {len(final_image_bytes)} bytes")
                 
             except Exception as e:
                 # If we can't fetch original, just save the overlay as-is
-                print(f"Could not fetch original image for compositing: {e}")
+                print(f"[markup] ERROR: Could not fetch original image for compositing: {e}")
+                import traceback
+                traceback.print_exc()
                 # Keep overlay_raw as final_image_bytes
                 
         except Exception as e:
             # If overlay processing fails, save raw upload
-            print(f"Could not process overlay image: {e}")
+            print(f"[markup] ERROR: Could not process overlay image: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Generate unique key for marked photo
         ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
