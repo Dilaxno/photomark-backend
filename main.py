@@ -222,13 +222,21 @@ async def custom_domain_routing(request: Request, call_next):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         async with httpx.AsyncClient(timeout=10.0) as client:
-                            r = await client.get(f"{front}/", follow_redirects=True)
+                            # Fetch the shop page directly
+                            r = await client.get(f"{front}/shop/{slug}", follow_redirects=True)
                             html = r.text
-                            # For custom domains, set a global variable with the slug instead of changing URL
-                            # This prevents asset path issues (relative paths breaking)
+                            # Inject script to mark this as a custom domain and block other routes
                             inject = f"""<script>
                                 window.__SHOP_CUSTOM_DOMAIN__ = true;
                                 window.__SHOP_SLUG__ = "{slug}";
+                                // Block navigation to other routes on custom domain
+                                (function() {{
+                                    var allowedPaths = ['/shop/{slug}', '/shop/{slug}/', '/', ''];
+                                    var currentPath = window.location.pathname;
+                                    if (!allowedPaths.includes(currentPath) && !currentPath.startsWith('/shop/{slug}')) {{
+                                        window.location.href = '/shop/{slug}';
+                                    }}
+                                }})();
                             </script>""" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
                             return Response(content=html, media_type="text/html", status_code=200)
@@ -680,19 +688,22 @@ async def domain_redirect_any(request: Request, remaining_path: str):
             from core.database import get_db
             from sqlalchemy.orm import Session
             from models.shop import Shop
-            from models.user import User
             db: Session = next(get_db())
             try:
                 shop = _find_shop_by_host(db, host)
                 if shop:
                     if _should_redirect_shop(shop):
-                        user = db.query(User).filter(User.uid == shop.owner_uid).first()
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        # For custom domains, always serve the shop page and block other routes
                         async with httpx.AsyncClient(timeout=10.0) as client:
-                            r = await client.get(f"{front}/", follow_redirects=True)
+                            r = await client.get(f"{front}/shop/{slug}", follow_redirects=True)
                             html = r.text
-                            inject = f"<script>try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}</script>" if slug else ""
+                            # Inject script to mark custom domain and enforce shop-only access
+                            inject = f"""<script>
+                                window.__SHOP_CUSTOM_DOMAIN__ = true;
+                                window.__SHOP_SLUG__ = "{slug}";
+                            </script>""" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
                             return Response(content=html, media_type="text/html", status_code=200)
             finally:
