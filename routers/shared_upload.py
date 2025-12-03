@@ -73,7 +73,8 @@ async def upload_marked_photo(
             # Try to fetch the original image from R2
             try:
                 print(f"[markup] Fetching original image from R2: {photo_key}")
-                original_obj = s3.get_object(Bucket=R2_BUCKET, Key=photo_key)
+                # Use s3.meta.client for get_object since s3 is a ServiceResource
+                original_obj = s3.meta.client.get_object(Bucket=R2_BUCKET, Key=photo_key)
                 original_raw = original_obj['Body'].read()
                 print(f"[markup] Original image fetched: {len(original_raw)} bytes")
                 original_img = Image.open(io.BytesIO(original_raw)).convert('RGBA')
