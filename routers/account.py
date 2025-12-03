@@ -177,6 +177,323 @@ async def dodo_webhook(request: Request):
         # Acknowledge other events without action
         return {"ok": True}
 
+
+# ============== Two-Factor Authentication ==============
+
+def _2fa_key(uid: str) -> str:
+    return f"auth/2fa/{uid}.json"
+
+
+def _2fa_totp_pending_key(uid: str) -> str:
+    return f"auth/2fa_totp_pending/{uid}.json"
+
+
+def _2fa_sms_pending_key(uid: str) -> str:
+    return f"auth/2fa_sms_pending/{uid}.json"
+
+
+@router.get("/2fa/status")
+async def get_2fa_status(request: Request):
+    """
+    Get the current 2FA status for the user.
+    Returns: { enabled: bool, method: 'totp' | 'sms' | null }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        data = read_json_key(_2fa_key(uid)) or {}
+        return {
+            "enabled": data.get("enabled", False),
+            "method": data.get("method", None)
+        }
+    except Exception as ex:
+        logger.warning(f"2fa/status failed for {uid}: {ex}")
+        return {"enabled": False, "method": None}
+
+
+@router.post("/2fa/totp/init")
+async def init_totp_2fa(request: Request):
+    """
+    Initialize TOTP 2FA setup. Generates a secret and QR code.
+    Returns: { secret: str, qr_code: str (data URL) }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        import pyotp
+        import qrcode
+        import io
+        import base64
+        
+        # Get user email for the TOTP label
+        email = ""
+        if firebase_enabled and fb_auth:
+            try:
+                user = fb_auth.get_user(uid)
+                email = (getattr(user, "email", None) or "").strip()
+            except Exception:
+                pass
+        
+        # Generate a new secret
+        secret = pyotp.random_base32()
+        
+        # Create TOTP URI for QR code
+        totp = pyotp.TOTP(secret)
+        provisioning_uri = totp.provisioning_uri(
+            name=email or uid,
+            issuer_name="Photomark"
+        )
+        
+        # Generate QR code as data URL
+        qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        qr_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        qr_data_url = f"data:image/png;base64,{qr_base64}"
+        
+        # Store pending setup
+        now = datetime.utcnow()
+        pending = {
+            "secret": secret,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=30)).isoformat()
+        }
+        write_json_key(_2fa_totp_pending_key(uid), pending)
+        
+        return {
+            "secret": secret,
+            "qr_code": qr_data_url
+        }
+    except ImportError:
+        logger.error("pyotp or qrcode not installed for TOTP 2FA")
+        return JSONResponse({"error": "TOTP not available"}, status_code=500)
+    except Exception as ex:
+        logger.exception(f"2fa/totp/init failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to initialize TOTP"}, status_code=500)
+
+
+@router.post("/2fa/totp/verify")
+async def verify_totp_2fa(request: Request, payload: dict = Body(...)):
+    """
+    Verify TOTP code and enable 2FA.
+    Body: { code: str }
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    code = str((payload or {}).get("code") or "").strip()
+    if not code or len(code) != 6:
+        return JSONResponse({"error": "Invalid code format"}, status_code=400)
+    
+    try:
+        import pyotp
+        
+        # Get pending setup
+        pending = read_json_key(_2fa_totp_pending_key(uid)) or {}
+        secret = pending.get("secret")
+        exp_str = pending.get("expires_at")
+        
+        if not secret or not exp_str:
+            return JSONResponse({"error": "No pending TOTP setup"}, status_code=400)
+        
+        # Check expiry
+        try:
+            exp = datetime.fromisoformat(exp_str)
+        except Exception:
+            exp = datetime.utcnow() - timedelta(seconds=1)
+        
+        if datetime.utcnow() > exp:
+            write_json_key(_2fa_totp_pending_key(uid), {})
+            return JSONResponse({"error": "Setup expired, please start again"}, status_code=400)
+        
+        # Verify the code
+        totp = pyotp.TOTP(secret)
+        if not totp.verify(code, valid_window=1):
+            return JSONResponse({"error": "Invalid code"}, status_code=400)
+        
+        # Enable 2FA
+        now = datetime.utcnow()
+        data = {
+            "enabled": True,
+            "method": "totp",
+            "secret": secret,
+            "enabled_at": now.isoformat()
+        }
+        write_json_key(_2fa_key(uid), data)
+        
+        # Clear pending
+        write_json_key(_2fa_totp_pending_key(uid), {})
+        
+        return {"ok": True}
+    except ImportError:
+        return JSONResponse({"error": "TOTP not available"}, status_code=500)
+    except Exception as ex:
+        logger.exception(f"2fa/totp/verify failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to verify code"}, status_code=500)
+
+
+@router.post("/2fa/sms/init")
+async def init_sms_2fa(request: Request, payload: dict = Body(...)):
+    """
+    Initialize SMS 2FA setup. Sends a verification code to the phone.
+    Body: { phone: str }
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    phone = str((payload or {}).get("phone") or "").strip()
+    if not phone:
+        return JSONResponse({"error": "Phone number required"}, status_code=400)
+    
+    # Basic phone validation
+    phone_digits = ''.join(c for c in phone if c.isdigit())
+    if len(phone_digits) < 10:
+        return JSONResponse({"error": "Invalid phone number"}, status_code=400)
+    
+    try:
+        # Generate code
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        now = datetime.utcnow()
+        
+        # Store pending setup
+        pending = {
+            "phone": phone,
+            "code": code,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=10)).isoformat(),
+            "attempts": 0
+        }
+        write_json_key(_2fa_sms_pending_key(uid), pending)
+        
+        # Send SMS via Twilio (if configured)
+        twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+        twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+        twilio_from = os.environ.get("TWILIO_PHONE_NUMBER", "")
+        
+        if twilio_sid and twilio_token and twilio_from:
+            try:
+                from twilio.rest import Client
+                client = Client(twilio_sid, twilio_token)
+                client.messages.create(
+                    body=f"Your Photomark verification code is: {code}",
+                    from_=twilio_from,
+                    to=phone
+                )
+            except Exception as sms_ex:
+                logger.warning(f"SMS send failed for {uid}: {sms_ex}")
+                return JSONResponse({"error": "Failed to send SMS"}, status_code=500)
+        else:
+            # For development/testing, log the code
+            logger.info(f"2FA SMS code for {uid}: {code} (Twilio not configured)")
+        
+        return {"ok": True}
+    except Exception as ex:
+        logger.exception(f"2fa/sms/init failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to send SMS"}, status_code=500)
+
+
+@router.post("/2fa/sms/verify")
+async def verify_sms_2fa(request: Request, payload: dict = Body(...)):
+    """
+    Verify SMS code and enable 2FA.
+    Body: { code: str, phone: str }
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    code = str((payload or {}).get("code") or "").strip()
+    phone = str((payload or {}).get("phone") or "").strip()
+    
+    if not code or len(code) != 6:
+        return JSONResponse({"error": "Invalid code format"}, status_code=400)
+    
+    try:
+        # Get pending setup
+        pending = read_json_key(_2fa_sms_pending_key(uid)) or {}
+        saved_code = pending.get("code")
+        saved_phone = pending.get("phone")
+        exp_str = pending.get("expires_at")
+        attempts = int(pending.get("attempts") or 0)
+        
+        if not saved_code or not exp_str:
+            return JSONResponse({"error": "No pending SMS setup"}, status_code=400)
+        
+        # Check phone matches
+        if phone != saved_phone:
+            return JSONResponse({"error": "Phone number mismatch"}, status_code=400)
+        
+        # Check expiry
+        try:
+            exp = datetime.fromisoformat(exp_str)
+        except Exception:
+            exp = datetime.utcnow() - timedelta(seconds=1)
+        
+        if datetime.utcnow() > exp:
+            write_json_key(_2fa_sms_pending_key(uid), {})
+            return JSONResponse({"error": "Code expired, please request a new one"}, status_code=400)
+        
+        # Verify code
+        if code != saved_code:
+            attempts += 1
+            pending["attempts"] = attempts
+            if attempts >= 5:
+                write_json_key(_2fa_sms_pending_key(uid), {})
+                return JSONResponse({"error": "Too many invalid attempts"}, status_code=429)
+            write_json_key(_2fa_sms_pending_key(uid), pending)
+            return JSONResponse({"error": "Invalid code"}, status_code=400)
+        
+        # Enable 2FA
+        now = datetime.utcnow()
+        data = {
+            "enabled": True,
+            "method": "sms",
+            "phone": phone,
+            "enabled_at": now.isoformat()
+        }
+        write_json_key(_2fa_key(uid), data)
+        
+        # Clear pending
+        write_json_key(_2fa_sms_pending_key(uid), {})
+        
+        return {"ok": True}
+    except Exception as ex:
+        logger.exception(f"2fa/sms/verify failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to verify code"}, status_code=500)
+
+
+@router.post("/2fa/disable")
+async def disable_2fa(request: Request):
+    """
+    Disable 2FA for the user.
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Clear 2FA data
+        write_json_key(_2fa_key(uid), {"enabled": False, "method": None})
+        return {"ok": True}
+    except Exception as ex:
+        logger.exception(f"2fa/disable failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to disable 2FA"}, status_code=500)
+
     # Extract uid robustly from common locations
     def _dig(dct, *keys, default=None):
         cur = dct
