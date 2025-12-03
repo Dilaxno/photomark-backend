@@ -120,13 +120,12 @@ async def upload_marked_photo(
         ext = '.jpg' if content_type == 'image/jpeg' else '.png'
         key = f"users/{uid}/vaults/{vault}/marked/{ts}_{random_suffix}_{safe_name}_marked{ext}"
         
-        # Upload to R2
-        s3.put_object(
+        # Upload to R2 (use meta.client since s3 is a ServiceResource)
+        s3.meta.client.put_object(
             Bucket=R2_BUCKET,
             Key=key,
             Body=final_image_bytes,
             ContentType=content_type,
-            ACL='private',
             CacheControl='public, max-age=604800'
         )
         
