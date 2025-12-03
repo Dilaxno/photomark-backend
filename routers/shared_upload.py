@@ -1,8 +1,10 @@
 import os
+import io
 import secrets
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, Depends
 from fastapi.responses import JSONResponse
+from PIL import Image
 
 from core.config import s3, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, s3_presign_client
 from utils.storage import presign_custom_domain_bucket
@@ -30,7 +32,12 @@ async def upload_marked_photo(
     photo_key: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    """Upload a marked-up photo from client (for retouch requests)."""
+    """Upload a marked-up photo from client (for retouch requests).
+    
+    The uploaded file can be either:
+    1. A transparent PNG overlay with just the annotations (will be composited with original)
+    2. A full marked-up image (will be stored as-is)
+    """
     token = token.strip()
     photo_key = photo_key.strip()
     
@@ -49,43 +56,77 @@ async def upload_marked_photo(
         return JSONResponse({"error": "invalid share"}, status_code=400)
     
     try:
-        # Read file
-        raw = await file.read()
-        if not raw:
+        # Read uploaded file (annotation overlay)
+        overlay_raw = await file.read()
+        if not overlay_raw:
             return JSONResponse({"error": "Empty file"}, status_code=400)
         
-        # Determine file extension
-        orig_filename = file.filename or 'marked.png'
-        ext = os.path.splitext(orig_filename)[1].lower()
-        if not ext or ext not in ['.jpg', '.jpeg', '.png', '.webp']:
-            ext = '.png'
+        # Try to composite with original image
+        final_image_bytes = overlay_raw
+        content_type = 'image/png'
+        
+        try:
+            # Load the overlay image
+            overlay_img = Image.open(io.BytesIO(overlay_raw)).convert('RGBA')
+            
+            # Try to fetch the original image from R2
+            try:
+                original_obj = s3.get_object(Bucket=R2_BUCKET, Key=photo_key)
+                original_raw = original_obj['Body'].read()
+                original_img = Image.open(io.BytesIO(original_raw)).convert('RGBA')
+                
+                # Resize overlay to match original if needed
+                if overlay_img.size != original_img.size:
+                    overlay_img = overlay_img.resize(original_img.size, Image.Resampling.LANCZOS)
+                
+                # Composite: original image + annotation overlay
+                composite = Image.alpha_composite(original_img, overlay_img)
+                
+                # Convert to RGB for JPEG output (smaller file size)
+                composite_rgb = composite.convert('RGB')
+                
+                # Save to bytes
+                output = io.BytesIO()
+                composite_rgb.save(output, format='JPEG', quality=90)
+                final_image_bytes = output.getvalue()
+                content_type = 'image/jpeg'
+                
+            except Exception as e:
+                # If we can't fetch original, just save the overlay as-is
+                print(f"Could not fetch original image for compositing: {e}")
+                # Keep overlay_raw as final_image_bytes
+                
+        except Exception as e:
+            # If overlay processing fails, save raw upload
+            print(f"Could not process overlay image: {e}")
         
         # Generate unique key for marked photo
         ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
         random_suffix = secrets.token_hex(4)
-        # Extract original filename without extension
         original_name = os.path.splitext(os.path.basename(photo_key))[0]
         safe_name = "".join(c for c in original_name if c.isalnum() or c in ('-', '_'))[:30]
+        ext = '.jpg' if content_type == 'image/jpeg' else '.png'
         key = f"users/{uid}/vaults/{vault}/marked/{ts}_{random_suffix}_{safe_name}_marked{ext}"
         
         # Upload to R2
         s3.put_object(
             Bucket=R2_BUCKET,
             Key=key,
-            Body=raw,
-            ContentType=file.content_type or 'image/png',
+            Body=final_image_bytes,
+            ContentType=content_type,
             ACL='private',
             CacheControl='public, max-age=604800'
         )
+        
         try:
             existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
             if existing:
                 existing.user_uid = uid
                 existing.vault = vault
-                existing.size_bytes = len(raw)
+                existing.size_bytes = len(final_image_bytes)
             else:
-                rec = GalleryAsset(user_uid=uid, vault=vault, key=key, size_bytes=len(raw))
-                db.add(rec)
+                asset_rec = GalleryAsset(user_uid=uid, vault=vault, key=key, size_bytes=len(final_image_bytes))
+                db.add(asset_rec)
             db.commit()
         except Exception:
             try:
