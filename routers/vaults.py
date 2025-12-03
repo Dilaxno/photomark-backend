@@ -1367,11 +1367,11 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
     # Granular client download permission
     try:
         perm_raw = str((payload or {}).get('download_permission') or '').strip().lower()
-        if perm_raw not in ('none', 'low', 'high'):
-            perm_raw = 'none'
+        if perm_raw not in ('proofing', 'proofing_download'):
+            perm_raw = 'proofing'
         rec['download_permission'] = perm_raw
     except Exception:
-        rec['download_permission'] = 'none'
+        rec['download_permission'] = 'proofing'
     # Optional client role for share link
     try:
         role_raw = str((payload or {}).get('client_role') or '').strip().lower()
@@ -1653,11 +1653,11 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
     # Download permission
     try:
         perm_raw = str((payload or {}).get('download_permission') or '').strip().lower()
-        if perm_raw not in ('none', 'low', 'high'):
-            perm_raw = 'none'
+        if perm_raw not in ('proofing', 'proofing_download'):
+            perm_raw = 'proofing'
         rec['download_permission'] = perm_raw
     except Exception:
-        rec['download_permission'] = 'none'
+        rec['download_permission'] = 'proofing'
     
     _write_json_key(_share_key(token), rec)
     
