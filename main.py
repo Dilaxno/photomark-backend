@@ -232,8 +232,12 @@ async def custom_domain_routing(request: Request, call_next):
                             # Fetch the SPA shell from root
                             r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
-                            # Inject script at the very beginning of head to ensure it runs before React
-                            inject = f"""<script>window.__SHOP_CUSTOM_DOMAIN__=true;window.__SHOP_SLUG__="{slug}";</script>""" if slug else ""
+                            # Inject script to set custom domain flag, slug, AND update URL to /shop/{slug}
+                            inject = f"""<script>
+window.__SHOP_CUSTOM_DOMAIN__=true;
+window.__SHOP_SLUG__="{slug}";
+try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}
+</script>""" if slug else ""
                             # Insert right after <head> to ensure it runs first
                             html = html.replace("<head>", "<head>" + inject) if "<head>" in html else (inject + html)
                             return Response(content=html, media_type="text/html", status_code=200)
