@@ -487,97 +487,154 @@ async def disable_2fa(request: Request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     try:
-        # Clear 2FA data
+        # Clear 2FA data and backup codes
         write_json_key(_2fa_key(uid), {"enabled": False, "method": None})
+        write_json_key(_2fa_backup_codes_key(uid), {})
         return {"ok": True}
     except Exception as ex:
         logger.exception(f"2fa/disable failed for {uid}: {ex}")
         return JSONResponse({"error": "Failed to disable 2FA"}, status_code=500)
 
-    # Extract uid robustly from common locations
-    def _dig(dct, *keys, default=None):
-        cur = dct
-        try:
-            for k in keys:
-                if cur is None:
-                    return default
-                cur = cur.get(k)
-            return cur if cur is not None else default
-        except Exception:
-            return default
 
-    uid = (
-        payload.get("uid")
-        or _dig(payload, "data", default={}).get("uid")
-        or _dig(payload, "data", "object", "metadata", default={}).get("uid")
-        or _dig(payload, "metadata", default={}).get("uid")
-        or payload.get("user_id")
-    )
+def _2fa_backup_codes_key(uid: str) -> str:
+    return f"auth/2fa_backup_codes/{uid}.json"
 
-    # Plan from payload or metadata (default to "pro")
-    plan = (
-        str(payload.get("plan") or "").strip()
-        or str(_dig(payload, "data", "object", "plan") or "").strip()
-        or str(_dig(payload, "data", "object", "metadata", "plan") or "").strip()
-        or "pro"
-    )
 
-    # Fallback: try resolve uid by email if provided
+def _generate_backup_codes(count: int = 10) -> list:
+    """Generate a list of random backup codes."""
+    import string
+    codes = []
+    for _ in range(count):
+        # Generate 8-character alphanumeric codes (uppercase for readability)
+        code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+        # Format as XXXX-XXXX for readability
+        formatted = f"{code[:4]}-{code[4:]}"
+        codes.append(formatted)
+    return codes
+
+
+@router.post("/2fa/backup-codes/generate")
+async def generate_backup_codes(request: Request):
+    """
+    Generate new backup codes for 2FA recovery.
+    This will invalidate any existing backup codes.
+    Returns: { codes: string[], generated_at: string }
+    """
+    uid = get_uid_from_request(request)
     if not uid:
-        email = (
-            _dig(payload, "email")
-            or _dig(payload, "customer", "email")
-            or _dig(payload, "data", "object", "email")
-            or _dig(payload, "data", "object", "customer_email")
-        )
-        if email and firebase_enabled and fb_auth:
-            try:
-                user = fb_auth.get_user_by_email(str(email))
-                uid = user.uid
-            except Exception as ex:
-                logger.warning(f"dodo_webhook: could not resolve uid for email {email}: {ex}")
-
-    if not uid:
-        logger.warning("dodo_webhook: missing uid in payment.succeeded payload")
-        return JSONResponse({"error": "missing uid"}, status_code=400)
-
-    # Update PostgreSQL user
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
     try:
-        # Get database session
-        from core.database import SessionLocal
-        db = SessionLocal()
+        # Check if 2FA is enabled
+        twofa_data = read_json_key(_2fa_key(uid)) or {}
+        if not twofa_data.get("enabled"):
+            return JSONResponse({"error": "2FA must be enabled first"}, status_code=400)
         
-        try:
-            user = db.query(User).filter(User.uid == uid).first()
-            if not user:
-                logger.error(f"dodo_webhook: user {uid} not found")
-                return JSONResponse({"error": "user not found"}, status_code=404)
-            
-            # Update plan and payment info
-            now = datetime.utcnow()
-            user.plan = plan
-            user.updated_at = now
-            
-            # Store payment metadata in extra_metadata
-            metadata = user.extra_metadata or {}
-            metadata.update({
-                "isPaid": True,
-                "paidAt": now.isoformat(),
-                "lastPaymentProvider": "dodo"
-            })
-            user.extra_metadata = metadata
-            
-            db.commit()
-            
-            # Mirror entitlement for fast checks (best-effort)
-            ent = read_json_key(_entitlement_key(uid)) or {}
-            ent.update({"isPaid": True, "plan": plan, "source": "dodo", "updatedAt": now.isoformat()})
-            write_json_key(_entitlement_key(uid), ent)
-            
-            return {"ok": True}
-        finally:
-            db.close()
+        # Generate new backup codes
+        codes = _generate_backup_codes(10)
+        now = datetime.utcnow()
+        
+        # Store hashed versions of the codes (for security)
+        import hashlib
+        hashed_codes = []
+        for code in codes:
+            # Remove dash for hashing
+            clean_code = code.replace("-", "")
+            hashed = hashlib.sha256(clean_code.encode()).hexdigest()
+            hashed_codes.append({"hash": hashed, "used": False})
+        
+        backup_data = {
+            "codes": hashed_codes,
+            "generated_at": now.isoformat(),
+            "total": len(codes),
+            "remaining": len(codes)
+        }
+        write_json_key(_2fa_backup_codes_key(uid), backup_data)
+        
+        # Return the plain codes (only shown once!)
+        return {
+            "codes": codes,
+            "generated_at": now.isoformat()
+        }
     except Exception as ex:
+        logger.exception(f"2fa/backup-codes/generate failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to generate backup codes"}, status_code=500)
+
+
+@router.get("/2fa/backup-codes/status")
+async def get_backup_codes_status(request: Request):
+    """
+    Get the status of backup codes (how many remaining, when generated).
+    Does NOT return the actual codes.
+    Returns: { has_codes: bool, remaining: int, total: int, generated_at: string }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        backup_data = read_json_key(_2fa_backup_codes_key(uid)) or {}
+        codes = backup_data.get("codes", [])
+        remaining = sum(1 for c in codes if not c.get("used", False))
+        
+        return {
+            "has_codes": len(codes) > 0,
+            "remaining": remaining,
+            "total": backup_data.get("total", 0),
+            "generated_at": backup_data.get("generated_at")
+        }
+    except Exception as ex:
+        logger.exception(f"2fa/backup-codes/status failed for {uid}: {ex}")
+        return {"has_codes": False, "remaining": 0, "total": 0, "generated_at": None}
+
+
+@router.post("/2fa/backup-codes/verify")
+async def verify_backup_code(request: Request, payload: dict = Body(...)):
+    """
+    Verify and consume a backup code for 2FA recovery.
+    Body: { code: str }
+    Returns: { ok: true, remaining: int }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    code = str((payload or {}).get("code") or "").strip().upper()
+    if not code:
+        return JSONResponse({"error": "Backup code required"}, status_code=400)
+    
+    # Remove any dashes for comparison
+    clean_code = code.replace("-", "")
+    
+    try:
+        import hashlib
+        
+        backup_data = read_json_key(_2fa_backup_codes_key(uid)) or {}
+        codes = backup_data.get("codes", [])
+        
+        if not codes:
+            return JSONResponse({"error": "No backup codes available"}, status_code=400)
+        
+        # Hash the provided code and check against stored hashes
+        provided_hash = hashlib.sha256(clean_code.encode()).hexdigest()
+        
+        for i, stored in enumerate(codes):
+            if stored.get("hash") == provided_hash and not stored.get("used", False):
+                # Mark as used
+                codes[i]["used"] = True
+                codes[i]["used_at"] = datetime.utcnow().isoformat()
+                
+                remaining = sum(1 for c in codes if not c.get("used", False))
+                backup_data["codes"] = codes
+                backup_data["remaining"] = remaining
+                write_json_key(_2fa_backup_codes_key(uid), backup_data)
+                
+                return {"ok": True, "remaining": remaining}
+        
+        return JSONResponse({"error": "Invalid or already used backup code"}, status_code=400)
+    except Exception as ex:
+        logger.exception(f"2fa/backup-codes/verify failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to verify backup code"}, status_code=500)
         logger.exception(f"dodo_webhook: failed to update user {uid} plan: {ex}")
         return JSONResponse({"error": "failed to update plan"}, status_code=500)
 
