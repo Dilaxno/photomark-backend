@@ -224,7 +224,12 @@ async def custom_domain_routing(request: Request, call_next):
                         async with httpx.AsyncClient(timeout=10.0) as client:
                             r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
-                            inject = f"<script>try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}</script>" if slug else ""
+                            # For custom domains, set a global variable with the slug instead of changing URL
+                            # This prevents asset path issues (relative paths breaking)
+                            inject = f"""<script>
+                                window.__SHOP_CUSTOM_DOMAIN__ = true;
+                                window.__SHOP_SLUG__ = "{slug}";
+                            </script>""" if slug else ""
                             html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
                             return Response(content=html, media_type="text/html", status_code=200)
                 
