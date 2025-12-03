@@ -314,11 +314,13 @@ async def resolve_domain(hostname: str, db: Session = Depends(get_db)):
         if not shop:
             raise HTTPException(status_code=404, detail="No shop bound to this domain")
         enabled = bool((shop.domain or {}).get('enabled') or False)
+        published = bool(shop.published) if hasattr(shop, 'published') else True
         return {
             "slug": (shop.slug or "").strip(),
             "uid": shop.uid,
             "domain": (shop.domain or {}),
             "enabled": enabled,
+            "published": published,
         }
     except HTTPException:
         raise
