@@ -11,18 +11,8 @@ _storage_type = "memory"
 try:
     redis_url = os.getenv("REDIS_URL", "").strip()
     if redis_url:
-        import redis
-        # Configure Redis with connection pooling and timeouts
-        redis_client = redis.from_url(
-            redis_url,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=30,
-        )
-        # Test connection
-        redis_client.ping()
-        storage = store.RedisStore(redis_client)
+        # RedisStore expects the URL string, not a Redis client object
+        storage = store.RedisStore(server=redis_url)
         _storage_type = "redis"
         logger.info("[rate_limit] Using Redis for rate limiting")
     else:
