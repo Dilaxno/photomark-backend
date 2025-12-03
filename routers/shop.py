@@ -66,6 +66,7 @@ class ShopSettingsSchema(BaseModel):
     ownerName: Optional[str] = None
     theme: ShopThemeSchema
     domain: Dict[str, Any] = {}
+    published: bool = False
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
