@@ -1659,6 +1659,15 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
     except Exception:
         rec['download_permission'] = 'proofing'
     
+    # Client role for proofing permissions
+    try:
+        role_raw = str((payload or {}).get('client_role') or '').strip().lower()
+        if role_raw not in ('viewer', 'editor', 'owner'):
+            role_raw = 'editor'
+        rec['client_role'] = role_raw
+    except Exception:
+        rec['client_role'] = 'editor'
+    
     _write_json_key(_share_key(token), rec)
     
     try:
