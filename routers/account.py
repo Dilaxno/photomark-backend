@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Request, Body, Depends
+from fastapi import APIRouter, Request, Body, Depends, UploadFile, File
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
 import os
@@ -988,9 +989,6 @@ async def delete_account(request: Request, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-    return {"ok": True}
-
-
 # ============== Brand Kit ==============
 
 def _brand_kit_key(uid: str) -> str:
@@ -998,21 +996,6 @@ def _brand_kit_key(uid: str) -> str:
 
 
 class BrandKitPayload(BaseModel):
-    logo_url: Optional[str] = None
-    primary_color: Optional[str] = None
-    secondary_color: Optional[str] = None
-    accent_color: Optional[str] = None
-    background_color: Optional[str] = None
-    text_color: Optional[str] = None
-    slogan: Optional[str] = None
-    font_family: Optional[str] = None
-    custom_font_url: Optional[str] = None
-    custom_font_name: Optional[str] = None
-
-
-from pydantic import BaseModel as PydanticBaseModel
-
-class BrandKitPayload(PydanticBaseModel):
     logo_url: Optional[str] = None
     primary_color: Optional[str] = None
     secondary_color: Optional[str] = None
