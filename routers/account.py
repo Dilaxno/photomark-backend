@@ -1038,7 +1038,7 @@ async def get_brand_kit(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/brand-kit")
 async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...), db: Session = Depends(get_db)):
-    """Save the user's brand kit settings to database."""
+    """Save the user's brand kit settings to database and sync to shop if exists."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -1071,6 +1071,40 @@ async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...),
             user.brand_custom_font_name = payload.custom_font_name or None
         
         user.updated_at = datetime.utcnow()
+        
+        # Also sync brand kit to shop theme if user has a shop
+        shop_synced = False
+        try:
+            from models.shop import Shop
+            shop = db.query(Shop).filter(Shop.uid == uid).first()
+            if shop:
+                # Get current theme or create new one
+                current_theme = shop.theme if isinstance(shop.theme, dict) else {}
+                
+                # Update theme with brand kit values (only if brand kit value is set)
+                if user.brand_logo_url:
+                    current_theme['logoUrl'] = user.brand_logo_url
+                if user.brand_primary_color:
+                    current_theme['primaryColor'] = user.brand_primary_color
+                if user.brand_secondary_color:
+                    current_theme['secondaryColor'] = user.brand_secondary_color
+                if user.brand_accent_color:
+                    current_theme['accentColor'] = user.brand_accent_color
+                if user.brand_background_color:
+                    current_theme['backgroundColor'] = user.brand_background_color
+                if user.brand_text_color:
+                    current_theme['textColor'] = user.brand_text_color
+                if user.brand_font_family:
+                    current_theme['fontFamily'] = user.brand_font_family
+                if user.brand_custom_font_url:
+                    current_theme['customFontUrl'] = user.brand_custom_font_url
+                
+                shop.theme = current_theme
+                shop.updated_at = datetime.utcnow()
+                shop_synced = True
+        except Exception as shop_ex:
+            logger.warning(f"Failed to sync brand kit to shop for {uid}: {shop_ex}")
+        
         db.commit()
         
         # Return updated data
@@ -1087,7 +1121,7 @@ async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...),
             "custom_font_name": user.brand_custom_font_name,
         }
         data = {k: v for k, v in data.items() if v is not None}
-        return {"ok": True, "brand_kit": data}
+        return {"ok": True, "brand_kit": data, "shop_synced": shop_synced}
     except Exception as ex:
         db.rollback()
         logger.warning(f"save_brand_kit failed for {uid}: {ex}")

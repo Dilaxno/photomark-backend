@@ -1220,7 +1220,7 @@ async def vaults_generate_preview(request: Request, vault: str = Body(..., embed
 
 
 @router.get("/vaults/preview/{token}")
-async def vaults_get_preview(token: str, limit: Optional[int] = None, cursor: Optional[str] = None):
+async def vaults_get_preview(token: str, limit: Optional[int] = None, cursor: Optional[str] = None, db: Session = Depends(get_db)):
     """Get vault photos using preview token (public, no auth required)"""
     try:
         preview_key = f"previews/{token}.json"
@@ -1277,12 +1277,34 @@ async def vaults_get_preview(token: str, limit: Optional[int] = None, cursor: Op
                             "title": slide.get("title", "")
                         })
         
+        # Get brand kit from user
+        brand_kit = {}
+        try:
+            user = db.query(User).filter(User.uid == uid).first()
+            if user:
+                brand_kit_data = {
+                    "logo_url": user.brand_logo_url,
+                    "primary_color": user.brand_primary_color,
+                    "secondary_color": user.brand_secondary_color,
+                    "accent_color": user.brand_accent_color,
+                    "background_color": user.brand_background_color,
+                    "text_color": user.brand_text_color,
+                    "slogan": user.brand_slogan,
+                    "font_family": user.brand_font_family,
+                    "custom_font_url": user.brand_custom_font_url,
+                    "custom_font_name": user.brand_custom_font_name,
+                }
+                brand_kit = {k: v for k, v in brand_kit_data.items() if v is not None}
+        except Exception:
+            pass
+        
         resp = {
             "vault": vault,
             "display_name": display_name or vault.replace("_", " "),
             "photos": items,
             "photo_count": len(items),
-            "slideshows": slideshow_items
+            "slideshows": slideshow_items,
+            "brand_kit": brand_kit
         }
         if eff_limit is not None:
             next_start = start_index + eff_limit
