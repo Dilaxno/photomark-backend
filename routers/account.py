@@ -1097,7 +1097,7 @@ async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...),
 @router.post("/brand-kit/upload-logo")
 async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
     """Upload a logo for the brand kit to R2 storage."""
-    from utils.storage import upload_bytes
+    from utils.storage import upload_bytes, get_presigned_url
     from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
     
     uid = get_uid_from_request(request)
@@ -1122,14 +1122,19 @@ async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
         # Upload to R2 storage
         upload_bytes(key, content, content_type=content_type)
         
-        # Build public URL using R2 custom domain or public base
-        base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
-        if base:
-            url = f"{base.rstrip('/')}/{key}"
-        else:
-            # Fallback to presigned URL
-            from utils.storage import get_presigned_url
-            url = get_presigned_url(key, expires_in=86400 * 365) or key
+        # For brand kit assets, we need a long-lived URL
+        # Try to get a presigned URL with 1 year expiration
+        url = get_presigned_url(key, expires_in=86400 * 365)
+        
+        if not url:
+            # Fallback to custom domain URL with https
+            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+            if base:
+                # Ensure https:// prefix (strip any existing protocol first)
+                base = base.replace("http://", "").replace("https://", "")
+                url = f"https://{base.rstrip('/')}/{key}"
+            else:
+                url = f"/static/{key}"
         
         return {"ok": True, "logo_url": url, "key": key}
     except Exception as ex:
@@ -1140,7 +1145,7 @@ async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
 @router.post("/brand-kit/upload-font")
 async def upload_brand_font(request: Request, file: UploadFile = File(...)):
     """Upload a custom font for the brand kit to R2 storage."""
-    from utils.storage import upload_bytes
+    from utils.storage import upload_bytes, get_presigned_url
     from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
     
     uid = get_uid_from_request(request)
@@ -1176,13 +1181,19 @@ async def upload_brand_font(request: Request, file: UploadFile = File(...)):
         # Upload to R2 storage
         upload_bytes(key, content, content_type=font_content_types.get(ext, "application/octet-stream"))
         
-        # Build public URL using R2 custom domain or public base
-        base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
-        if base:
-            url = f"{base.rstrip('/')}/{key}"
-        else:
-            from utils.storage import get_presigned_url
-            url = get_presigned_url(key, expires_in=86400 * 365) or key
+        # For brand kit assets, we need a long-lived URL
+        # Try to get a presigned URL with 1 year expiration
+        url = get_presigned_url(key, expires_in=86400 * 365)
+        
+        if not url:
+            # Fallback to custom domain URL with https
+            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+            if base:
+                # Ensure https:// prefix (strip any existing protocol first)
+                base = base.replace("http://", "").replace("https://", "")
+                url = f"https://{base.rstrip('/')}/{key}"
+            else:
+                url = f"/static/{key}"
         
         return {"ok": True, "font_url": url, "font_name": safe_name or "CustomFont", "key": key}
     except Exception as ex:
