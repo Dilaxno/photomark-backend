@@ -82,8 +82,53 @@ def _get_uid_from_any(request: Request) -> str | None:
                     return uid
             except Exception:
                 pass
+    # Fallback to Firebase ID token (suppress warning for non-Firebase tokens)
+    try:
+        return get_uid_from_request(request)
+    except Exception:
+        return None
+
+
+def _get_sender_info_from_token(request: Request) -> tuple[str | None, str | None, bool]:
+    """
+    Extract sender info from token.
+    Returns: (sender_uid, owner_uid, is_collaborator)
+    - For owner: sender_uid = owner_uid, is_collaborator = False
+    - For collaborator: sender_uid = normalized_email, owner_uid = owner's uid, is_collaborator = True
+    """
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        tok = auth_header.split(" ", 1)[1].strip()
+        # Try session token (signed with STREAM_API_SECRET) - this is for owners
+        if API_SECRET:
+            try:
+                payload = jwt.decode(tok, API_SECRET, algorithms=["HS256"])  # type: ignore
+                uid = str(payload.get("uid") or "").strip()
+                if uid:
+                    # Session token - uid is the owner's Firebase UID
+                    return (uid, uid, False)
+            except Exception:
+                pass
+        # Try collaborator token (signed with COLLAB_JWT_SECRET)
+        if COLLAB_JWT_SECRET:
+            try:
+                payload = jwt.decode(tok, COLLAB_JWT_SECRET, algorithms=["HS256"])  # type: ignore
+                owner_uid = str(payload.get("owner_uid") or "").strip()
+                email = str(payload.get("email") or "").strip()
+                if owner_uid:
+                    # Collaborator token - return normalized email as sender_uid
+                    sender_uid = (email or "").lower().replace("@", "_").replace(".", "_")[:64] if email else None
+                    return (sender_uid, owner_uid, True)
+            except Exception:
+                pass
     # Fallback to Firebase ID token
-    return get_uid_from_request(request)
+    try:
+        uid = get_uid_from_request(request)
+        if uid:
+            return (uid, uid, False)
+    except Exception:
+        pass
+    return (None, None, False)
 
 
 @router.post("/session")
@@ -511,7 +556,8 @@ async def message_notify(
     db: Session = Depends(get_db)
 ):
     """Send email notification to recipients when a new chat message is sent."""
-    sender_uid = _get_uid_from_any(request)
+    # Get sender info from token
+    sender_uid, token_owner_uid, is_collaborator = _get_sender_info_from_token(request)
     if not sender_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
@@ -526,7 +572,8 @@ async def message_notify(
         return JSONResponse({"error": "Invalid channel ID"}, status_code=400)
     
     # Determine if sender is owner or collaborator
-    is_owner = (sender_uid == owner_uid)
+    # Use token info if available, otherwise compare with channel owner
+    is_owner = not is_collaborator and (sender_uid == owner_uid)
     
     try:
         app_name = os.getenv("APP_NAME", "Photomark")
