@@ -553,11 +553,13 @@ async def message_notify(
     channel_id: str = Body(..., embed=True),
     message_text: str = Body("", embed=True),
     sender_name: str = Body("", embed=True),
+    sender_type: str = Body("", embed=True),
+    sender_email: str = Body("", embed=True),
     db: Session = Depends(get_db)
 ):
     """Send email notification to recipients when a new chat message is sent."""
-    # Get sender info from token
-    sender_uid, token_owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    # Get sender info from token (for authorization)
+    sender_uid = _get_uid_from_any(request)
     if not sender_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
@@ -565,15 +567,19 @@ async def message_notify(
     channel_id_clean = str(channel_id or "").strip()[:128]
     message_text_clean = _sanitize_html(str(message_text or "").strip()[:500])
     sender_name_clean = _sanitize_html(str(sender_name or "").strip()[:100])
+    sender_type_clean = str(sender_type or "").strip().lower()[:20]
+    sender_email_clean = str(sender_email or "").strip().lower()[:255]
     
     # Extract owner UID from channel ID (format: collab_{owner_uid})
     owner_uid = _extract_owner_uid_from_channel(channel_id_clean)
     if not owner_uid:
         return JSONResponse({"error": "Invalid channel ID"}, status_code=400)
     
-    # Determine if sender is owner or collaborator
-    # Use token info if available, otherwise compare with channel owner
-    is_owner = not is_collaborator and (sender_uid == owner_uid)
+    # Determine if sender is owner or collaborator based on explicit sender_type
+    # This is more reliable than token inspection since collaborators use owner's Firebase token
+    is_owner = sender_type_clean != "collaborator"
+    
+    logger.info(f"[message_notify] channel={channel_id_clean}, sender_type={sender_type_clean}, is_owner={is_owner}, sender_email={sender_email_clean}")
     
     try:
         app_name = os.getenv("APP_NAME", "Photomark")
@@ -625,17 +631,25 @@ async def message_notify(
                     # Try to find collaborator info for better sender name
                     collab_info = None
                     try:
-                        # Find collaborator by normalized ID
-                        collabs = db.query(Collaborator).filter(
-                            Collaborator.owner_uid == owner_uid,
-                            Collaborator.active == True
-                        ).all()
-                        for c in collabs:
-                            normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
-                            alt_normalized = (c.email or "").lower().replace("[^a-z0-9]", "_")[:64]
-                            if sender_uid == normalized or sender_uid == alt_normalized or sender_uid == c.email:
-                                collab_info = c
-                                break
+                        # Find collaborator by email (most reliable) or normalized ID
+                        if sender_email_clean:
+                            collab_info = db.query(Collaborator).filter(
+                                Collaborator.owner_uid == owner_uid,
+                                Collaborator.email == sender_email_clean,
+                                Collaborator.active == True
+                            ).first()
+                        
+                        if not collab_info:
+                            collabs = db.query(Collaborator).filter(
+                                Collaborator.owner_uid == owner_uid,
+                                Collaborator.active == True
+                            ).all()
+                            for c in collabs:
+                                normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
+                                alt_normalized = (c.email or "").lower().replace("[^a-z0-9]", "_")[:64]
+                                if sender_uid == normalized or sender_uid == alt_normalized or sender_uid == c.email:
+                                    collab_info = c
+                                    break
                     except Exception:
                         pass
                     

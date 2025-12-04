@@ -54,6 +54,42 @@ def _pg_ensure_table(db: Session):
   ))
   db.commit()
 
+
+def _pg_ensure_settings_table(db: Session):
+  db.execute(text(
+    """
+    CREATE TABLE IF NOT EXISTS portfolio_settings (
+      uid VARCHAR(64) PRIMARY KEY,
+      data JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    """
+  ))
+  db.commit()
+
+
+def _pg_get_settings(db: Session, uid: str) -> Optional[dict]:
+  _pg_ensure_settings_table(db)
+  row = db.execute(text("SELECT data FROM portfolio_settings WHERE uid = :uid"), {"uid": uid}).mappings().first()
+  if row:
+    return row.get("data")
+  return None
+
+
+def _pg_save_settings(db: Session, uid: str, data: dict):
+  _pg_ensure_settings_table(db)
+  db.execute(text(
+    """
+    INSERT INTO portfolio_settings (uid, data)
+    VALUES (:uid, :data)
+    ON CONFLICT (uid) DO UPDATE SET
+      data = EXCLUDED.data,
+      updated_at = NOW();
+    """
+  ), {"uid": uid, "data": data})
+  db.commit()
+
 def _pg_list_items(db: Session, uid: str) -> List[dict]:
   _pg_ensure_table(db)
   rows = db.execute(text("SELECT id, key, image_url, title, description, taken_at FROM portfolio_items WHERE uid = :uid ORDER BY created_at DESC"), {"uid": uid}).mappings().all()
@@ -350,4 +386,40 @@ async def add_items_by_keys(request: Request, payload: dict, db: Session = Depen
     return {"ok": True, "added": added}
   except Exception as ex:
     logger.warning(f"add_items_by_keys failed: {ex}")
+    return JSONResponse({"error": "server error"}, status_code=500)
+
+
+# Portfolio Builder Settings Endpoints
+
+@router.get("/portfolio/builder/settings")
+async def get_builder_settings(request: Request, db: Session = Depends(get_db)):
+  """Get portfolio builder settings for the authenticated user."""
+  uid = get_uid_from_request(request)
+  if not uid:
+    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  try:
+    data = _pg_get_settings(db, uid)
+    return {"ok": True, "data": data}
+  except Exception as ex:
+    logger.warning(f"get_builder_settings failed: {ex}")
+    return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.post("/portfolio/builder/settings")
+async def save_builder_settings(request: Request, payload: dict, db: Session = Depends(get_db)):
+  """Save portfolio builder settings for the authenticated user."""
+  uid = get_uid_from_request(request)
+  if not uid:
+    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  try:
+    # Validate payload structure
+    data = payload.get("data")
+    if not isinstance(data, dict):
+      return JSONResponse({"error": "Invalid data format"}, status_code=400)
+    
+    # Save to database
+    _pg_save_settings(db, uid, data)
+    return {"ok": True}
+  except Exception as ex:
+    logger.warning(f"save_builder_settings failed: {ex}")
     return JSONResponse({"error": "server error"}, status_code=500)
