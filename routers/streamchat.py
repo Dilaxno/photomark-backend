@@ -485,3 +485,143 @@ async def group_delete(request: Request, guid: str = Body(..., embed=True)):
     except Exception as ex:
         logger.exception(f"group_delete failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+# Simple in-memory rate limit for email notifications to prevent spam
+_RECENT_EMAIL_NOTIFICATIONS: dict[str, float] = {}
+_EMAIL_NOTIFY_COOLDOWN_SECONDS = 60.0  # Only send one email per recipient per minute
+
+
+def _should_send_email_notification(recipient_key: str) -> bool:
+    """Check if we should send an email notification (rate limiting)."""
+    now = datetime.utcnow().timestamp()
+    last = _RECENT_EMAIL_NOTIFICATIONS.get(recipient_key, 0)
+    if now - last < _EMAIL_NOTIFY_COOLDOWN_SECONDS:
+        return False
+    _RECENT_EMAIL_NOTIFICATIONS[recipient_key] = now
+    return True
+
+
+@router.post("/message/notify")
+async def message_notify(
+    request: Request,
+    channel_id: str = Body(..., embed=True),
+    message_text: str = Body("", embed=True),
+    sender_name: str = Body("", embed=True),
+    db: Session = Depends(get_db)
+):
+    """Send email notification to recipients when a new chat message is sent."""
+    sender_uid = _get_uid_from_any(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # SECURITY: Validate and sanitize inputs
+    channel_id_clean = str(channel_id or "").strip()[:128]
+    message_text_clean = _sanitize_html(str(message_text or "").strip()[:500])
+    sender_name_clean = _sanitize_html(str(sender_name or "").strip()[:100])
+    
+    # Extract owner UID from channel ID (format: collab_{owner_uid})
+    owner_uid = _extract_owner_uid_from_channel(channel_id_clean)
+    if not owner_uid:
+        return JSONResponse({"error": "Invalid channel ID"}, status_code=400)
+    
+    # Determine if sender is owner or collaborator
+    is_owner = (sender_uid == owner_uid)
+    
+    try:
+        app_name = os.getenv("APP_NAME", "Photomark")
+        front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        sent_count = 0
+        
+        if is_owner:
+            # Owner sent message - notify all active collaborators
+            collabs = db.query(Collaborator).filter(
+                Collaborator.owner_uid == owner_uid,
+                Collaborator.active == True
+            ).all()
+            
+            for collab in collabs:
+                if not collab.email:
+                    continue
+                
+                # Rate limit per recipient
+                rate_key = f"notify:{collab.email}:{channel_id_clean}"
+                if not _should_send_email_notification(rate_key):
+                    continue
+                
+                subject = f"New message from {sender_name_clean or 'Owner'} in {app_name} Team Chat"
+                intro = (
+                    f"You have a new message in your team chat.<br><br>"
+                    f"<b>From:</b> {sender_name_clean or 'Owner'}<br>"
+                    + (f"<b>Message:</b> {message_text_clean}<br><br>" if message_text_clean else "<br>")
+                    + "Click below to view and respond."
+                )
+                html = render_email(
+                    "email_basic.html",
+                    title="New Team Chat Message",
+                    intro=intro,
+                    button_label="Open Chat",
+                    button_url=f"{front}/collab-dashboard",
+                )
+                try:
+                    if send_email_smtp(collab.email, subject, html):
+                        sent_count += 1
+                except Exception as ex:
+                    logger.warning(f"Failed to send chat notification to {collab.email}: {ex}")
+        else:
+            # Collaborator sent message - notify the owner
+            owner = db.query(User).filter(User.uid == owner_uid).first()
+            if owner and owner.email:
+                # Rate limit per recipient
+                rate_key = f"notify:{owner.email}:{channel_id_clean}"
+                if _should_send_email_notification(rate_key):
+                    # Try to find collaborator info for better sender name
+                    collab_info = None
+                    try:
+                        # Find collaborator by normalized ID
+                        collabs = db.query(Collaborator).filter(
+                            Collaborator.owner_uid == owner_uid,
+                            Collaborator.active == True
+                        ).all()
+                        for c in collabs:
+                            normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
+                            alt_normalized = (c.email or "").lower().replace("[^a-z0-9]", "_")[:64]
+                            if sender_uid == normalized or sender_uid == alt_normalized or sender_uid == c.email:
+                                collab_info = c
+                                break
+                    except Exception:
+                        pass
+                    
+                    # Build display name: Name:Role or email
+                    if collab_info:
+                        if collab_info.name:
+                            display_sender = f"{collab_info.name}:{collab_info.role}"
+                        else:
+                            display_sender = f"{collab_info.email}:{collab_info.role}"
+                    else:
+                        display_sender = sender_name_clean or "Collaborator"
+                    
+                    subject = f"New message from {display_sender} in {app_name} Team Chat"
+                    intro = (
+                        f"You have a new message in your team chat.<br><br>"
+                        f"<b>From:</b> {display_sender}<br>"
+                        + (f"<b>Message:</b> {message_text_clean}<br><br>" if message_text_clean else "<br>")
+                        + "Click below to view and respond."
+                    )
+                    html = render_email(
+                        "email_basic.html",
+                        title="New Team Chat Message",
+                        intro=intro,
+                        button_label="Open Chat",
+                        button_url=f"{front}/collaboration",
+                    )
+                    try:
+                        if send_email_smtp(owner.email, subject, html):
+                            sent_count += 1
+                    except Exception as ex:
+                        logger.warning(f"Failed to send chat notification to owner {owner.email}: {ex}")
+        
+        return {"ok": True, "sent": sent_count}
+    except Exception as ex:
+        logger.exception(f"message_notify failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
