@@ -181,12 +181,12 @@ async def custom_domain_routing(request: Request, call_next):
             path = ""
         
         # Skip paths that should not be intercepted
-        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/shop/") or path.startswith("/api/"):
+        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/api/"):
             return await call_next(request)
         
         # Skip static assets - let them be proxied to frontend directly
         static_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.otf', '.map', '.json', '.webp', '.avif', '.webmanifest')
-        static_paths = ('/assets/', '/static/', '/fonts/', '/images/', '/icons/')
+        static_paths = ('/assets/', '/static/', '/fonts/', '/images/', '/icons/', '/shop/assets/')
         is_static = any(path.startswith(p) for p in static_paths) or any(path.endswith(ext) for ext in static_extensions)
         if is_static:
             # For custom domains, proxy static assets to the frontend
@@ -201,8 +201,12 @@ async def custom_domain_routing(request: Request, call_next):
                     if shop or uploads_domain:
                         # Proxy static asset request to frontend
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                        # Strip /shop prefix if present (happens when URL is /shop/{slug} and assets are relative)
+                        asset_path = path
+                        if path.startswith('/shop/assets/'):
+                            asset_path = path.replace('/shop/assets/', '/assets/')
                         async with httpx.AsyncClient(timeout=10.0) as client:
-                            r = await client.get(f"{front}{path}", follow_redirects=True)
+                            r = await client.get(f"{front}{asset_path}", follow_redirects=True)
                             # Determine content type from response or path
                             content_type = r.headers.get('content-type', 'application/octet-stream')
                             return Response(content=r.content, media_type=content_type, status_code=r.status_code)
@@ -232,11 +236,11 @@ async def custom_domain_routing(request: Request, call_next):
                             # Fetch the SPA shell from root
                             r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
-                            # Inject script to set custom domain flag, slug, AND update URL to /shop/{slug}
+                            # Inject script to set custom domain flag and slug
+                            # Do NOT use history.replaceState as it breaks relative asset paths
                             inject = f"""<script>
 window.__SHOP_CUSTOM_DOMAIN__=true;
 window.__SHOP_SLUG__="{slug}";
-try{{history.replaceState(null,'','/shop/{slug}')}}catch(e){{}}
 </script>""" if slug else ""
                             # Insert right after <head> to ensure it runs first
                             html = html.replace("<head>", "<head>" + inject) if "<head>" in html else (inject + html)
@@ -684,6 +688,12 @@ async def root(request: Request):
 @app.get("/{remaining_path:path}")
 async def domain_redirect_any(request: Request, remaining_path: str):
     try:
+        path = f"/{remaining_path}" if remaining_path else "/"
+        
+        # Check if this is a static asset request that needs proxying
+        static_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.otf', '.map', '.json', '.webp', '.avif', '.webmanifest')
+        is_static = any(path.endswith(ext) for ext in static_extensions) or '/assets/' in path
+        
         host = _get_request_host(request)
         if host:
             from core.database import get_db
@@ -696,7 +706,22 @@ async def domain_redirect_any(request: Request, remaining_path: str):
                     if _should_redirect_shop(shop):
                         slug = (shop.slug or "").strip()
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-                        # For custom domains, serve the SPA shell with shop flags
+                        
+                        # If it's a static asset, proxy it
+                        if is_static:
+                            # Strip /shop prefix if present
+                            asset_path = path
+                            if '/shop/assets/' in path:
+                                asset_path = path.replace('/shop/assets/', '/assets/')
+                            elif '/shop/' in path and '/assets/' in path:
+                                # Handle other variations
+                                asset_path = '/assets/' + path.split('/assets/')[-1]
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                r = await client.get(f"{front}{asset_path}", follow_redirects=True)
+                                content_type = r.headers.get('content-type', 'application/octet-stream')
+                                return Response(content=r.content, media_type=content_type, status_code=r.status_code)
+                        
+                        # For non-static paths, serve the SPA shell with shop flags
                         async with httpx.AsyncClient(timeout=10.0) as client:
                             r = await client.get(f"{front}/", follow_redirects=True)
                             html = r.text
