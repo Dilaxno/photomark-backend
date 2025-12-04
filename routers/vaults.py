@@ -1033,15 +1033,29 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+def _make_item_fast(uid: str, key: str) -> dict:
+    """Fast item creation without invisible watermark detection - for gallery view"""
+    if not key.startswith(f"users/{uid}/"):
+        raise ValueError("forbidden key")
+    name = os.path.basename(key)
+    if s3 and R2_BUCKET:
+        url = _get_url_for_key(key, expires_in=60 * 60)
+    else:
+        url = f"/static/{key}"
+    return {"key": key, "url": url, "name": name}
+
+
 @router.get("/vaults/photos")
-async def vaults_photos(request: Request, vault: str, password: Optional[str] = None, limit: Optional[int] = None, cursor: Optional[str] = None):
+async def vaults_photos(request: Request, vault: str, password: Optional[str] = None, limit: Optional[int] = None, cursor: Optional[str] = None, fast: Optional[bool] = True):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     # Owner always has access to their own vaults, no password needed
     # Password protection only applies to shared access via tokens
     try:
-        keys = _read_vault(uid, vault)
+        all_keys = _read_vault(uid, vault)
+        total_count = len(all_keys)
+        
         start_index = 0
         if cursor:
             try:
@@ -1052,135 +1066,103 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
         if isinstance(limit, int) and limit > 0:
             eff_limit = max(1, min(limit, 1000))
         
+        keys = all_keys
         try:
             if vault == FRIENDS_VAULT_SAFE:
                 keys = [k for k in keys if ('/partners/' not in k and '-fromfriend' not in os.path.basename(k))]
+                total_count = len(keys)
         except Exception:
             pass
+        
         # Apply optional explicit order from meta if present
         try:
-            order = meta.get("order") if isinstance(meta, dict) else None
+            vmeta = _read_vault_meta(uid, vault)
+            order = vmeta.get("order") if isinstance(vmeta, dict) else None
             if isinstance(order, list) and order:
                 order_index = {k: i for i, k in enumerate(order)}
                 keys = sorted(keys, key=lambda k: order_index.get(k, 10**9))
         except Exception:
             pass
-        # Apply optional ordering and then slice for pagination
+        
+        # Apply pagination slice
         if eff_limit is not None or cursor:
             keys = keys[start_index : (start_index + (eff_limit or len(keys)))]
 
-        items: list[dict] = []
-        if s3 and R2_BUCKET:
-            # Build lookup of originals to attach to items
-            orig_prefix = f"users/{uid}/originals/"
-            original_lookup: dict[str, dict] = {}
-            try:
-                bucket = s3.Bucket(R2_BUCKET)
-                for o in bucket.objects.filter(Prefix=orig_prefix):
-                    ok = o.key
-                    if ok.endswith("/"):
-                        continue
-                    o_url = _get_url_for_key(ok, expires_in=60 * 60)
-                    original_lookup[ok] = {"url": o_url}
-            except Exception:
-                original_lookup = {}
+        # Filter out JSON sidecars early
+        keys = [k for k in keys if not k.lower().endswith('.json')]
 
+        items: list[dict] = []
+        
+        # FAST MODE: Skip expensive originals lookup and invisible watermark detection
+        # This makes initial vault load much faster (like SmugMug/Pixieset)
+        if fast:
             for key in keys:
                 try:
-                    # Skip accidental JSON sidecar entries
-                    if key.lower().endswith('.json'):
-                        continue
-                    item = _make_item_from_key(uid, key)
-                    name = os.path.basename(key)
-                    original_key = None
-                    # has_invisible is set inside _make_item_from_key via cache/detector
-                    if "-o" in name:
-                        try:
-                            base_part = name.rsplit("-o", 1)[0]
-                            for suf in ("-logo", "-txt"):
-                                if base_part.endswith(suf):
-                                    base_part = base_part[: -len(suf)]
-                                    break
-                            dir_part = os.path.dirname(key)  # users/uid/watermarked/YYYY/MM/DD
-                            date_part = "/".join(dir_part.split("/")[-3:])
-                            for ext in ("jpg","jpeg","png","webp","heic","tif","tiff","bin"):
-                                cand = f"users/{uid}/originals/{date_part}/{base_part}-orig.{ext}" if ext != 'bin' else f"users/{uid}/originals/{date_part}/{base_part}-orig.bin"
-                                if cand in original_lookup:
-                                    original_key = cand
-                                    break
-                        except Exception:
-                            original_key = None
-                    if original_key and original_key in original_lookup:
-                        item["original_key"] = original_key
-                        item["original_url"] = original_lookup[original_key]["url"]
-                    # Attach optional friend note metadata if exists
-                    try:
-                        if "-fromfriend-" in name:
-                            meta_key = f"{os.path.splitext(key)[0]}.json"
-                            meta = read_json_key(meta_key)
-                            if isinstance(meta, dict) and (meta.get("note") or meta.get("from")):
-                                item["friend_note"] = str(meta.get("note") or "")
-                                if meta.get("from"):
-                                    item["friend_from"] = str(meta.get("from"))
-                                if meta.get("at"):
-                                    item["friend_at"] = str(meta.get("at"))
-                    except Exception:
-                        pass
+                    item = _make_item_fast(uid, key)
                     items.append(item)
                 except Exception:
-                    # Best-effort fallback, also skip JSON sidecars
-                    if not key.lower().endswith('.json'):
-                        items.append(_make_item_from_key(uid, key))
+                    pass
         else:
-            # Local storage: build a set of original keys available
-            original_lookup: set[str] = set()
-            orig_dir = os.path.join(STATIC_DIR, f"users/{uid}/originals/")
-            if os.path.isdir(orig_dir):
-                for root, _, files in os.walk(orig_dir):
-                    for f in files:
-                        rel = os.path.relpath(os.path.join(root, f), STATIC_DIR).replace("\\", "/")
-                        original_lookup.add(rel)
-            for key in keys:
-                # Skip accidental JSON sidecar entries
-                if key.lower().endswith('.json'):
-                    continue
-                item = _make_item_from_key(uid, key)
-                try:
-                    # has_invisible is set inside _make_item_from_key via cache/detector
-                    dir_part = os.path.dirname(key)  # users/uid/watermarked/YYYY/MM/DD
-                    date_part = "/".join(dir_part.split("/")[-3:])
-                    name = os.path.basename(key)
-                    base_part = name.rsplit("-o", 1)[0] if "-o" in name else os.path.splitext(name)[0]
-                    for suf in ("-logo", "-txt"):
-                        if base_part.endswith(suf):
-                            base_part = base_part[: -len(suf)]
-                            break
-                    for ext in ("jpg","jpeg","png","webp","heic","tif","tiff","bin"):
-                        cand = f"users/{uid}/originals/{date_part}/{base_part}-orig.{ext}" if ext != 'bin' else f"users/{uid}/originals/{date_part}/{base_part}-orig.bin"
-                        if cand in original_lookup:
-                            item["original_key"] = cand
-                            item["original_url"] = f"/static/{cand}"
-                            break
-                except Exception:
-                    pass
-                # Attach optional friend note metadata if exists
-                try:
-                    if "-fromfriend-" in name:
-                        meta_key = f"{os.path.splitext(key)[0]}.json"
-                        meta = read_json_key(meta_key)
-                        if isinstance(meta, dict) and (meta.get("note") or meta.get("from")):
-                            item["friend_note"] = str(meta.get("note") or "")
-                            if meta.get("from"):
-                                item["friend_from"] = str(meta.get("from"))
-                            if meta.get("at"):
-                                item["friend_at"] = str(meta.get("at"))
-                except Exception:
-                    pass
-                items.append(item)
-        result = {"photos": items}
+            # FULL MODE: Include originals lookup (for download/export features)
+            if s3 and R2_BUCKET:
+                # Only look up originals for the specific keys we need, not ALL originals
+                for key in keys:
+                    try:
+                        item = _make_item_from_key(uid, key)
+                        name = os.path.basename(key)
+                        
+                        # Try to find original for this specific photo
+                        if "-o" in name:
+                            try:
+                                base_part = name.rsplit("-o", 1)[0]
+                                for suf in ("-logo", "-txt"):
+                                    if base_part.endswith(suf):
+                                        base_part = base_part[: -len(suf)]
+                                        break
+                                dir_part = os.path.dirname(key)
+                                date_part = "/".join(dir_part.split("/")[-3:])
+                                for ext in ("jpg","jpeg","png","webp","heic","tif","tiff","bin"):
+                                    cand = f"users/{uid}/originals/{date_part}/{base_part}-orig.{ext}" if ext != 'bin' else f"users/{uid}/originals/{date_part}/{base_part}-orig.bin"
+                                    # Check if original exists (single HEAD request is faster than listing all)
+                                    try:
+                                        s3.Object(R2_BUCKET, cand).load()
+                                        item["original_key"] = cand
+                                        item["original_url"] = _get_url_for_key(cand, expires_in=60 * 60)
+                                        break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                        
+                        # Attach optional friend note metadata if exists
+                        try:
+                            if "-fromfriend-" in name:
+                                meta_key = f"{os.path.splitext(key)[0]}.json"
+                                fmeta = read_json_key(meta_key)
+                                if isinstance(fmeta, dict) and (fmeta.get("note") or fmeta.get("from")):
+                                    item["friend_note"] = str(fmeta.get("note") or "")
+                                    if fmeta.get("from"):
+                                        item["friend_from"] = str(fmeta.get("from"))
+                                    if fmeta.get("at"):
+                                        item["friend_at"] = str(fmeta.get("at"))
+                        except Exception:
+                            pass
+                        items.append(item)
+                    except Exception:
+                        pass
+            else:
+                # Local storage fallback
+                for key in keys:
+                    try:
+                        item = _make_item_from_key(uid, key)
+                        items.append(item)
+                    except Exception:
+                        pass
+        
+        result = {"photos": items, "total": total_count}
         if eff_limit is not None:
             next_start = start_index + eff_limit
-            if next_start < len(_read_vault(uid, vault)):
+            if next_start < total_count:
                 result["next_cursor"] = str(next_start)
         return result
     except Exception as ex:
