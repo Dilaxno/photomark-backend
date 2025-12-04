@@ -2384,7 +2384,17 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
     except Exception:
         role = 'viewer'
     share['client_role'] = role
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role}
+    
+    # Include brand kit if available
+    brand_kit = {}
+    try:
+        brand_kit_data = _read_json_key(f"users/{uid}/brand_kit.json") or {}
+        if brand_kit_data:
+            brand_kit = brand_kit_data
+    except Exception:
+        pass
+    
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:

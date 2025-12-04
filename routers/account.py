@@ -986,3 +986,178 @@ async def delete_account(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"error": "Failed to delete account"}, status_code=400)
 
     return {"ok": True}
+
+
+    return {"ok": True}
+
+
+# ============== Brand Kit ==============
+
+def _brand_kit_key(uid: str) -> str:
+    return f"users/{uid}/brand_kit.json"
+
+
+class BrandKitPayload(BaseModel):
+    logo_url: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    accent_color: Optional[str] = None
+    background_color: Optional[str] = None
+    text_color: Optional[str] = None
+    slogan: Optional[str] = None
+    font_family: Optional[str] = None
+    custom_font_url: Optional[str] = None
+    custom_font_name: Optional[str] = None
+
+
+from pydantic import BaseModel as PydanticBaseModel
+
+class BrandKitPayload(PydanticBaseModel):
+    logo_url: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    accent_color: Optional[str] = None
+    background_color: Optional[str] = None
+    text_color: Optional[str] = None
+    slogan: Optional[str] = None
+    font_family: Optional[str] = None
+    custom_font_url: Optional[str] = None
+    custom_font_name: Optional[str] = None
+
+
+@router.get("/brand-kit")
+async def get_brand_kit(request: Request):
+    """Get the user's brand kit settings."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        data = read_json_key(_brand_kit_key(uid)) or {}
+        return {"brand_kit": data}
+    except Exception as ex:
+        logger.warning(f"get_brand_kit failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to get brand kit"}, status_code=500)
+
+
+@router.post("/brand-kit")
+async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...)):
+    """Save the user's brand kit settings."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        data = {
+            "logo_url": payload.logo_url,
+            "primary_color": payload.primary_color,
+            "secondary_color": payload.secondary_color,
+            "accent_color": payload.accent_color,
+            "background_color": payload.background_color,
+            "text_color": payload.text_color,
+            "slogan": payload.slogan,
+            "font_family": payload.font_family,
+            "custom_font_url": payload.custom_font_url,
+            "custom_font_name": payload.custom_font_name,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        # Remove None values
+        data = {k: v for k, v in data.items() if v is not None}
+        write_json_key(_brand_kit_key(uid), data)
+        return {"ok": True, "brand_kit": data}
+    except Exception as ex:
+        logger.warning(f"save_brand_kit failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to save brand kit"}, status_code=500)
+
+
+@router.post("/brand-kit/upload-logo")
+async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
+    """Upload a logo for the brand kit."""
+    from fastapi import UploadFile, File
+    
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Validate file type
+        content_type = file.content_type or ""
+        if not content_type.startswith("image/"):
+            return JSONResponse({"error": "Only image files are allowed"}, status_code=400)
+        
+        # Read file content
+        content = await file.read()
+        if len(content) > 5 * 1024 * 1024:  # 5MB limit
+            return JSONResponse({"error": "File too large (max 5MB)"}, status_code=400)
+        
+        # Generate unique filename
+        ext = os.path.splitext(file.filename or "logo.png")[1] or ".png"
+        key = f"users/{uid}/brand_kit/logo_{secrets.token_urlsafe(8)}{ext}"
+        
+        # Upload to storage
+        from utils.storage import upload_bytes, get_presigned_url
+        upload_bytes(key, content, content_type=content_type)
+        
+        # Get public URL
+        url = get_presigned_url(key, expires_in=86400 * 365)  # 1 year
+        if not url:
+            # Fallback to R2 public URL
+            from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
+            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+            url = f"{base.rstrip('/')}/{key}" if base else key
+        
+        return {"ok": True, "logo_url": url, "key": key}
+    except Exception as ex:
+        logger.warning(f"upload_brand_logo failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to upload logo"}, status_code=500)
+
+
+@router.post("/brand-kit/upload-font")
+async def upload_brand_font(request: Request, file: UploadFile = File(...)):
+    """Upload a custom font for the brand kit."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Validate file type
+        content_type = file.content_type or ""
+        filename = file.filename or "font.ttf"
+        ext = os.path.splitext(filename)[1].lower()
+        
+        allowed_extensions = [".ttf", ".otf", ".woff", ".woff2"]
+        if ext not in allowed_extensions:
+            return JSONResponse({"error": "Only TTF, OTF, WOFF, WOFF2 fonts are allowed"}, status_code=400)
+        
+        # Read file content
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:  # 10MB limit
+            return JSONResponse({"error": "File too large (max 10MB)"}, status_code=400)
+        
+        # Generate unique filename
+        safe_name = "".join(c for c in os.path.splitext(filename)[0] if c.isalnum() or c in "-_").strip()[:50]
+        key = f"users/{uid}/brand_kit/font_{safe_name}_{secrets.token_urlsafe(4)}{ext}"
+        
+        # Upload to storage
+        from utils.storage import upload_bytes, get_presigned_url
+        
+        # Set correct content type for fonts
+        font_content_types = {
+            ".ttf": "font/ttf",
+            ".otf": "font/otf",
+            ".woff": "font/woff",
+            ".woff2": "font/woff2",
+        }
+        upload_bytes(key, content, content_type=font_content_types.get(ext, "application/octet-stream"))
+        
+        # Get public URL
+        url = get_presigned_url(key, expires_in=86400 * 365)  # 1 year
+        if not url:
+            from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
+            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+            url = f"{base.rstrip('/')}/{key}" if base else key
+        
+        return {"ok": True, "font_url": url, "font_name": safe_name or "CustomFont", "key": key}
+    except Exception as ex:
+        logger.warning(f"upload_brand_font failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to upload font"}, status_code=500)
