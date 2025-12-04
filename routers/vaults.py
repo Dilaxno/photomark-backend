@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from core.database import get_db
 from models.gallery import GalleryAsset
-from models.gallery import GalleryAsset
+from models.user import User
 
 router = APIRouter(prefix="/api", tags=["vaults"])
 
@@ -2385,12 +2385,25 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
         role = 'viewer'
     share['client_role'] = role
     
-    # Include brand kit if available
+    # Include brand kit if available (from database)
     brand_kit = {}
     try:
-        brand_kit_data = _read_json_key(f"users/{uid}/brand_kit.json") or {}
-        if brand_kit_data:
-            brand_kit = brand_kit_data
+        user = db.query(User).filter(User.uid == uid).first()
+        if user:
+            brand_kit_data = {
+                "logo_url": user.brand_logo_url,
+                "primary_color": user.brand_primary_color,
+                "secondary_color": user.brand_secondary_color,
+                "accent_color": user.brand_accent_color,
+                "background_color": user.brand_background_color,
+                "text_color": user.brand_text_color,
+                "slogan": user.brand_slogan,
+                "font_family": user.brand_font_family,
+                "custom_font_url": user.brand_custom_font_url,
+                "custom_font_name": user.brand_custom_font_name,
+            }
+            # Remove None values
+            brand_kit = {k: v for k, v in brand_kit_data.items() if v is not None}
     except Exception:
         pass
     

@@ -55,6 +55,18 @@ class User(Base):
     # Additional metadata as JSON
     extra_metadata = Column(JSON, default={})
     
+    # Brand Kit
+    brand_logo_url = Column(Text, nullable=True)
+    brand_primary_color = Column(String(20), nullable=True)
+    brand_secondary_color = Column(String(20), nullable=True)
+    brand_accent_color = Column(String(20), nullable=True)
+    brand_background_color = Column(String(20), nullable=True)
+    brand_text_color = Column(String(20), nullable=True)
+    brand_slogan = Column(String(255), nullable=True)
+    brand_font_family = Column(String(100), nullable=True)
+    brand_custom_font_url = Column(Text, nullable=True)
+    brand_custom_font_name = Column(String(100), nullable=True)
+    
     def to_dict(self):
         """Convert to dict for API responses"""
         return {

@@ -991,10 +991,6 @@ async def delete_account(request: Request, db: Session = Depends(get_db)):
 
 # ============== Brand Kit ==============
 
-def _brand_kit_key(uid: str) -> str:
-    return f"users/{uid}/brand_kit.json"
-
-
 class BrandKitPayload(BaseModel):
     logo_url: Optional[str] = None
     primary_color: Optional[str] = None
@@ -1009,14 +1005,31 @@ class BrandKitPayload(BaseModel):
 
 
 @router.get("/brand-kit")
-async def get_brand_kit(request: Request):
-    """Get the user's brand kit settings."""
+async def get_brand_kit(request: Request, db: Session = Depends(get_db)):
+    """Get the user's brand kit settings from database."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     try:
-        data = read_json_key(_brand_kit_key(uid)) or {}
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return {"brand_kit": {}}
+        
+        data = {
+            "logo_url": user.brand_logo_url,
+            "primary_color": user.brand_primary_color,
+            "secondary_color": user.brand_secondary_color,
+            "accent_color": user.brand_accent_color,
+            "background_color": user.brand_background_color,
+            "text_color": user.brand_text_color,
+            "slogan": user.brand_slogan,
+            "font_family": user.brand_font_family,
+            "custom_font_url": user.brand_custom_font_url,
+            "custom_font_name": user.brand_custom_font_name,
+        }
+        # Remove None values
+        data = {k: v for k, v in data.items() if v is not None}
         return {"brand_kit": data}
     except Exception as ex:
         logger.warning(f"get_brand_kit failed for {uid}: {ex}")
@@ -1024,39 +1037,68 @@ async def get_brand_kit(request: Request):
 
 
 @router.post("/brand-kit")
-async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...)):
-    """Save the user's brand kit settings."""
+async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...), db: Session = Depends(get_db)):
+    """Save the user's brand kit settings to database."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        # Update brand kit fields
+        if payload.logo_url is not None:
+            user.brand_logo_url = payload.logo_url or None
+        if payload.primary_color is not None:
+            user.brand_primary_color = payload.primary_color or None
+        if payload.secondary_color is not None:
+            user.brand_secondary_color = payload.secondary_color or None
+        if payload.accent_color is not None:
+            user.brand_accent_color = payload.accent_color or None
+        if payload.background_color is not None:
+            user.brand_background_color = payload.background_color or None
+        if payload.text_color is not None:
+            user.brand_text_color = payload.text_color or None
+        if payload.slogan is not None:
+            user.brand_slogan = payload.slogan or None
+        if payload.font_family is not None:
+            user.brand_font_family = payload.font_family or None
+        if payload.custom_font_url is not None:
+            user.brand_custom_font_url = payload.custom_font_url or None
+        if payload.custom_font_name is not None:
+            user.brand_custom_font_name = payload.custom_font_name or None
+        
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        
+        # Return updated data
         data = {
-            "logo_url": payload.logo_url,
-            "primary_color": payload.primary_color,
-            "secondary_color": payload.secondary_color,
-            "accent_color": payload.accent_color,
-            "background_color": payload.background_color,
-            "text_color": payload.text_color,
-            "slogan": payload.slogan,
-            "font_family": payload.font_family,
-            "custom_font_url": payload.custom_font_url,
-            "custom_font_name": payload.custom_font_name,
-            "updated_at": datetime.utcnow().isoformat(),
+            "logo_url": user.brand_logo_url,
+            "primary_color": user.brand_primary_color,
+            "secondary_color": user.brand_secondary_color,
+            "accent_color": user.brand_accent_color,
+            "background_color": user.brand_background_color,
+            "text_color": user.brand_text_color,
+            "slogan": user.brand_slogan,
+            "font_family": user.brand_font_family,
+            "custom_font_url": user.brand_custom_font_url,
+            "custom_font_name": user.brand_custom_font_name,
         }
-        # Remove None values
         data = {k: v for k, v in data.items() if v is not None}
-        write_json_key(_brand_kit_key(uid), data)
         return {"ok": True, "brand_kit": data}
     except Exception as ex:
+        db.rollback()
         logger.warning(f"save_brand_kit failed for {uid}: {ex}")
         return JSONResponse({"error": "Failed to save brand kit"}, status_code=500)
 
 
 @router.post("/brand-kit/upload-logo")
 async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
-    """Upload a logo for the brand kit."""
-    from fastapi import UploadFile, File
+    """Upload a logo for the brand kit to R2 storage."""
+    from utils.storage import upload_bytes
+    from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
     
     uid = get_uid_from_request(request)
     if not uid:
@@ -1077,17 +1119,17 @@ async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
         ext = os.path.splitext(file.filename or "logo.png")[1] or ".png"
         key = f"users/{uid}/brand_kit/logo_{secrets.token_urlsafe(8)}{ext}"
         
-        # Upload to storage
-        from utils.storage import upload_bytes, get_presigned_url
+        # Upload to R2 storage
         upload_bytes(key, content, content_type=content_type)
         
-        # Get public URL
-        url = get_presigned_url(key, expires_in=86400 * 365)  # 1 year
-        if not url:
-            # Fallback to R2 public URL
-            from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
-            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
-            url = f"{base.rstrip('/')}/{key}" if base else key
+        # Build public URL using R2 custom domain or public base
+        base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+        if base:
+            url = f"{base.rstrip('/')}/{key}"
+        else:
+            # Fallback to presigned URL
+            from utils.storage import get_presigned_url
+            url = get_presigned_url(key, expires_in=86400 * 365) or key
         
         return {"ok": True, "logo_url": url, "key": key}
     except Exception as ex:
@@ -1097,14 +1139,16 @@ async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
 
 @router.post("/brand-kit/upload-font")
 async def upload_brand_font(request: Request, file: UploadFile = File(...)):
-    """Upload a custom font for the brand kit."""
+    """Upload a custom font for the brand kit to R2 storage."""
+    from utils.storage import upload_bytes
+    from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
+    
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     try:
         # Validate file type
-        content_type = file.content_type or ""
         filename = file.filename or "font.ttf"
         ext = os.path.splitext(filename)[1].lower()
         
@@ -1121,9 +1165,6 @@ async def upload_brand_font(request: Request, file: UploadFile = File(...)):
         safe_name = "".join(c for c in os.path.splitext(filename)[0] if c.isalnum() or c in "-_").strip()[:50]
         key = f"users/{uid}/brand_kit/font_{safe_name}_{secrets.token_urlsafe(4)}{ext}"
         
-        # Upload to storage
-        from utils.storage import upload_bytes, get_presigned_url
-        
         # Set correct content type for fonts
         font_content_types = {
             ".ttf": "font/ttf",
@@ -1131,14 +1172,17 @@ async def upload_brand_font(request: Request, file: UploadFile = File(...)):
             ".woff": "font/woff",
             ".woff2": "font/woff2",
         }
+        
+        # Upload to R2 storage
         upload_bytes(key, content, content_type=font_content_types.get(ext, "application/octet-stream"))
         
-        # Get public URL
-        url = get_presigned_url(key, expires_in=86400 * 365)  # 1 year
-        if not url:
-            from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
-            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
-            url = f"{base.rstrip('/')}/{key}" if base else key
+        # Build public URL using R2 custom domain or public base
+        base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+        if base:
+            url = f"{base.rstrip('/')}/{key}"
+        else:
+            from utils.storage import get_presigned_url
+            url = get_presigned_url(key, expires_in=86400 * 365) or key
         
         return {"ok": True, "font_url": url, "font_name": safe_name or "CustomFont", "key": key}
     except Exception as ex:
