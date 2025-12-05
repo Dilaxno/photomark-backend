@@ -47,6 +47,9 @@ def _normalize_plan(plan: Optional[str]) -> str:
         p = p[:-6]
     p = p.strip()
 
+    # Match Golden Offer (3-year plan)
+    if "golden" in p:
+        return "golden"
     # Match new plan names
     if "individual" in p or p in ("ind", "indiv", "solo", "i"):
         return "individual"
@@ -61,7 +64,7 @@ def _normalize_plan(plan: Optional[str]) -> str:
 
 
 def _allowed_plans() -> set[str]:
-    # Optionally controlled by env. Defaults are the two internal plans
+    # Optionally controlled by env. Defaults are the internal plans
     raw = (os.getenv("PRICING_ALLOWED_PLANS") or os.getenv("ALLOWED_PLANS") or "").strip()
     if raw:
         out: set[str] = set()
@@ -71,7 +74,7 @@ def _allowed_plans() -> set[str]:
                 out.add(slug)
         if out:
             return out
-    return {"individual", "studios"}
+    return {"individual", "studios", "golden"}
 
 
 def _first_email_from_payload(payload: dict) -> str:
@@ -265,11 +268,21 @@ def _plan_from_products(obj: dict) -> str:
             os.getenv("DODO_AGENCIES_PRODUCT_ID") or "",
             os.getenv("DODO_STUDIOS_MONTHLY_PRODUCT_ID") or "",
             os.getenv("DODO_STUDIOS_YEARLY_PRODUCT_ID") or "",
+            os.getenv("DODO_GOLDEN_PRODUCT_ID") or "",
+        )
+        if s and s.strip()
+    )
+    # Golden Offer product IDs (3-year plan with Studios features)
+    ids_golden: set[str] = set(
+        s.strip() for s in (
+            os.getenv("DODO_GOLDEN_PRODUCT_ID") or "",
+            os.getenv("DODO_GOLDEN_OFFER_PRODUCT_ID") or "",
         )
         if s and s.strip()
     )
     found_studios = False
     found_individual = False
+    found_golden = False
     names: list[str] = []
 
     try:
@@ -311,7 +324,9 @@ def _plan_from_products(obj: dict) -> str:
                     pid = pid or str((pr.get("id") or pr.get("price_id") or "")).strip()
 
                 # Compare ids against configured product ids
-                if pid and pid in ids_studios:
+                if pid and pid in ids_golden:
+                    found_golden = True
+                elif pid and pid in ids_studios:
                     found_studios = True
                 if pid and pid in ids_individual:
                     found_individual = True
@@ -323,7 +338,9 @@ def _plan_from_products(obj: dict) -> str:
             p = obj.get("product") or {}
             pid = str((p.get("id") or p.get("product_id") or "")).strip()
             name = str((p.get("name") or p.get("title") or "")).strip()
-            if pid and pid in ids_studios:
+            if pid and pid in ids_golden:
+                found_golden = True
+            elif pid and pid in ids_studios:
                 found_studios = True
             if pid and pid in ids_individual:
                 found_individual = True
@@ -331,11 +348,14 @@ def _plan_from_products(obj: dict) -> str:
                 names.append(name)
 
         # Check for product_id directly at top level (common in subscription updates)
-        if not (found_studios or found_individual):
+        if not (found_studios or found_individual or found_golden):
             top_pid = str((obj.get("product_id") or "")).strip()
-            logger.info(f"[pricing.webhook] top-level product_id check: top_pid={top_pid!r} ids_studios={ids_studios} ids_individual={ids_individual}")
+            logger.info(f"[pricing.webhook] top-level product_id check: top_pid={top_pid!r} ids_studios={ids_studios} ids_individual={ids_individual} ids_golden={ids_golden}")
             if top_pid:
-                if top_pid in ids_studios:
+                if top_pid in ids_golden:
+                    found_golden = True
+                    logger.info(f"[pricing.webhook] matched golden via top_pid={top_pid}")
+                elif top_pid in ids_studios:
                     found_studios = True
                     logger.info(f"[pricing.webhook] matched studios via top_pid={top_pid}")
                 if top_pid in ids_individual:
@@ -343,7 +363,7 @@ def _plan_from_products(obj: dict) -> str:
                     logger.info(f"[pricing.webhook] matched individual via top_pid={top_pid}")
 
         # Fallback: bounded deep scan for id-like fields if nothing found so far
-        if not (found_studios or found_individual):
+        if not (found_studios or found_individual or found_golden):
             seen_ids: set[str] = set()
             def _scan_ids(node: dict, depth: int = 0):
                 if depth > 4 or not isinstance(node, dict):
@@ -363,23 +383,27 @@ def _plan_from_products(obj: dict) -> str:
                             if isinstance(it, dict):
                                 _scan_ids(it, depth + 1)
             _scan_ids(obj)
-            if ids_studios and any(x in seen_ids for x in ids_studios):
+            if ids_golden and any(x in seen_ids for x in ids_golden):
+                found_golden = True
+            elif ids_studios and any(x in seen_ids for x in ids_studios):
                 found_studios = True
             if ids_individual and any(x in seen_ids for x in ids_individual):
                 found_individual = True
 
         try:
-            logger.info(f"[pricing.webhook] product mapping: found_studios={found_studios} found_individual={found_individual} names={names}")
+            logger.info(f"[pricing.webhook] product mapping: found_studios={found_studios} found_individual={found_individual} found_golden={found_golden} names={names}")
         except Exception:
             pass
     except Exception:
         pass
 
     try:
-        logger.info(f"[pricing.webhook] product mapping: found_studios={found_studios} found_individual={found_individual} names={names}")
+        logger.info(f"[pricing.webhook] product mapping: found_studios={found_studios} found_individual={found_individual} found_golden={found_golden} names={names}")
     except Exception:
         pass
 
+    if found_golden:
+        return "golden"
     if found_studios:
         return "studios"
     if found_individual:
@@ -436,6 +460,8 @@ def _plan_from_products(obj: dict) -> str:
                 return ""
             if isinstance(n, str):
                 s = n.lower()
+                if "golden" in s:
+                    return "golden"
                 if ("agenc" in s) or ("studio" in s):
                     return "studios"
                 if ("photograph" in s) or ("individual" in s) or ("solo" in s):
@@ -1119,9 +1145,18 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     os.getenv("DODO_STUDIOS_YEARLY_PRODUCT_ID") or "",
                 ) if s and s.strip()
             )
-            logger.info(f"[pricing.webhook] direct product_id check: product_id={product_id!r} ids_studios={ids_studios} ids_individual={ids_individual}")
+            ids_golden: set[str] = set(
+                s.strip() for s in (
+                    os.getenv("DODO_GOLDEN_PRODUCT_ID") or "",
+                    os.getenv("DODO_GOLDEN_OFFER_PRODUCT_ID") or "",
+                ) if s and s.strip()
+            )
+            logger.info(f"[pricing.webhook] direct product_id check: product_id={product_id!r} ids_studios={ids_studios} ids_individual={ids_individual} ids_golden={ids_golden}")
             if product_id:
-                if ids_studios and product_id in ids_studios:
+                if ids_golden and product_id in ids_golden:
+                    plan = "golden"
+                    logger.info(f"[pricing.webhook] matched golden via direct product_id={product_id}")
+                elif ids_studios and product_id in ids_studios:
                     plan = "studios"
                     logger.info(f"[pricing.webhook] matched studios via direct product_id={product_id}")
                 elif ids_individual and product_id in ids_individual:
