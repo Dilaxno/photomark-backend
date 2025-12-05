@@ -41,12 +41,20 @@ async def register_signup(payload: dict = Body(...), db: Session = Depends(get_d
                 existing.display_name = (display_name or '').strip() or existing.display_name
                 existing.updated_at = now
             else:
-                db.add(User(
-                    uid=uid,
-                    email=email.lower(),
-                    display_name=(display_name or '').strip() or None,
-                    plan='free',
-                ))
+                # Check if email already exists with different uid (shouldn't happen on signup, but be safe)
+                existing_by_email = db.query(User).filter(User.email == email.lower()).first()
+                if existing_by_email:
+                    # Update existing user's uid
+                    existing_by_email.uid = uid
+                    existing_by_email.display_name = (display_name or '').strip() or existing_by_email.display_name
+                    existing_by_email.updated_at = now
+                else:
+                    db.add(User(
+                        uid=uid,
+                        email=email.lower(),
+                        display_name=(display_name or '').strip() or None,
+                        plan='free',
+                    ))
             db.commit()
         return {"ok": True, "uid": uid}
     except Exception as ex:

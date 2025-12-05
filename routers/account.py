@@ -60,9 +60,25 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
             logger.debug(f"users/sync update display_name skipped for {uid}: {ex}")
 
     try:
-        # Check if user exists in PostgreSQL
+        # Check if user exists in PostgreSQL by uid first, then by email
         user = db.query(User).filter(User.uid == uid).first()
         now = datetime.utcnow()
+        
+        # If no user found by uid, check if email already exists (account linking scenario)
+        if not user and email:
+            existing_by_email = db.query(User).filter(User.email == email.lower()).first()
+            if existing_by_email:
+                # Update the existing user's uid to the new one (account linking)
+                # This handles cases like: user signed up with email, now signing in with Google
+                logger.info(f"users/sync: linking uid {uid} to existing email {email} (old uid: {existing_by_email.uid})")
+                existing_by_email.uid = uid
+                existing_by_email.display_name = name or existing_by_email.display_name
+                if photo_auth or (payload or {}).get("photo_url"):
+                    existing_by_email.photo_url = (payload or {}).get("photo_url") or photo_auth or existing_by_email.photo_url
+                existing_by_email.last_login_at = now
+                existing_by_email.updated_at = now
+                db.commit()
+                return {"ok": True, "linked": True}
         
         if user:
             # Update existing user
@@ -72,8 +88,6 @@ async def users_sync(request: Request, payload: Optional[dict] = Body(default=No
                 user.photo_url = (payload or {}).get("photo_url") or photo_auth or user.photo_url
             user.last_login_at = now
             user.updated_at = now
-            
-            
         else:
             # Create new user
             user = User(
