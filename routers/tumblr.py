@@ -146,6 +146,14 @@ async def tumblr_callback(
             
             if token_resp.status_code != 200:
                 logger.error(f"Tumblr token exchange failed: status={token_resp.status_code}, body={token_resp.text}")
+                # Check for GDPR consent error
+                try:
+                    err_data = token_resp.json()
+                    errors = err_data.get("errors", [])
+                    if errors and errors[0].get("gdpr_is_consent_blocking"):
+                        return RedirectResponse(url=f"{FRONTEND_URL}/integrations?tumblr_error=gdpr_consent")
+                except:
+                    pass
                 return RedirectResponse(url=f"{FRONTEND_URL}/integrations?tumblr_error=token_failed")
             
             tokens = token_resp.json()
