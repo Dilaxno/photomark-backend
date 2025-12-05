@@ -136,11 +136,16 @@ async def tumblr_callback(
                     "redirect_uri": TUMBLR_REDIRECT_URI,
                     "client_id": TUMBLR_CLIENT_ID,
                     "client_secret": TUMBLR_CLIENT_SECRET
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "Photomark/1.0"
                 }
             )
             
             if token_resp.status_code != 200:
-                logger.error(f"Tumblr token exchange failed: {token_resp.text}")
+                logger.error(f"Tumblr token exchange failed: status={token_resp.status_code}, body={token_resp.text}")
                 return RedirectResponse(url=f"{FRONTEND_URL}/integrations?tumblr_error=token_failed")
             
             tokens = token_resp.json()
@@ -347,10 +352,16 @@ async def _refresh_token(uid: str, refresh_token: str) -> Optional[str]:
                     "refresh_token": refresh_token,
                     "client_id": TUMBLR_CLIENT_ID,
                     "client_secret": TUMBLR_CLIENT_SECRET
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "Photomark/1.0"
                 }
             )
             
             if resp.status_code != 200:
+                logger.warning(f"Tumblr token refresh failed: {resp.status_code}")
                 return None
             
             tokens = resp.json()
