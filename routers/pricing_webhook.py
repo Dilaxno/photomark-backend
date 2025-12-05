@@ -333,11 +333,14 @@ def _plan_from_products(obj: dict) -> str:
         # Check for product_id directly at top level (common in subscription updates)
         if not (found_studios or found_individual):
             top_pid = str((obj.get("product_id") or "")).strip()
+            logger.info(f"[pricing.webhook] top-level product_id check: top_pid={top_pid!r} ids_studios={ids_studios} ids_individual={ids_individual}")
             if top_pid:
                 if top_pid in ids_studios:
                     found_studios = True
+                    logger.info(f"[pricing.webhook] matched studios via top_pid={top_pid}")
                 if top_pid in ids_individual:
                     found_individual = True
+                    logger.info(f"[pricing.webhook] matched individual via top_pid={top_pid}")
 
         # Fallback: bounded deep scan for id-like fields if nothing found so far
         if not (found_studios or found_individual):
@@ -1022,6 +1025,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
 
     # Process upgrades for 'payment.succeeded' and 'subscription.active' (Dodo)
     process_events = {"payment.succeeded", "subscription.active"}
+    logger.info(f"[pricing.webhook] processing event: evt_type={evt_type!r} in_process_events={evt_type in process_events}")
     if evt_type not in process_events:
         return {"ok": True, "captured": bool(ctx.get("uid") or ctx.get("plan") or ctx.get("email")), "event_type": evt_type}
 
@@ -1088,11 +1092,14 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     os.getenv("DODO_STUDIOS_YEARLY_PRODUCT_ID") or "",
                 ) if s and s.strip()
             )
+            logger.info(f"[pricing.webhook] direct product_id check: product_id={product_id!r} ids_studios={ids_studios} ids_individual={ids_individual}")
             if product_id:
                 if ids_studios and product_id in ids_studios:
                     plan = "studios"
+                    logger.info(f"[pricing.webhook] matched studios via direct product_id={product_id}")
                 elif ids_individual and product_id in ids_individual:
                     plan = "individual"
+                    logger.info(f"[pricing.webhook] matched individual via direct product_id={product_id}")
         except Exception:
             pass
 
@@ -1114,25 +1121,26 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             except Exception:
                 pass
 
-        # Try mapping subscription_id to plan via env; otherwise use metadata plan or product mapping
+        # Try mapping subscription_id to plan via env (only if plan not already resolved)
         sid = sub_id.strip()
-        sid_phot_old = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
-        sid_ag_old = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
-        sid_individual = (os.getenv("DODO_INDIVIDUAL_SUBSCRIPTION_ID") or "").strip()
-        sid_studios = (os.getenv("DODO_STUDIOS_SUBSCRIPTION_ID") or "").strip()
-        if sid and (sid_studios and sid == sid_studios or sid_ag_old and sid == sid_ag_old):
-            plan = "studios"
-        elif sid and (sid_individual and sid == sid_individual or sid_phot_old and sid == sid_phot_old):
-            plan = "individual"
-        else:
-            # Prefer explicit plan from metadata/query params
+        if not plan:
+            sid_phot_old = (os.getenv("DODO_PHOTOGRAPHERS_SUBSCRIPTION_ID") or "").strip()
+            sid_ag_old = (os.getenv("DODO_AGENCIES_SUBSCRIPTION_ID") or "").strip()
+            sid_individual = (os.getenv("DODO_INDIVIDUAL_SUBSCRIPTION_ID") or "").strip()
+            sid_studios = (os.getenv("DODO_STUDIOS_SUBSCRIPTION_ID") or "").strip()
+            if sid and (sid_studios and sid == sid_studios or sid_ag_old and sid == sid_ag_old):
+                plan = "studios"
+            elif sid and (sid_individual and sid == sid_individual or sid_phot_old and sid == sid_phot_old):
+                plan = "individual"
+        
+        # Fallback: try metadata/query params, then product mapping
+        if not plan:
             plan = _normalize_plan(plan_raw)
-            # If still unknown, attempt to infer from products present in payload
-            if not plan:
-                plan = _plan_from_products(event_obj or {})
-            # Last resort: map against full payload (some providers omit products under object)
-            if not plan and isinstance(payload, dict):
-                plan = _plan_from_products(payload)
+        if not plan:
+            plan = _plan_from_products(event_obj or {})
+        # Last resort: map against full payload (some providers omit products under object)
+        if not plan and isinstance(payload, dict):
+            plan = _plan_from_products(payload)
         try:
             logger.info(f"[pricing.webhook] subscription detected: subscription_id={sid} resolved plan={plan or 'UNKNOWN'}")
         except Exception:
