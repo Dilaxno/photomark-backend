@@ -350,7 +350,7 @@ async def _check_domain_dns(hostname: str, db: Session = None, domain_id: str = 
 @router.get('/domain/status')
 async def get_vault_domain_status(
     request: Request,
-    vault: str,
+    vault: str | None = None,
     hostname: str | None = None,
     db: Session = Depends(get_db)
 ):
@@ -359,19 +359,33 @@ async def get_vault_domain_status(
     if not uid:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    safe_vault = _safe_vault_name(vault)
+    if not vault and not hostname:
+        raise HTTPException(status_code=400, detail="vault or hostname is required")
+
+    safe_vault = _safe_vault_name(vault) if vault else None
 
     try:
         # Get domain owned by this user for this vault
-        domain = db.query(VaultDomain).filter(
-            VaultDomain.uid == uid,
-            VaultDomain.vault_name == safe_vault
-        ).first()
+        domain = None
+        if safe_vault:
+            domain = db.query(VaultDomain).filter(
+                VaultDomain.uid == uid,
+                VaultDomain.vault_name == safe_vault
+            ).first()
         
         # Use provided hostname or get from database
         hostname = _normalize_domain(hostname)
         if not hostname and domain:
             hostname = domain.hostname
+        
+        # If we have hostname but no domain yet, try to find by hostname
+        if hostname and not domain:
+            domain = db.query(VaultDomain).filter(
+                VaultDomain.uid == uid,
+                VaultDomain.hostname == hostname
+            ).first()
+            if domain:
+                safe_vault = domain.vault_name
         
         if not hostname:
             raise HTTPException(status_code=400, detail="No hostname configured for this vault")

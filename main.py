@@ -524,6 +524,34 @@ try:
 except Exception as _ex:
     logger.warning(f"streamchat router not available: {_ex}")
 
+# Pinterest export endpoints
+try:
+    from routers import pinterest  # noqa: E402
+    app.include_router(pinterest.router)
+except Exception as _ex:
+    logger.warning(f"pinterest router not available: {_ex}")
+
+# Imgur export endpoints (free, no OAuth required)
+try:
+    from routers import imgur  # noqa: E402
+    app.include_router(imgur.router)
+except Exception as _ex:
+    logger.warning(f"imgur router not available: {_ex}")
+
+# Flickr export endpoints
+try:
+    from routers import flickr  # noqa: E402
+    app.include_router(flickr.router)
+except Exception as _ex:
+    logger.warning(f"flickr router not available: {_ex}")
+
+# Tumblr export endpoints
+try:
+    from routers import tumblr  # noqa: E402
+    app.include_router(tumblr.router)
+except Exception as _ex:
+    logger.warning(f"tumblr router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
