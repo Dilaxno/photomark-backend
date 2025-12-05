@@ -25,6 +25,9 @@ from utils.storage import read_json_key, write_json_key, read_bytes_key
 
 router = APIRouter(prefix="/api/flickr", tags=["flickr"])
 
+# Frontend URL for redirects after OAuth
+FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip()
+
 # Flickr API configuration
 FLICKR_API_KEY = os.getenv("FLICKR_API_KEY", "")
 FLICKR_API_SECRET = os.getenv("FLICKR_API_SECRET", "")
@@ -155,7 +158,7 @@ async def flickr_callback(
 ):
     """Handle Flickr OAuth callback."""
     if not oauth_token or not oauth_verifier:
-        return RedirectResponse(url="/gallery?flickr_error=invalid")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?flickr_error=invalid")
     
     # Find the state data by oauth_token
     # Note: In production, you'd want a more robust lookup
@@ -181,7 +184,7 @@ async def flickr_callback(
         logger.error(f"Flickr callback state lookup failed: {ex}")
     
     if not uid or not oauth_token_secret:
-        return RedirectResponse(url="/gallery?flickr_error=invalid_state")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?flickr_error=invalid_state")
     
     try:
         # Step 3: Exchange for access token
@@ -205,7 +208,7 @@ async def flickr_callback(
             
             if resp.status_code != 200:
                 logger.error(f"Flickr access token failed: {resp.text}")
-                return RedirectResponse(url="/gallery?flickr_error=token_failed")
+                return RedirectResponse(url=f"{FRONTEND_URL}/gallery?flickr_error=token_failed")
             
             # Parse response
             token_data = parse_qs(resp.text)
@@ -223,11 +226,11 @@ async def flickr_callback(
             "connected_at": datetime.utcnow().isoformat()
         })
         
-        return RedirectResponse(url="/gallery?flickr_connected=true")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?flickr_connected=true")
         
     except Exception as ex:
         logger.exception(f"Flickr callback error: {ex}")
-        return RedirectResponse(url="/gallery?flickr_error=unknown")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?flickr_error=unknown")
 
 
 @router.post("/disconnect")

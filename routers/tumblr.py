@@ -22,6 +22,9 @@ from utils.storage import read_json_key, write_json_key, read_bytes_key
 
 router = APIRouter(prefix="/api/tumblr", tags=["tumblr"])
 
+# Frontend URL for redirects after OAuth
+FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip()
+
 # Tumblr API configuration
 TUMBLR_CLIENT_ID = os.getenv("TUMBLR_CLIENT_ID", "")
 TUMBLR_CLIENT_SECRET = os.getenv("TUMBLR_CLIENT_SECRET", "")
@@ -111,14 +114,14 @@ async def tumblr_callback(
 ):
     """Handle Tumblr OAuth callback."""
     if error:
-        return RedirectResponse(url="/gallery?tumblr_error=denied")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?tumblr_error=denied")
     
     if not code or not state:
-        return RedirectResponse(url="/gallery?tumblr_error=invalid")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?tumblr_error=invalid")
     
     state_data = read_json_key(_tumblr_state_key(state))
     if not state_data or not state_data.get("uid"):
-        return RedirectResponse(url="/gallery?tumblr_error=invalid_state")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?tumblr_error=invalid_state")
     
     uid = state_data["uid"]
     
@@ -138,7 +141,7 @@ async def tumblr_callback(
             
             if token_resp.status_code != 200:
                 logger.error(f"Tumblr token exchange failed: {token_resp.text}")
-                return RedirectResponse(url="/gallery?tumblr_error=token_failed")
+                return RedirectResponse(url=f"{FRONTEND_URL}/gallery?tumblr_error=token_failed")
             
             tokens = token_resp.json()
             
@@ -167,11 +170,11 @@ async def tumblr_callback(
             **user_info
         })
         
-        return RedirectResponse(url="/gallery?tumblr_connected=true")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?tumblr_connected=true")
         
     except Exception as ex:
         logger.exception(f"Tumblr callback error: {ex}")
-        return RedirectResponse(url="/gallery?tumblr_error=unknown")
+        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?tumblr_error=unknown")
 
 
 @router.post("/disconnect")
