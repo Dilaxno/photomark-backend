@@ -330,6 +330,15 @@ def _plan_from_products(obj: dict) -> str:
             if name:
                 names.append(name)
 
+        # Check for product_id directly at top level (common in subscription updates)
+        if not (found_studios or found_individual):
+            top_pid = str((obj.get("product_id") or "")).strip()
+            if top_pid:
+                if top_pid in ids_studios:
+                    found_studios = True
+                if top_pid in ids_individual:
+                    found_individual = True
+
         # Fallback: bounded deep scan for id-like fields if nothing found so far
         if not (found_studios or found_individual):
             seen_ids: set[str] = set()
