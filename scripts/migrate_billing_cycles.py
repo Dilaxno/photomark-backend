@@ -36,7 +36,7 @@ def migrate_billing_cycles(dry_run: bool = True, default_cycle: str = 'yearly'):
     logger.info("=" * 60)
     
     # Query all users with paid plans
-    paid_plans = ['individual', 'studios', 'photographers', 'agencies', 'pro', 'team']
+    paid_plans = ['individual', 'studios', 'photographers', 'agencies', 'pro', 'team', 'golden', 'golden_offer']
     
     updated_count = 0
     skipped_count = 0

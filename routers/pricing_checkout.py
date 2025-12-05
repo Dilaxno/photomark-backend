@@ -28,6 +28,8 @@ except Exception:
         if p.endswith(" plans"):
             p = p[:-6]
         # New plan names
+        if "golden" in p:
+            return "golden"
         if "individual" in p or p in ("indiv", "ind", "i"):
             return "individual"
         if "studio" in p or p in ("st", "s"):
@@ -40,7 +42,7 @@ except Exception:
         return ""
 
     def _allowed_plans() -> set[str]:
-        return {"individual", "studios"}
+        return {"individual", "studios", "golden"}
 
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
 
@@ -52,6 +54,8 @@ def _plan_to_product_id(plan: str) -> str:
     if plan == "studios":
         # Try new env var first, fallback to old one for backward compatibility
         return (os.getenv("DODO_STUDIOS_PRODUCT_ID") or os.getenv("DODO_AGENCIES_PRODUCT_ID") or "").strip()
+    if plan == "golden":
+        return (os.getenv("DODO_GOLDEN_PRODUCT_ID") or os.getenv("DODO_GOLDEN_OFFER_PRODUCT_ID") or "").strip()
     return ""
 
 

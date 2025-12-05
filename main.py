@@ -166,10 +166,12 @@ def _find_uploads_domain_by_host(db, host: str):
         from models.uploads_domain import UploadsDomain
         host_l = (host or "").strip().lower().rstrip(".")
         domain = db.query(UploadsDomain).filter(UploadsDomain.hostname == host_l).first()
+        logger.info(f"[custom-domain] Uploads domain lookup for '{host_l}': found={domain is not None}, enabled={domain.enabled if domain else None}")
         if domain and domain.enabled:
             return domain
         return None
-    except Exception:
+    except Exception as e:
+        logger.error(f"[custom-domain] Uploads domain lookup error: {e}")
         return None
 
 @app.middleware("http")
@@ -248,6 +250,7 @@ window.__SHOP_SLUG__="{slug}";
                 
                 # Check for uploads custom domain
                 uploads_domain = _find_uploads_domain_by_host(db, host)
+                logger.info(f"[custom-domain] Found uploads_domain: {uploads_domain.hostname if uploads_domain else None}")
                 if uploads_domain:
                     # Serve the uploads preview page for this user
                     uid = uploads_domain.uid
