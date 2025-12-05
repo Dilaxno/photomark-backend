@@ -85,7 +85,7 @@ async def public_endpoints_cors(request: Request, call_next):
     origin = request.headers.get("origin", "*")
     
     # Public endpoints that should allow any origin
-    public_paths = ["/api/uploads/public/"]
+    public_paths = ["/api/uploads/public/", "/api/vaults/shared/"]
     is_public = any(path.startswith(p) for p in public_paths)
     
     if is_public:
@@ -206,6 +206,21 @@ def _find_uploads_domain_by_host(db, host: str):
         logger.error(f"[custom-domain] Uploads domain lookup error: {e}")
         return None
 
+
+def _find_vault_domain_by_host(db, host: str):
+    """Find vault domain record by hostname"""
+    try:
+        from models.vault_domain import VaultDomain
+        host_l = (host or "").strip().lower().rstrip(".")
+        domain = db.query(VaultDomain).filter(VaultDomain.hostname == host_l).first()
+        logger.info(f"[custom-domain] Vault domain lookup for '{host_l}': found={domain is not None}, enabled={domain.enabled if domain else None}")
+        if domain and domain.enabled:
+            return domain
+        return None
+    except Exception as e:
+        logger.error(f"[custom-domain] Vault domain lookup error: {e}")
+        return None
+
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
     try:
@@ -298,6 +313,27 @@ window.__SHOP_SLUG__="{slug}";
                         </script>"""
                         html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
                         return Response(content=html, media_type="text/html", status_code=200)
+                
+                # Check for vault custom domain
+                vault_domain = _find_vault_domain_by_host(db, host)
+                logger.info(f"[custom-domain] Found vault_domain: {vault_domain.hostname if vault_domain else None}")
+                if vault_domain:
+                    # Serve the vault share page
+                    share_token = vault_domain.share_token
+                    vault_name = vault_domain.vault_name
+                    front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        r = await client.get(f"{front}/", follow_redirects=True)
+                        html = r.text
+                        # Inject script to set vault share mode with token
+                        inject = f"""<script>
+                            window.__VAULT_CUSTOM_DOMAIN__ = true;
+                            window.__VAULT_SHARE_TOKEN__ = "{share_token or ''}";
+                            window.__VAULT_NAME__ = "{vault_name or ''}";
+                            try{{history.replaceState(null,'','/#share?token={share_token or ""}')}}catch(e){{}}
+                        </script>"""
+                        html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
+                        return Response(content=html, media_type="text/html", status_code=200)
             finally:
                 try:
                     db.close()
@@ -366,6 +402,13 @@ try:
     app.include_router(uploads_domain.router)
 except Exception as _ex:
     logger.warning(f"uploads_domain router not available: {_ex}")
+
+# vault domain (custom domain for vault share pages)
+try:
+    from routers import vault_domain  # noqa: E402
+    app.include_router(vault_domain.router)
+except Exception as _ex:
+    logger.warning(f"vault_domain router not available: {_ex}")
 # backups router (Backblaze B2)
 try:
     from routers import backup  # noqa: E402
@@ -559,6 +602,24 @@ async def domains_validate(request: Request):
             except Exception as e:
                 logger.warning(f"Uploads domain query failed: {e}")
                 # Rollback to clear the failed transaction state
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            
+            # Check vault custom domains (using dedicated table)
+            try:
+                from models.vault_domain import VaultDomain
+                vault_domain = db.query(VaultDomain).filter(VaultDomain.hostname == domain).first()
+                if vault_domain:
+                    logger.info(f"Domain {domain} found in vault_domains (enabled={vault_domain.enabled}, dns_verified={vault_domain.dns_verified})")
+                    if vault_domain.enabled or vault_domain.dns_verified:
+                        logger.info(f"Domain {domain} validated via vault_domains table")
+                        return PlainTextResponse("ok", status_code=200)
+                    else:
+                        logger.info(f"Domain {domain} found but not enabled/verified yet")
+            except Exception as e:
+                logger.warning(f"Vault domain query failed: {e}")
                 try:
                     db.rollback()
                 except Exception:

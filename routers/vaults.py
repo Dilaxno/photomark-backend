@@ -1436,7 +1436,26 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         pass
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-    link = f"{front}/#share?token={token}"
+    
+    # Check if vault has a custom domain configured
+    custom_domain_link = None
+    try:
+        from models.vault_domain import VaultDomain
+        vault_domain = db.query(VaultDomain).filter(
+            VaultDomain.uid == uid,
+            VaultDomain.vault_name == safe_vault,
+            VaultDomain.enabled == True
+        ).first()
+        if vault_domain:
+            custom_domain_link = f"https://{vault_domain.hostname}"
+            # Update the share token in the domain record
+            vault_domain.share_token = token
+            db.commit()
+    except Exception as e:
+        logger.debug(f"Custom domain check failed: {e}")
+    
+    # Use custom domain if available, otherwise use default link
+    link = custom_domain_link if custom_domain_link else f"{front}/#share?token={token}"
 
     include_qr = bool((payload or {}).get('include_qr'))
     qr_bytes = None
@@ -1729,9 +1748,23 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
     except Exception:
         pass
     
-    # Build share link
+    # Build share link - check for custom domain first
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-    link = f"{front}/#share?token={token}"
+    custom_domain_link = None
+    try:
+        from models.vault_domain import VaultDomain
+        vault_domain = db.query(VaultDomain).filter(
+            VaultDomain.uid == uid,
+            VaultDomain.vault_name == safe_vault,
+            VaultDomain.enabled == True
+        ).first()
+        if vault_domain:
+            custom_domain_link = f"https://{vault_domain.hostname}"
+            vault_domain.share_token = token
+            db.commit()
+    except Exception:
+        pass
+    link = custom_domain_link if custom_domain_link else f"{front}/#share?token={token}"
     
     # Get studio name from user email
     studio_name = None
@@ -1881,7 +1914,7 @@ async def vaults_publish(request: Request, payload: dict = Body(...)):
 
 
 @router.post("/vaults/share_link")
-async def vaults_share_link(request: Request, payload: dict = Body(...)):
+async def vaults_share_link(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -1943,8 +1976,25 @@ async def vaults_share_link(request: Request, payload: dict = Body(...)):
     _write_json_key(_share_key(token), rec)
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
-    link = f"{front}/#share?token={token}"
-    return {"ok": True, "link": link, "token": token, "expires_at": expires_at_iso}
+    
+    # Check for custom domain
+    custom_domain_link = None
+    try:
+        from models.vault_domain import VaultDomain
+        vault_domain = db.query(VaultDomain).filter(
+            VaultDomain.uid == uid,
+            VaultDomain.vault_name == safe_vault,
+            VaultDomain.enabled == True
+        ).first()
+        if vault_domain:
+            custom_domain_link = f"https://{vault_domain.hostname}"
+            vault_domain.share_token = token
+            db.commit()
+    except Exception:
+        pass
+    
+    link = custom_domain_link if custom_domain_link else f"{front}/#share?token={token}"
+    return {"ok": True, "link": link, "token": token, "expires_at": expires_at_iso, "custom_domain": custom_domain_link}
 
 
 @router.post("/vaults/reel")
