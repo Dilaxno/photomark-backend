@@ -133,15 +133,15 @@ async def pinterest_callback(
     """Handle Pinterest OAuth callback."""
     if error:
         logger.warning(f"Pinterest OAuth error: {error}")
-        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?pinterest_error=denied")
+        return RedirectResponse(url=f"{FRONTEND_URL}/integrations?pinterest_error=denied")
     
     if not code or not state:
-        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?pinterest_error=invalid")
+        return RedirectResponse(url=f"{FRONTEND_URL}/integrations?pinterest_error=invalid")
     
     # Verify state
     state_data = read_json_key(_pinterest_state_key(state))
     if not state_data or not state_data.get("uid"):
-        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?pinterest_error=invalid_state")
+        return RedirectResponse(url=f"{FRONTEND_URL}/integrations?pinterest_error=invalid_state")
     
     uid = state_data["uid"]
     
@@ -161,7 +161,7 @@ async def pinterest_callback(
             
             if token_resp.status_code != 200:
                 logger.error(f"Pinterest token exchange failed: {token_resp.text}")
-                return RedirectResponse(url=f"{FRONTEND_URL}/gallery?pinterest_error=token_failed")
+                return RedirectResponse(url=f"{FRONTEND_URL}/integrations?pinterest_error=token_failed")
             
             tokens = token_resp.json()
             
@@ -191,11 +191,11 @@ async def pinterest_callback(
             **user_info
         })
         
-        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?pinterest_connected=true")
+        return RedirectResponse(url=f"{FRONTEND_URL}/integrations?pinterest_connected=true")
         
     except Exception as ex:
         logger.exception(f"Pinterest callback error: {ex}")
-        return RedirectResponse(url=f"{FRONTEND_URL}/gallery?pinterest_error=unknown")
+        return RedirectResponse(url=f"{FRONTEND_URL}/integrations?pinterest_error=unknown")
 
 
 @router.post("/disconnect")
