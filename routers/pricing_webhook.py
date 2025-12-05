@@ -642,6 +642,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         or _dict(payload_datta.get("query_params"))
         or {}
     )
+    logger.info(f"[pricing.webhook] extracted qp={qp} meta={meta}")
 
     # Deep-scan fallback: locate a dict containing query_params / metadata anywhere in payload
     if not qp:
@@ -981,6 +982,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
     # Prefer overlay query_params plan when present
     plan_raw = str((qp.get("plan") if isinstance(qp, dict) else "") or "").strip() or str((meta.get("plan") if isinstance(meta, dict) else "") or "").strip()
     plan = _normalize_plan(plan_raw)
+    logger.info(f"[pricing.webhook] plan resolution: qp={qp} meta_plan={meta.get('plan') if isinstance(meta, dict) else None} plan_raw={plan_raw!r} normalized={plan!r}")
     
     # Extract billing cycle from query_params or metadata
     billing_cycle_raw = str((qp.get("billing") if isinstance(qp, dict) else "") or "").strip() or str((meta.get("billing") if isinstance(meta, dict) else "") or "").strip()
@@ -1024,10 +1026,24 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         pass
 
     # Process upgrades for 'payment.succeeded' and 'subscription.active' (Dodo)
+    # Note: For subscriptions, payment.succeeded often lacks product_id, but subscription.active has it
     process_events = {"payment.succeeded", "subscription.active"}
     logger.info(f"[pricing.webhook] processing event: evt_type={evt_type!r} in_process_events={evt_type in process_events}")
     if evt_type not in process_events:
         return {"ok": True, "captured": bool(ctx.get("uid") or ctx.get("plan") or ctx.get("email")), "event_type": evt_type}
+    
+    # For payment.succeeded with subscription_id but no product info, defer to subscription.active
+    sub_id_early = _deep_find_first(event_obj, ("subscription_id", "subscriptionId", "sub_id")) if isinstance(event_obj, dict) else ""
+    if evt_type == "payment.succeeded" and sub_id_early:
+        # Check if we have product info
+        has_product_info = bool(
+            event_obj.get("product_id") or 
+            event_obj.get("product_cart") or 
+            _deep_find_first(event_obj, ("product_id",))
+        )
+        if not has_product_info:
+            logger.info(f"[pricing.webhook] payment.succeeded for subscription {sub_id_early} lacks product info, deferring to subscription.active")
+            return {"ok": True, "deferred": True, "reason": "subscription_payment_deferred_to_active", "subscription_id": sub_id_early}
 
     # Detect subscription-style payloads which may not include product_cart
     sub_id = _deep_find_first(event_obj, ("subscription_id", "subscriptionId", "sub_id")) if isinstance(event_obj, dict) else ""
@@ -1076,6 +1092,17 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             product_id = str((event_obj.get("product_id") or "")).strip()
             if not product_id:
                 product_id = _deep_find_first(event_obj, ("product_id", "productId"))
+            # Also check subscription object if present (common in payment.succeeded for subscriptions)
+            if not product_id:
+                sub_obj = event_obj.get("subscription") if isinstance(event_obj.get("subscription"), dict) else None
+                if sub_obj:
+                    product_id = str((sub_obj.get("product_id") or "")).strip()
+                    logger.info(f"[pricing.webhook] found product_id in subscription object: {product_id}")
+            # Check full payload as last resort
+            if not product_id and isinstance(payload, dict):
+                product_id = _deep_find_first(payload, ("product_id", "productId"))
+                if product_id:
+                    logger.info(f"[pricing.webhook] found product_id in full payload: {product_id}")
             ids_individual: set[str] = set(
                 s.strip() for s in (
                     os.getenv("DODO_INDIVIDUAL_PRODUCT_ID") or "",
