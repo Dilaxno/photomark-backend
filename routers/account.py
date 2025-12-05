@@ -1142,6 +1142,62 @@ async def save_brand_kit(request: Request, payload: BrandKitPayload = Body(...),
         return JSONResponse({"error": "Failed to save brand kit"}, status_code=500)
 
 
+@router.post("/profile-photo/upload")
+async def upload_profile_photo(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload a profile photo to R2 storage."""
+    from utils.storage import upload_bytes, get_presigned_url
+    from core.config import R2_CUSTOM_DOMAIN, R2_PUBLIC_BASE_URL
+    
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Validate file type
+        content_type = file.content_type or ""
+        if not content_type.startswith("image/"):
+            return JSONResponse({"error": "Only image files are allowed"}, status_code=400)
+        
+        # Read file content
+        content = await file.read()
+        if len(content) > 5 * 1024 * 1024:  # 5MB limit
+            return JSONResponse({"error": "File too large (max 5MB)"}, status_code=400)
+        
+        # Generate unique filename
+        ext = os.path.splitext(file.filename or "profile.png")[1] or ".png"
+        key = f"users/{uid}/profile/photo_{secrets.token_urlsafe(8)}{ext}"
+        
+        # Upload to R2 storage
+        upload_bytes(key, content, content_type=content_type)
+        
+        # Get URL for the uploaded photo
+        url = get_presigned_url(key, expires_in=86400 * 365)  # 1 year
+        
+        if not url:
+            # Fallback to custom domain URL
+            base = R2_CUSTOM_DOMAIN or R2_PUBLIC_BASE_URL or ""
+            if base:
+                base = base.replace("http://", "").replace("https://", "")
+                url = f"https://{base.rstrip('/')}/{key}"
+            else:
+                url = f"/static/{key}"
+        
+        # Update user's photo_url in database
+        try:
+            user = db.query(User).filter(User.uid == uid).first()
+            if user:
+                user.photo_url = url
+                user.updated_at = datetime.utcnow()
+                db.commit()
+        except Exception as db_ex:
+            logger.warning(f"Failed to update user photo_url in DB: {db_ex}")
+        
+        return {"ok": True, "photo_url": url, "key": key}
+    except Exception as ex:
+        logger.warning(f"upload_profile_photo failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to upload profile photo"}, status_code=500)
+
+
 @router.post("/brand-kit/upload-logo")
 async def upload_brand_logo(request: Request, file: UploadFile = File(...)):
     """Upload a logo for the brand kit to R2 storage."""
