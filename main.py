@@ -447,7 +447,6 @@ except Exception as _ex:
     logger.warning(f"streamchat router not available: {_ex}")
 
 
-
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
     # Caddy on_demand_tls ask endpoint: returns 200 if domain is allowed

@@ -1384,6 +1384,31 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         rec['client_role'] = role_raw
     except Exception:
         rec['client_role'] = 'viewer'
+    
+    # Download pricing (free or paid)
+    try:
+        download_type = str((payload or {}).get('download_type') or 'free').strip().lower()
+        if download_type not in ('free', 'paid'):
+            download_type = 'free'
+        rec['download_type'] = download_type
+        
+        download_price_cents = int((payload or {}).get('download_price_cents') or 0)
+        rec['download_price_cents'] = max(0, download_price_cents)
+        
+        # Set licensed flag: true for free downloads, false for paid (until payment completes)
+        if download_type == 'free':
+            rec['licensed'] = True
+        else:
+            rec['licensed'] = False
+        
+        rec['payment_id'] = None
+        rec['payment_completed_at'] = None
+    except Exception:
+        rec['download_type'] = 'free'
+        rec['download_price_cents'] = 0
+        rec['licensed'] = True
+        rec['payment_id'] = None
+        rec['payment_completed_at'] = None
     # Optional: password to unlock removal of invisible watermark (unmarked originals access)
     try:
         remove_pw = str((payload or {}).get('remove_password') or '').strip()
@@ -1671,6 +1696,31 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
         rec['client_role'] = role_raw
     except Exception:
         rec['client_role'] = 'editor'
+    
+    # Download pricing (free or paid)
+    try:
+        download_type = str((payload or {}).get('download_type') or 'free').strip().lower()
+        if download_type not in ('free', 'paid'):
+            download_type = 'free'
+        rec['download_type'] = download_type
+        
+        download_price_cents = int((payload or {}).get('download_price_cents') or 0)
+        rec['download_price_cents'] = max(0, download_price_cents)
+        
+        # Set licensed flag: true for free downloads, false for paid (until payment completes)
+        if download_type == 'free':
+            rec['licensed'] = True
+        else:
+            rec['licensed'] = False
+        
+        rec['payment_id'] = None
+        rec['payment_completed_at'] = None
+    except Exception:
+        rec['download_type'] = 'free'
+        rec['download_price_cents'] = 0
+        rec['licensed'] = True
+        rec['payment_id'] = None
+        rec['payment_completed_at'] = None
     
     _write_json_key(_share_key(token), rec)
     
@@ -2411,7 +2461,24 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
     except Exception:
         pass
     
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit}
+    # Determine final licensed status and price based on download type
+    download_type = str((rec or {}).get('download_type') or 'free')
+    download_price_cents = int((rec or {}).get('download_price_cents') or 0)
+    
+    # For paid downloads, check if payment is complete
+    if download_type == 'paid' and download_price_cents > 0:
+        licensed = bool((rec or {}).get('licensed'))
+        final_price_cents = download_price_cents
+    elif download_type == 'free' or download_price_cents == 0:
+        licensed = True
+        final_price_cents = 0
+    else:
+        # Legacy shares - use existing logic
+        licensed = bool((rec or {}).get('licensed'))
+        # Keep the vault meta price for legacy shares
+        final_price_cents = price_cents
+    
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": final_price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
@@ -3113,10 +3180,19 @@ async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
 
-    # Price and currency from vault meta
-    meta = _read_vault_meta(uid, vault) or {}
-    amount = int(meta.get("license_price_cents") or 0)
-    currency = str(meta.get("license_currency") or "USD")
+    # Get price from share record (new flow) or vault meta (legacy)
+    download_type = str(rec.get('download_type') or 'free')
+    download_price_cents = int(rec.get('download_price_cents') or 0)
+    
+    # Use share-specific price if available, otherwise fall back to vault meta
+    if download_price_cents > 0:
+        amount = download_price_cents
+        currency = "USD"
+    else:
+        # Legacy: get price from vault meta
+        meta = _read_vault_meta(uid, vault) or {}
+        amount = int(meta.get("license_price_cents") or 0)
+        currency = str(meta.get("license_currency") or "USD")
 
     if amount <= 0:
         return JSONResponse({"error": "license not available"}, status_code=400)
@@ -3339,8 +3415,28 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
     if exp and now > exp:
         return JSONResponse({"error": "expired"}, status_code=410)
 
-    # Allow if licensed OR correct removal password provided OR explicit high-res permission
-    allow_download = bool(rec.get("licensed")) or (str(rec.get('download_permission') or '').strip().lower() == 'high')
+    # Check download authorization based on download type
+    download_permission = str(rec.get('download_permission') or '').strip().lower()
+    download_type = str(rec.get('download_type') or 'free').strip().lower()
+    download_price_cents = int(rec.get('download_price_cents') or 0)
+    
+    allow_download = False
+    
+    # Check based on download permission and type
+    if download_permission == 'proofing_download':
+        # New flow: check if free or paid+licensed
+        if download_type == 'free' or download_price_cents == 0:
+            allow_download = True
+        elif download_type == 'paid' and bool(rec.get('licensed')):
+            allow_download = True
+    elif download_permission == 'high':
+        # Legacy high-res permission
+        allow_download = True
+    else:
+        # Legacy proofing-only or other: check licensed flag
+        allow_download = bool(rec.get("licensed"))
+    
+    # Also allow if correct removal password provided
     if not allow_download:
         try:
             if rec.get("remove_pw_hash"):
@@ -3349,8 +3445,11 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
                 if hashlib.sha256(((password or '') + salt).encode('utf-8')).hexdigest() == rec.get("remove_pw_hash"):
                     allow_download = True
         except Exception:
-            allow_download = False
+            pass
+    
     if not allow_download:
+        if download_type == 'paid' and download_price_cents > 0:
+            return JSONResponse({"error": "Payment required. Please purchase usage rights to download."}, status_code=402)
         return JSONResponse({"error": "not licensed"}, status_code=403)
 
     uid = rec.get('uid') or ''
