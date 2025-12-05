@@ -77,6 +77,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Custom CORS for public endpoints (uploads custom domains) ---
+@app.middleware("http")
+async def public_endpoints_cors(request: Request, call_next):
+    """Allow CORS from any origin for public endpoints like /api/uploads/public/*"""
+    path = request.url.path
+    origin = request.headers.get("origin", "*")
+    
+    # Public endpoints that should allow any origin
+    public_paths = ["/api/uploads/public/"]
+    is_public = any(path.startswith(p) for p in public_paths)
+    
+    if is_public:
+        if request.method == "OPTIONS":
+            # Handle preflight
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Max-Age": "86400",
+                }
+            )
+        # For actual requests, proceed and add CORS headers to response
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+    
+    return await call_next(request)
+
 # --- Security headers ---
 @app.middleware("http")
 async def add_security_headers(request, call_next):
