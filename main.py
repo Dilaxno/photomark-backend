@@ -89,14 +89,16 @@ async def public_endpoints_cors(request: Request, call_next):
     is_public = any(path.startswith(p) for p in public_paths)
     
     if is_public:
+        # Explicitly list allowed headers (wildcard doesn't work with credentials)
+        allowed_headers = "Content-Type, Authorization, X-Requested-With, Accept, Origin, ngrok-skip-browser-warning"
         if request.method == "OPTIONS":
             # Handle preflight
             return Response(
                 status_code=200,
                 headers={
                     "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                    "Access-Control-Allow-Headers": allowed_headers,
                     "Access-Control-Allow-Credentials": "true",
                     "Access-Control-Max-Age": "86400",
                 }
@@ -104,8 +106,8 @@ async def public_endpoints_cors(request: Request, call_next):
         # For actual requests, proceed and add CORS headers to response
         response = await call_next(request)
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = allowed_headers
         response.headers["Access-Control-Allow-Credentials"] = "true"
         return response
     
