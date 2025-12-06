@@ -109,11 +109,11 @@ async def unsplash_auth(request: Request):
             "client_id": UNSPLASH_ACCESS_KEY,
             "redirect_uri": UNSPLASH_REDIRECT_URI,
             "response_type": "code",
-            "scope": "public+write_photos",
+            "scope": "public write_photos",
             "state": state
         }
         
-        auth_url = f"{UNSPLASH_AUTH_URL}?{urlencode(params)}"
+        auth_url = f"{UNSPLASH_AUTH_URL}?{urlencode(params, safe='')}"
         
         return {"auth_url": auth_url, "state": state}
         
