@@ -229,3 +229,31 @@ def backup_delete_key(key: str) -> bool:
     except Exception as ex:
         logger.warning(f"backup_delete_key failed for {key}: {ex}")
         return False
+
+
+def list_keys(prefix: str, max_keys: int = 1000) -> list[str]:
+    """List all keys with a given prefix in the bucket."""
+    try:
+        if s3 and R2_BUCKET:
+            bucket = s3.Bucket(R2_BUCKET)
+            keys = []
+            for obj in bucket.objects.filter(Prefix=prefix).limit(max_keys):
+                keys.append(obj.key)
+            return keys
+        else:
+            # Local filesystem fallback
+            local_dir = os.path.join(STATIC_DIR, prefix)
+            if not os.path.isdir(local_dir):
+                return []
+            keys = []
+            for root, _, files in os.walk(local_dir):
+                for f in files:
+                    full_path = os.path.join(root, f)
+                    rel_path = os.path.relpath(full_path, STATIC_DIR)
+                    keys.append(rel_path.replace("\\", "/"))
+                    if len(keys) >= max_keys:
+                        return keys
+            return keys
+    except Exception as ex:
+        logger.warning(f"list_keys failed for prefix {prefix}: {ex}")
+        return []
