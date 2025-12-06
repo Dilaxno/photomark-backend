@@ -557,6 +557,13 @@ try:
 except Exception as _ex:
     logger.warning(f"tumblr router not available: {_ex}")
 
+# Unsplash export endpoints
+try:
+    from routers import unsplash  # noqa: E402
+    app.include_router(unsplash.router)
+except Exception as _ex:
+    logger.warning(f"unsplash router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):

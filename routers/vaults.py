@@ -1485,10 +1485,14 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
             data = doc.to_dict() if getattr(doc, 'exists', False) else {}
             studio_name = (
                 data.get('studioName')
+                or data.get('studio_name')
                 or data.get('businessName')
+                or data.get('business_name')
                 or data.get('brand_name')
-                or data.get('name')
+                or data.get('brandName')
                 or data.get('displayName')
+                or data.get('display_name')
+                or data.get('name')
             )
     except Exception:
         studio_name = None
@@ -1766,13 +1770,32 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
         pass
     link = custom_domain_link if custom_domain_link else f"{front}/#share?token={token}"
     
-    # Get studio name from user email
+    # Get studio name from user profile
     studio_name = None
     try:
-        owner_email = (get_user_email_from_uid(uid) or '').strip()
-        studio_name = (owner_email.split('@')[0] if '@' in owner_email else owner_email) or "Photomark"
+        fs_db = get_fs_client()
+        if fs_db:
+            doc = fs_db.collection('users').document(uid).get()
+            data = doc.to_dict() if getattr(doc, 'exists', False) else {}
+            studio_name = (
+                data.get('studioName')
+                or data.get('studio_name')
+                or data.get('businessName')
+                or data.get('business_name')
+                or data.get('brand_name')
+                or data.get('brandName')
+                or data.get('displayName')
+                or data.get('display_name')
+                or data.get('name')
+            )
     except Exception:
-        studio_name = "Photomark"
+        studio_name = None
+    if not studio_name:
+        try:
+            owner_email = (get_user_email_from_uid(uid) or '').strip()
+            studio_name = (owner_email.split('@')[0] if '@' in owner_email else owner_email) or "Photomark"
+        except Exception:
+            studio_name = "Photomark"
     
     # Photo count
     count = len(keys)
