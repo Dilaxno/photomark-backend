@@ -82,6 +82,70 @@ async def billing_info(request: Request, db: Session = Depends(get_db)):
     except Exception as ex:
         return JSONResponse({"error": f"Failed to fetch billing info: {ex}"}, status_code=500)
 
+@router.get("/payment-methods")
+async def billing_payment_methods(request: Request, db: Session = Depends(get_db)):
+    """
+    Return the customer's saved payment methods.
+
+    Source of truth:
+    - Stored on User.extra_metadata.paymentMethods as a list of:
+      { id, type, last4, expiry, isDefault }
+    - Backward-compat: if only extra_metadata.paymentMethod (single) exists,
+      convert it into a single-element list.
+
+    Response:
+      { "methods": [ { id, type, last4, expiry, isDefault } ] }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+
+        meta = user.extra_metadata or {}
+        methods = meta.get("paymentMethods") or []
+
+        # Backward compatibility: coerce single "paymentMethod" into list
+        if (not methods) and isinstance(meta.get("paymentMethod"), dict):
+            pm = meta.get("paymentMethod") or {}
+            normalized = {
+                "id": str(pm.get("id") or pm.get("payment_method_id") or "").strip() or None,
+                "type": str(pm.get("brand") or pm.get("type") or "card").strip().lower(),
+                "last4": str(pm.get("last4") or "").strip()[-4:],
+                "expiry": str(pm.get("expiry") or "").strip(),
+                "isDefault": bool(pm.get("isDefault") or False),
+            }
+            methods = [normalized]
+
+        out = []
+        if isinstance(methods, list):
+            for m in methods:
+                if not isinstance(m, dict):
+                    continue
+                # Normalize fields for the frontend
+                t = str((m.get("type") or m.get("brand") or "card")).strip().lower()
+                if "visa" in t:
+                    t = "visa"
+                elif "master" in t:
+                    t = "mastercard"
+                elif "amex" in t or "american" in t:
+                    t = "amex"
+                # Keep non-card types as-is (apple_pay, google_pay, paypal, sepa, ach, wallet, etc.)
+                out.append({
+                    "id": str((m.get("id") or m.get("payment_method_id") or "")).strip() or f"{t}-{str(m.get('last4') or '')[-4:]}",
+                    "type": t,
+                    "last4": str((m.get("last4") or m.get("last4_digits") or "")).strip()[-4:],
+                    "expiry": str(m.get("expiry") or "").strip(),
+                    "isDefault": bool(m.get("isDefault") or m.get("is_default") or m.get("default") or False),
+                })
+
+        return {"methods": out}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        return JSONResponse({"error": f"Failed to fetch payment methods: {ex}"}, status_code=500)
 
 @router.get("/usage")
 async def billing_usage(request: Request, db: Session = Depends(get_db)):

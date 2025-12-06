@@ -195,6 +195,72 @@ def _first_city_country(payload: dict) -> tuple[str, str]:
     return city, country
 
 
+def _extract_payment_method(obj: dict, full: dict | None = None) -> dict:
+    """
+    Best-effort extraction of a single payment method used during checkout/subscription events.
+    Returns normalized shape:
+      { id, type, last4, expiry, isDefault }
+    """
+    try:
+        def _g(keys: tuple[str, ...]) -> str:
+            v = _deep_find_first(obj or {}, keys)
+            if not v and isinstance(full, dict):
+                v = _deep_find_first(full, keys)
+            return str(v or "").strip()
+
+        pm_id = _g(("payment_method_id", "paymentMethodId", "pm_id", "payment_method", "paymentMethod"))
+        # Some providers return an object for payment_method with an id field
+        if not pm_id:
+            try:
+                pm = (obj.get("payment_method") if isinstance(obj, dict) else None) or (full.get("payment_method") if isinstance(full, dict) else None)
+                if isinstance(pm, dict):
+                    pm_id = str((pm.get("payment_method_id") or pm.get("id") or "")).strip()
+            except Exception:
+                pm_id = ""
+
+        last4 = _g(("last4", "last4_digits", "last_4", "card_last4"))
+        brand_raw = _g(("card_network", "card_brand", "brand", "network", "scheme"))
+        typ_raw = _g(("payment_method_type", "paymentMethodType", "type"))
+
+        exp_m = _g(("expiry_month", "exp_month", "card_expiry_month"))
+        exp_y = _g(("expiry_year", "exp_year", "card_expiry_year"))
+
+        expiry = ""
+        try:
+            if exp_m and exp_y:
+                mm = exp_m.zfill(2)
+                yy = exp_y[-2:]
+                expiry = f"{mm}/{yy}"
+        except Exception:
+            expiry = ""
+
+        t = ""
+        b = brand_raw.lower()
+        if "visa" in b:
+            t = "visa"
+        elif "master" in b:
+            t = "mastercard"
+        elif "amex" in b or "american" in b:
+            t = "amex"
+        else:
+            t = (typ_raw or "card").lower()
+
+        is_default_raw = _g(("is_default", "default", "isDefault", "recurring_default"))
+        is_default = str(is_default_raw).lower() in ("1", "true", "yes")
+
+        # Only return if we have at least an id or last4
+        if not (pm_id or last4):
+            return {}
+
+        return {
+            "id": pm_id or f"{t}-{(last4[-4:] if last4 else 'xxxx')}",
+            "type": t,
+            "last4": (last4[-4:] if last4 else ""),
+            "expiry": expiry,
+            "isDefault": is_default,
+        }
+    except Exception:
+        return {}
 def _deep_find_first(obj: dict, keys: tuple[str, ...]) -> str:
     """Recursively search a dict for the first non-empty string value for any key in keys.
     Limits depth and size to avoid pathological payloads.
@@ -1251,6 +1317,52 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             user.subscription_status = status
         user.updated_at = now
         meta = user.extra_metadata or {}
+        # Persist payment method used during checkout/subscription
+        try:
+            pm = _extract_payment_method(event_obj or {}, payload if isinstance(payload, dict) else None)
+        except Exception:
+            pm = {}
+        if isinstance(pm, dict) and (pm.get("id") or pm.get("last4")):
+            pm_list = list(meta.get("paymentMethods") or [])
+            updated = False
+            for i, ex in enumerate(pm_list):
+                try:
+                    same_id = (ex.get("id") and pm.get("id") and str(ex.get("id")) == str(pm.get("id")))
+                    same_fingerprint = (str(ex.get("type") or "") == str(pm.get("type") or "")) and (str(ex.get("last4") or "") == str(pm.get("last4") or ""))
+                    if same_id or same_fingerprint:
+                        # Merge while preserving previous default unless pm explicitly sets it
+                        keep_default = ex.get("isDefault") and not pm.get("isDefault")
+                        merged = {**ex, **{k: v for k, v in pm.items() if v not in (None, "")}}
+                        if keep_default:
+                            merged["isDefault"] = True
+                        pm_list[i] = merged
+                        updated = True
+                        break
+                except Exception:
+                    continue
+            if not updated:
+                any_default = any(bool(x.get("isDefault")) for x in pm_list)
+                if not any_default:
+                    pm["isDefault"] = True
+                pm_list.append(pm)
+            # Ensure only one default
+            try:
+                defaults = [i for i, x in enumerate(pm_list) if bool(x.get("isDefault"))]
+                if len(defaults) > 1:
+                    keep = defaults[-1]
+                    for j, x in enumerate(pm_list):
+                        x["isDefault"] = (j == keep)
+            except Exception:
+                pass
+            meta["paymentMethods"] = pm_list
+            # Backward compatible single-method summary
+            meta["paymentMethod"] = {
+                "brand": pm.get("type"),
+                "last4": pm.get("last4"),
+                "expiry": pm.get("expiry"),
+                "isDefault": bool(pm.get("isDefault")),
+            }
+
         meta.update({
             "isPaid": True,
             "paidAt": now.isoformat(),
