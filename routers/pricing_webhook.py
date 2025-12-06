@@ -1569,16 +1569,79 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         if not payment_id and isinstance(payload, dict):
             payment_id = _deep_find_first(payload, ("payment_id", "paymentId", "id"))
         
-        # Get amount
+        # Get amount - try multiple extraction methods
         amount_cents = 0
         try:
+            # Try direct fields first
             amount_raw = (
                 event_obj.get("amount") or event_obj.get("total") or 
                 event_obj.get("amount_total") or event_obj.get("grand_total") or 0
             )
             amount_cents = int(amount_raw) if amount_raw else 0
-        except Exception:
-            pass
+            
+            # If still 0, try deep search
+            if amount_cents == 0:
+                deep_amount = _deep_find_first(event_obj, ("amount", "total", "amount_total", "grand_total", "subtotal"))
+                if deep_amount:
+                    try:
+                        amount_cents = int(deep_amount)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # If still 0, try payload root
+            if amount_cents == 0 and isinstance(payload, dict):
+                amount_raw = (
+                    payload.get("amount") or payload.get("total") or 
+                    payload.get("amount_total") or payload.get("grand_total") or 0
+                )
+                if amount_raw:
+                    try:
+                        amount_cents = int(amount_raw)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # If still 0, try to get from subscription or product_cart
+            if amount_cents == 0:
+                try:
+                    # Check subscription object
+                    sub_obj = event_obj.get("subscription") if isinstance(event_obj.get("subscription"), dict) else None
+                    if sub_obj:
+                        sub_amount = sub_obj.get("amount") or sub_obj.get("price") or sub_obj.get("unit_amount")
+                        if sub_amount:
+                            amount_cents = int(sub_amount)
+                    
+                    # Check product_cart
+                    if amount_cents == 0:
+                        cart = event_obj.get("product_cart") or []
+                        if isinstance(cart, list):
+                            for item in cart:
+                                if isinstance(item, dict):
+                                    item_price = item.get("price") or item.get("amount") or item.get("unit_amount") or 0
+                                    item_qty = item.get("quantity") or 1
+                                    try:
+                                        amount_cents += int(item_price) * int(item_qty)
+                                    except (ValueError, TypeError):
+                                        pass
+                except Exception:
+                    pass
+            
+            # Fallback: use plan-based pricing if amount is still 0
+            if amount_cents == 0:
+                plan_prices = {
+                    "individual": {"monthly": 2500, "yearly": 24000},  # $25/mo or $240/yr
+                    "studios": {"monthly": 4500, "yearly": 43200},     # $45/mo or $432/yr
+                    "golden": {"onetime": 64800},                       # $648 for 3 years (Golden Offer)
+                }
+                if plan in plan_prices:
+                    if plan == "golden":
+                        amount_cents = plan_prices["golden"]["onetime"]
+                    elif billing_cycle == "monthly":
+                        amount_cents = plan_prices.get(plan, {}).get("monthly", 0)
+                    else:
+                        amount_cents = plan_prices.get(plan, {}).get("yearly", 0)
+                logger.info(f"[pricing.webhook] using fallback price for plan={plan} billing_cycle={billing_cycle}: {amount_cents} cents")
+        except Exception as amt_ex:
+            logger.warning(f"[pricing.webhook] amount extraction error: {amt_ex}")
         
         # Get currency
         currency = "USD"
