@@ -35,7 +35,12 @@ import cv2
 
 from core.auth import resolve_workspace_uid, has_role_access
 from core.config import logger
-from utils.storage import read_json_key, write_json_key
+from utils.storage import read_json_key, write_json_key, upload_bytes
+from utils.metadata import auto_embed_metadata_for_user
+from sqlalchemy.orm import Session
+from fastapi import Depends
+from core.database import get_db
+from models.gallery import GalleryAsset
 
 router = APIRouter(prefix="/api/style", tags=["style"])  # matches existing /api/style namespace
 
@@ -581,4 +586,142 @@ async def reinhard_match(
 
   except Exception as ex:
     logger.exception(f"Reinhard matching failed: {ex}")
+    return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post('/to-gallery')
+async def style_to_gallery(
+  request: Request,
+  reference: UploadFile = File(..., description='Reference image to copy style from'),
+  files: List[UploadFile] = File(..., description='Target images to apply reference style to'),
+  method: Optional[str] = Form('reinhard'),  # 'reinhard' or 'histogram'
+  fmt: Optional[str] = Form('jpg'),
+  quality: Optional[float] = Form(0.92),
+  db: Session = Depends(get_db),
+):
+  """
+  Apply style transfer and save results directly to the user's Gallery (watermarked folder).
+  This ensures styled images appear in the Gallery tab, not My Uploads.
+  
+  Writes to users/{uid}/watermarked/YYYY/MM/DD/ with suffix -style.
+  """
+  # Auth
+  eff_uid, req_uid = resolve_workspace_uid(request)
+  if not eff_uid or not req_uid:
+    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+  if not has_role_access(req_uid, eff_uid, 'retouch'):
+    return JSONResponse({"error": "Forbidden"}, status_code=403)
+  uid = eff_uid
+
+  # One-free-generation enforcement
+  billing_uid = eff_uid or _billing_uid_from_request(request)
+  if not _is_paid_customer(billing_uid):
+    if not _consume_one_free(billing_uid, 'style_transfer'):
+      return JSONResponse({
+        "error": "free_limit_reached",
+        "message": "You have used your free generation. Upgrade to continue.",
+      }, status_code=402)
+
+  try:
+    # Read reference
+    ref_bytes = await reference.read()
+    if not ref_bytes:
+      return JSONResponse({"error": "empty reference"}, status_code=400)
+
+    use_method = (method or 'reinhard').lower().strip()
+    
+    # Prepare reference stats based on method
+    ref_key = hashlib.sha1(ref_bytes).hexdigest()
+    
+    if use_method == 'histogram':
+      # Histogram matching
+      ref_cdf = _cache_get(_REF_CDF_CACHE, ref_key)
+      if ref_cdf is None:
+        ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
+        ref_small = _downscale(ref_img_full, 384)
+        ref_small_np = _pil_to_np_rgb(ref_small)
+        ref_cdf = _cdf_3x256(ref_small_np)
+        _cache_put(_REF_CDF_CACHE, ref_key, ref_cdf)
+      ref_mean, ref_std = None, None
+    else:
+      # Reinhard (default)
+      cached = _cache_get(_REF_LAB_CACHE, ref_key)
+      if cached is None:
+        ref_img_full = Image.open(io.BytesIO(ref_bytes)).convert('RGB')
+        ref_small = _downscale(ref_img_full, 512)
+        ref_small_np = _rgb_uint8_to_float(_pil_to_np_rgb(ref_small))
+        ref_lab = _rgb_to_lab_cv(ref_small_np)
+        ref_mean, ref_std = _lab_stats(ref_lab)
+        _cache_put(_REF_LAB_CACHE, ref_key, (ref_mean, ref_std))
+      else:
+        ref_mean, ref_std = cached
+      ref_cdf = None
+
+    # Process and upload each file
+    uploaded = []
+    date_prefix = _dt.utcnow().strftime('%Y/%m/%d')
+    stamp = int(_dt.utcnow().timestamp())
+
+    for uf in files:
+      try:
+        raw = await uf.read()
+        if not raw:
+          continue
+
+        # Process based on method
+        if use_method == 'histogram':
+          out_name, out_bytes = _process_blob(
+            raw, uf.filename or 'image.jpg', ref_cdf, fmt or 'jpg', float(quality or 0.92), None
+          )
+        else:
+          out_name, out_bytes = _process_blob_reinhard(
+            raw, uf.filename or 'image.jpg', ref_mean, ref_std, fmt or 'jpg', float(quality or 0.92), None
+          )
+
+        # Auto-embed IPTC/EXIF metadata if user has it enabled
+        try:
+          out_bytes = auto_embed_metadata_for_user(out_bytes, uid)
+        except Exception:
+          pass
+
+        # Generate key for watermarked folder (Gallery)
+        base = os.path.splitext(os.path.basename(uf.filename or 'image'))[0] or 'image'
+        orig_ext = (os.path.splitext(uf.filename or '')[1] or '.jpg').lower()
+        oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
+        out_ext = 'jpg' if (fmt or 'jpg').lower() in ('jpg', 'jpeg') else 'png'
+        key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-style-o{oext_token}.{out_ext}"
+
+        # Upload to R2/storage
+        url = upload_bytes(key, out_bytes, content_type=f'image/{out_ext}')
+        uploaded.append({"key": key, "url": url})
+
+        # Record in GalleryAsset
+        try:
+          existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+          if existing:
+            existing.user_uid = uid
+            existing.vault = None
+            existing.size_bytes = len(out_bytes)
+          else:
+            db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(out_bytes)))
+          db.commit()
+        except Exception:
+          try:
+            db.rollback()
+          except Exception:
+            pass
+
+        stamp += 1  # Increment to ensure unique keys
+
+      except Exception as ex:
+        logger.warning(f"Style to gallery failed for {getattr(uf, 'filename', '')}: {ex}")
+        continue
+
+    if not uploaded:
+      return JSONResponse({"error": "No images processed"}, status_code=400)
+
+    return {"ok": True, "uploaded": uploaded, "count": len(uploaded)}
+
+  except Exception as ex:
+    logger.exception(f"Style to gallery failed: {ex}")
     return JSONResponse({"error": str(ex)}, status_code=500)
