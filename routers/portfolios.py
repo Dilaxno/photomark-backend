@@ -300,28 +300,32 @@ async def delete_item(request: Request, pid: str, db: Session = Depends(get_db))
     return JSONResponse({"error": "delete failed"}, status_code=500)
 
 
+def _find_uid_by_owner_slug(db: Session, owner: str) -> Optional[str]:
+  """Helper to find user UID by owner slug."""
+  q = (owner or '').strip().lower()
+  if not q:
+    return None
+  users = db.query(User).all()
+  # Try display_name normalized
+  for u in users:
+    slug = _normalize_owner_slug(u)
+    if slug == q:
+      return u.uid
+  # Try email local-part match
+  for u in users:
+    local = (u.email or '').split('@')[0].strip().lower()
+    if local == q:
+      return u.uid
+  return None
+
+
 @router.get("/portfolios/{owner}")
 async def public_portfolio(owner: str, db: Session = Depends(get_db)):
   try:
-    user = None
     q = (owner or '').strip().lower()
     if not q:
       return JSONResponse({"error": "owner required"}, status_code=400)
-    # Try display_name normalized
-    users = db.query(User).all()
-    target_uid: Optional[str] = None
-    for u in users:
-      slug = _normalize_owner_slug(u)
-      if slug == q:
-        target_uid = u.uid
-        break
-    if not target_uid:
-      # Try email local-part match
-      for u in users:
-        local = (u.email or '').split('@')[0].strip().lower()
-        if local == q:
-          target_uid = u.uid
-          break
+    target_uid = _find_uid_by_owner_slug(db, owner)
     if not target_uid:
       return JSONResponse({"error": "not found"}, status_code=404)
     arr: List[dict] = _pg_list_items(db, target_uid)
@@ -350,6 +354,23 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
     return {"items": out}
   except Exception as ex:
     logger.warning(f"public_portfolio failed: {ex}")
+    return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.get("/portfolios/{owner}/settings")
+async def public_portfolio_settings(owner: str, db: Session = Depends(get_db)):
+  """Get portfolio settings for a public portfolio by owner slug."""
+  try:
+    q = (owner or '').strip().lower()
+    if not q:
+      return JSONResponse({"error": "owner required"}, status_code=400)
+    target_uid = _find_uid_by_owner_slug(db, owner)
+    if not target_uid:
+      return JSONResponse({"error": "not found"}, status_code=404)
+    data = _pg_get_settings(db, target_uid)
+    return {"ok": True, "data": data}
+  except Exception as ex:
+    logger.warning(f"public_portfolio_settings failed: {ex}")
     return JSONResponse({"error": "server error"}, status_code=500)
 
 
