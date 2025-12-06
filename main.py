@@ -536,12 +536,7 @@ try:
 except Exception as _ex:
     logger.warning(f"streamchat router not available: {_ex}")
 
-# Pinterest export endpoints
-try:
-    from routers import pinterest  # noqa: E402
-    app.include_router(pinterest.router)
-except Exception as _ex:
-    logger.warning(f"pinterest router not available: {_ex}")
+# Pinterest export endpoints removed
 
 # Imgur export endpoints (free, no OAuth required)
 try:
@@ -577,6 +572,13 @@ try:
     app.include_router(webflow.router)
 except Exception as _ex:
     logger.warning(f"webflow router not available: {_ex}")
+
+# Google Drive backup/sync endpoints
+try:
+    from routers import google_drive  # noqa: E402
+    app.include_router(google_drive.router)
+except Exception as _ex:
+    logger.warning(f"google_drive router not available: {_ex}")
 
 
 @app.get("/api/allow-domain")
