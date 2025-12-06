@@ -217,8 +217,11 @@ def _extract_payment_method(obj: dict, full: dict | None = None) -> dict:
                     pm_id = str((pm.get("payment_method_id") or pm.get("id") or "")).strip()
             except Exception:
                 pm_id = ""
+        # Fallback: sometimes we only have payment_id/id; use it as a stable key
+        if not pm_id:
+            pm_id = _g(("payment_id", "id"))
 
-        last4 = _g(("last4", "last4_digits", "last_4", "card_last4"))
+        last4 = _g(("last4", "last4_digits", "last_4", "card_last4", "card_last_four"))
         brand_raw = _g(("card_network", "card_brand", "brand", "network", "scheme"))
         typ_raw = _g(("payment_method_type", "paymentMethodType", "type"))
 
@@ -1129,11 +1132,65 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
     if evt_type == "payment.succeeded" and sub_id_early:
         # Check if we have product info
         has_product_info = bool(
-            event_obj.get("product_id") or 
-            event_obj.get("product_cart") or 
+            event_obj.get("product_id") or
+            event_obj.get("product_cart") or
             _deep_find_first(event_obj, ("product_id",))
         )
         if not has_product_info:
+            # Persist payment method even if we defer plan resolution to subscription.active
+            try:
+                if uid:
+                    user = db.query(User).filter(User.uid == uid).first()
+                    if user:
+                        meta_pm = user.extra_metadata or {}
+                        pm = _extract_payment_method(event_obj or {}, payload if isinstance(payload, dict) else None)
+                        if isinstance(pm, dict) and (pm.get("id") or pm.get("last4")):
+                            pm_list = list(meta_pm.get("paymentMethods") or [])
+                            updated = False
+                            for i, ex in enumerate(pm_list):
+                                try:
+                                    same_id = (ex.get("id") and pm.get("id") and str(ex.get("id")) == str(pm.get("id")))
+                                    same_fingerprint = (str(ex.get("type") or "") == str(pm.get("type") or "")) and (str(ex.get("last4") or "") == str(pm.get("last4") or ""))
+                                    if same_id or same_fingerprint:
+                                        keep_default = ex.get("isDefault") and not pm.get("isDefault")
+                                        merged = {**ex, **{k: v for k, v in pm.items() if v not in (None, "")}}
+                                        if keep_default:
+                                            merged["isDefault"] = True
+                                        pm_list[i] = merged
+                                        updated = True
+                                        break
+                                except Exception:
+                                    continue
+                            if not updated:
+                                any_default = any(bool(x.get("isDefault")) for x in pm_list)
+                                if not any_default:
+                                    pm["isDefault"] = True
+                                pm_list.append(pm)
+                            # Ensure only one default
+                            try:
+                                defaults = [i for i, x in enumerate(pm_list) if bool(x.get("isDefault"))]
+                                if len(defaults) > 1:
+                                    keep = defaults[-1]
+                                    for j, x in enumerate(pm_list):
+                                        x["isDefault"] = (j == keep)
+                            except Exception:
+                                pass
+                            meta_pm["paymentMethods"] = pm_list
+                            meta_pm["paymentMethod"] = {
+                                "brand": pm.get("type"),
+                                "last4": pm.get("last4"),
+                                "expiry": pm.get("expiry"),
+                                "isDefault": bool(pm.get("isDefault")),
+                            }
+                            user.extra_metadata = meta_pm
+                            db.commit()
+            except Exception as _pm_ex:
+                try:
+                    if hasattr(db, "rollback"):
+                        db.rollback()
+                except Exception:
+                    pass
+                logger.debug(f"[pricing.webhook] could not persist payment method on payment.succeeded defer: {_pm_ex}")
             logger.info(f"[pricing.webhook] payment.succeeded for subscription {sub_id_early} lacks product info, deferring to subscription.active")
             return {"ok": True, "deferred": True, "reason": "subscription_payment_deferred_to_active", "subscription_id": sub_id_early}
 
