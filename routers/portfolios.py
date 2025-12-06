@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from core.config import logger
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.storage import write_json_key, read_json_key, upload_bytes, get_presigned_url
+from utils.metadata import auto_embed_metadata_for_user
 from models.gallery import GalleryAsset
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -206,6 +207,13 @@ async def create_item(request: Request, file: UploadFile = File(...), title: str
       return JSONResponse({"error": "empty file"}, status_code=400)
     filename = file.filename or 'image.jpg'
     ext = os.path.splitext(filename)[1].lower() or '.jpg'
+    
+    # Auto-embed IPTC/EXIF metadata if user has it enabled
+    try:
+      raw = auto_embed_metadata_for_user(raw, uid)
+    except Exception as meta_ex:
+      logger.debug(f"Metadata embed skipped: {meta_ex}")
+    
     pid = uuid.uuid4().hex[:12]
     key = _file_key(uid, pid, ext)
     url = upload_bytes(key, raw, content_type={

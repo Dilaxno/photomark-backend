@@ -12,6 +12,7 @@ from core.config import MAX_FILES, logger
 from core.auth import resolve_workspace_uid, has_role_access
 from utils.smart_crop import SmartCropper, parse_presets
 from utils.storage import upload_bytes
+from utils.metadata import auto_embed_metadata_for_user
 
 router = APIRouter(prefix="", tags=["smart-resize"])  # public-style endpoints
 
@@ -191,8 +192,16 @@ async def smart_resize_upload(
                 q_use = int(q_map.get(name, q_global))
                 out_img.convert("RGB").save(buf, format="JPEG", quality=q_use, subsampling=0, progressive=True, optimize=True)
                 buf.seek(0)
+                
+                # Auto-embed IPTC/EXIF metadata if user has it enabled
+                output_bytes = buf.getvalue()
+                try:
+                    output_bytes = auto_embed_metadata_for_user(output_bytes, uid)
+                except Exception:
+                    pass
+                
                 key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-{name}-sr-o{oext_token}.jpg"
-                url = upload_bytes(key, buf.getvalue(), content_type='image/jpeg')
+                url = upload_bytes(key, output_bytes, content_type='image/jpeg')
                 uploaded.append({"key": key, "url": url, "preset": name})
         except Exception as ex:
             logger.warning(f"smart-resize upload failed for {getattr(uf,'filename','')}: {ex}")

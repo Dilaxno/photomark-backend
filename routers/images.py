@@ -10,6 +10,7 @@ from PIL import Image
 from core.config import MAX_FILES, logger
 from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
 from utils.storage import upload_bytes
+from utils.metadata import auto_embed_metadata_for_user
 from sqlalchemy.orm import Session
 from fastapi import Depends
 from core.database import get_db
@@ -220,15 +221,24 @@ async def images_watermark(
     stamp = int(_dt.utcnow().timestamp())
     suffix = "sig" if (use_signature and signature_bytes) else "txt"
 
-    # 1) Save ORIGINAL as-is
+    # 1) Save ORIGINAL as-is (with metadata if enabled)
+    original_data = raw
+    try:
+        original_data = auto_embed_metadata_for_user(raw, uid)
+    except Exception:
+        pass
     original_key = f"users/{uid}/originals/{date_prefix}/{base}-{stamp}-orig{orig_ext}"
-    original_url = upload_bytes(original_key, raw, content_type=orig_ct)
+    original_url = upload_bytes(original_key, original_data, content_type=orig_ct)
 
-    # 2) Save WATERMARKED with original ext token for mapping
+    # 2) Save WATERMARKED with original ext token for mapping (with metadata if enabled)
     oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
     key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-{suffix}-o{oext_token}.jpg"
 
     data_wm = buf.getvalue()
+    try:
+        data_wm = auto_embed_metadata_for_user(data_wm, uid)
+    except Exception:
+        pass
     url = upload_bytes(key, data_wm, content_type="image/jpeg")
     try:
         # Record both assets

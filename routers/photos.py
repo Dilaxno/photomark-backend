@@ -11,6 +11,7 @@ from core.database import get_db
 from models.gallery import GalleryAsset
 from core.auth import get_uid_from_request, resolve_workspace_uid, has_role_access
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
+from utils.metadata import auto_embed_metadata_for_user
 from utils.invisible_mark import detect_signature, PAYLOAD_LEN
 from io import BytesIO
 from PIL import Image
@@ -1073,6 +1074,11 @@ async def api_photos_remove_watermark(request: Request, payload: dict = Body(...
                 out_bytes = buf.getvalue()
             except Exception:
                 return JSONResponse({"error": "Failed to convert original"}, status_code=500)
+        # Auto-embed IPTC/EXIF metadata if user has it enabled
+        try:
+            out_bytes = auto_embed_metadata_for_user(out_bytes, uid)
+        except Exception:
+            pass
         # Write back to the same watermarked key to effectively remove watermark
         _ = upload_bytes(key, out_bytes, content_type="image/jpeg")
         return {"ok": True, "key": key}

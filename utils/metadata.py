@@ -282,3 +282,59 @@ def read_metadata(image_bytes: bytes) -> dict:
     except Exception as e:
         logger.debug(f"Failed to read metadata: {e}")
         return {}
+
+
+def auto_embed_metadata_for_user(
+    image_bytes: bytes,
+    uid: str,
+    preserve_existing: bool = True
+) -> bytes:
+    """
+    Automatically embed metadata for a user if they have auto-embed enabled.
+    
+    This is a convenience function that:
+    1. Checks if the user has auto_embed enabled in their settings
+    2. If enabled and they have photographer_name set, embeds metadata
+    3. Returns the original bytes if auto-embed is disabled or settings are missing
+    
+    Args:
+        image_bytes: Raw image bytes
+        uid: User ID to load settings for
+        preserve_existing: If True, merge with existing EXIF data
+    
+    Returns:
+        Image bytes (with metadata if auto-embed is enabled, original otherwise)
+    """
+    try:
+        from utils.storage import read_json_key
+        
+        # Load user's metadata settings
+        meta_data = read_json_key(f"users/{uid}/settings/metadata.json") or {}
+        auto_embed = bool(meta_data.get("auto_embed", False))
+        
+        if not auto_embed:
+            return image_bytes
+        
+        if not meta_data.get("photographer_name"):
+            return image_bytes
+        
+        # Check if this is an image format we can process
+        # Only process JPEG/PNG/WebP - skip RAW files
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            if img.format not in ('JPEG', 'PNG', 'WEBP', 'MPO'):
+                logger.debug(f"Skipping metadata embed for format: {img.format}")
+                return image_bytes
+        except Exception:
+            return image_bytes
+        
+        # Build settings and embed
+        settings = MetadataSettings.from_dict(meta_data)
+        result_bytes = embed_metadata_to_bytes(image_bytes, settings, preserve_existing)
+        
+        logger.debug(f"Auto-embedded metadata for user {uid}")
+        return result_bytes
+        
+    except Exception as e:
+        logger.warning(f"Failed to auto-embed metadata for user {uid}: {e}")
+        return image_bytes

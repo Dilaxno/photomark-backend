@@ -44,6 +44,7 @@ from utils.watermark import (
 )
 from utils.storage import upload_bytes, read_json_key
 from utils.invisible_mark import embed_signature as embed_invisible, build_payload_for_uid
+from utils.metadata import auto_embed_metadata_for_user
 from sqlalchemy.orm import Session
 from core.database import get_db
 from models.gallery import GalleryAsset
@@ -334,6 +335,12 @@ async def upload_external(
                 '.heic': 'image/heic', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.gif': 'image/gif'
             }
             orig_ct = ct_map.get(orig_ext, 'application/octet-stream')
+
+            # Auto-embed IPTC/EXIF metadata if user has it enabled
+            try:
+                raw = auto_embed_metadata_for_user(raw, uid)
+            except Exception as meta_ex:
+                logger.debug(f"Metadata embed skipped: {meta_ex}")
 
             date_prefix = _dt.utcnow().strftime('%Y/%m/%d')
             base = os.path.splitext(os.path.basename(uf.filename or 'upload'))[0] or 'upload'

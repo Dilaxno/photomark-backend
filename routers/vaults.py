@@ -18,6 +18,7 @@ import bcrypt
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
+from utils.metadata import auto_embed_metadata_for_user
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
@@ -666,6 +667,12 @@ async def vaults_upload(
             ext = os.path.splitext(orig_filename)[1].lower()
             if not ext or ext not in ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.gif', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.sr2', '.srf', '.srw', '.orf', '.raf', '.rw2', '.rwl', '.pef', '.dng', '.3fr', '.erf', '.kdc', '.mrw', '.x3f', '.mef', '.iiq', '.fff']:
                 ext = '.jpg'
+            
+            # Auto-embed IPTC/EXIF metadata if user has it enabled
+            try:
+                raw = auto_embed_metadata_for_user(raw, uid)
+            except Exception as meta_ex:
+                logger.debug(f"Metadata embed skipped: {meta_ex}")
             
             # Generate unique key in user's vault space
             ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
@@ -3153,6 +3160,13 @@ async def retouch_upload_final(request: Request, id: str = Form(...), file: Uplo
             ".tiff": "image/tiff",
         }
         ct = ct_map.get(ext, "application/octet-stream")
+        
+        # Auto-embed IPTC/EXIF metadata if user has it enabled
+        try:
+            data = auto_embed_metadata_for_user(data, uid)
+        except Exception as meta_ex:
+            logger.debug(f"Metadata embed skipped: {meta_ex}")
+        
         # Overwrite object in-place so that existing keys/approvals remain intact
         try:
             upload_bytes(key, data, content_type=ct)

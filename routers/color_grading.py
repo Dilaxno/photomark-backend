@@ -13,6 +13,7 @@ from PIL import Image
 from datetime import datetime as _dt
 from core.auth import resolve_workspace_uid, has_role_access
 from utils.storage import upload_bytes, read_json_key, write_json_key
+from utils.metadata import auto_embed_metadata_for_user
 
 router = APIRouter(prefix="/api", tags=["color-grading"])
 
@@ -383,7 +384,14 @@ async def apply_to_gallery(request: Request, images: List[UploadFile] = File(...
       oext_token = (orig_ext.lstrip('.') or 'jpg').lower()
       key = f"users/{uid}/watermarked/{date_prefix}/{base}-{stamp}-lut-o{oext_token}.jpg"
 
-      url = upload_bytes(key, buf.getvalue(), content_type='image/jpeg')
+      # Auto-embed IPTC/EXIF metadata if user has it enabled
+      output_bytes = buf.getvalue()
+      try:
+        output_bytes = auto_embed_metadata_for_user(output_bytes, uid)
+      except Exception:
+        pass
+
+      url = upload_bytes(key, output_bytes, content_type='image/jpeg')
       uploaded.append({"key": key, "url": url})
     except Exception:
       continue

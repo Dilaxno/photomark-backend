@@ -221,18 +221,54 @@ def _extract_payment_method(obj: dict, full: dict | None = None) -> dict:
         if not pm_id:
             pm_id = _g(("payment_id", "id"))
 
-        last4 = _g(("last4", "last4_digits", "last_4", "card_last4", "card_last_four"))
-        brand_raw = _g(("card_network", "card_brand", "brand", "network", "scheme"))
+        last4 = _g(("last4", "last4_digits", "last_4", "card_last4", "card_last_four", "lastFour", "last_four"))
+        brand_raw = _g(("card_network", "card_brand", "brand", "network", "scheme", "card_type", "cardType"))
         typ_raw = _g(("payment_method_type", "paymentMethodType", "type"))
 
-        exp_m = _g(("expiry_month", "exp_month", "card_expiry_month"))
-        exp_y = _g(("expiry_year", "exp_year", "card_expiry_year"))
+        exp_m = _g(("expiry_month", "exp_month", "card_expiry_month", "expiryMonth"))
+        exp_y = _g(("expiry_year", "exp_year", "card_expiry_year", "expiryYear"))
+
+        # Try to extract from nested card object if not found
+        if not last4 or not brand_raw:
+            try:
+                # Check for nested card object in various locations
+                card_obj = None
+                for src in [obj, full]:
+                    if not isinstance(src, dict):
+                        continue
+                    card_obj = (
+                        src.get("card") or 
+                        src.get("card_details") or 
+                        src.get("payment_method", {}).get("card") if isinstance(src.get("payment_method"), dict) else None
+                    )
+                    if isinstance(card_obj, dict):
+                        break
+                    # Check in data.object.card
+                    data = src.get("data")
+                    if isinstance(data, dict):
+                        obj_inner = data.get("object")
+                        if isinstance(obj_inner, dict):
+                            card_obj = obj_inner.get("card") or obj_inner.get("card_details")
+                            if isinstance(card_obj, dict):
+                                break
+                
+                if isinstance(card_obj, dict):
+                    if not last4:
+                        last4 = str(card_obj.get("last4") or card_obj.get("last_4") or card_obj.get("last4_digits") or "").strip()
+                    if not brand_raw:
+                        brand_raw = str(card_obj.get("brand") or card_obj.get("network") or card_obj.get("card_brand") or "").strip()
+                    if not exp_m:
+                        exp_m = str(card_obj.get("exp_month") or card_obj.get("expiry_month") or "").strip()
+                    if not exp_y:
+                        exp_y = str(card_obj.get("exp_year") or card_obj.get("expiry_year") or "").strip()
+            except Exception:
+                pass
 
         expiry = ""
         try:
             if exp_m and exp_y:
-                mm = exp_m.zfill(2)
-                yy = exp_y[-2:]
+                mm = str(exp_m).zfill(2)
+                yy = str(exp_y)[-2:]
                 expiry = f"{mm}/{yy}"
         except Exception:
             expiry = ""
@@ -245,6 +281,14 @@ def _extract_payment_method(obj: dict, full: dict | None = None) -> dict:
             t = "mastercard"
         elif "amex" in b or "american" in b:
             t = "amex"
+        elif "discover" in b:
+            t = "discover"
+        elif "diners" in b:
+            t = "diners"
+        elif "jcb" in b:
+            t = "jcb"
+        elif "unionpay" in b or "union" in b:
+            t = "unionpay"
         else:
             t = (typ_raw or "card").lower()
 
