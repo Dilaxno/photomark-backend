@@ -46,13 +46,22 @@ def send_email_smtp(
     reply_to: Optional[str] = None,
     from_name: Optional[str] = None,
     attachments: Optional[list[dict]] = None,
+    list_unsubscribe: Optional[str] = None,
 ) -> bool:
+    import uuid
+    from datetime import datetime
     try:
         if not SMTP_HOST or not SMTP_PASS or not MAIL_FROM:
             logger.error("SMTP not configured; cannot send email")
             return False
         sender = (from_addr or MAIL_FROM).strip()
-        display_from = f"{from_name} <{sender}>" if from_name and "<" not in sender else sender
+        # Use app name as default from_name for better deliverability
+        effective_from_name = from_name or APP_NAME
+        display_from = f"{effective_from_name} <{sender}>" if effective_from_name and "<" not in sender else sender
+
+        # Generate Message-ID for better deliverability
+        domain = sender.split("@")[-1] if "@" in sender else "photomark.cloud"
+        message_id = f"<{uuid.uuid4()}@{domain}>"
 
         has_attachments = bool(attachments)
         if has_attachments:
@@ -60,8 +69,13 @@ def send_email_smtp(
             outer["Subject"] = subject
             outer["From"] = display_from
             outer["To"] = to_addr
+            outer["Message-ID"] = message_id
+            outer["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
             if reply_to:
                 outer["Reply-To"] = reply_to
+            if list_unsubscribe:
+                outer["List-Unsubscribe"] = f"<{list_unsubscribe}>"
+                outer["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
             # Alternative part (text + html)
             alt = MIMEMultipart("alternative")
             if not text:
@@ -98,8 +112,13 @@ def send_email_smtp(
             msg["Subject"] = subject
             msg["From"] = display_from
             msg["To"] = to_addr
+            msg["Message-ID"] = message_id
+            msg["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
             if reply_to:
                 msg["Reply-To"] = reply_to
+            if list_unsubscribe:
+                msg["List-Unsubscribe"] = f"<{list_unsubscribe}>"
+                msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
             if not text:
                 text = "Open this link in an HTML-capable email client."
             msg.attach(MIMEText(text or "", "plain", _charset="utf-8"))

@@ -571,6 +571,13 @@ try:
 except Exception as _ex:
     logger.warning(f"unsplash router not available: {_ex}")
 
+# Webflow CMS export endpoints (portfolio websites)
+try:
+    from routers import webflow  # noqa: E402
+    app.include_router(webflow.router)
+except Exception as _ex:
+    logger.warning(f"webflow router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
