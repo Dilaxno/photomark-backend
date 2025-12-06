@@ -95,16 +95,18 @@ async def public_endpoints_cors(request: Request, call_next):
                 status_code=200,
                 headers={
                     "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                     "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Allow-Credentials": "true",
                     "Access-Control-Max-Age": "86400",
                 }
             )
         # For actual requests, proceed and add CORS headers to response
         response = await call_next(request)
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
         return response
     
     return await call_next(request)
