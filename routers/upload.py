@@ -187,15 +187,27 @@ async def upload(
             except Exception as _ex:
                 logger.warning(f"invisible embed failed: {_ex}")
 
-            # Encode watermarked JPEG with optional EXIF Artist
+            # Encode watermarked JPEG with optional EXIF metadata
             buf = io.BytesIO()
             try:
-                import piexif  # type: ignore
-                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
-                if (artist or '').strip():
-                    exif_dict["0th"][piexif.ImageIFD.Artist] = artist  # type: ignore[attr-defined]
-                exif_bytes = piexif.dump(exif_dict)
-                out.save(buf, format="JPEG", quality=95, subsampling=0, progressive=True, optimize=True, exif=exif_bytes)
+                # Check if user has auto-embed metadata enabled
+                from utils.metadata import MetadataSettings, embed_metadata
+                meta_data = read_json_key(f"users/{uid}/settings/metadata.json") or {}
+                auto_embed = bool(meta_data.get("auto_embed", False))
+                
+                if auto_embed and meta_data.get("photographer_name"):
+                    # Use full metadata settings
+                    settings = MetadataSettings.from_dict(meta_data)
+                    _, jpeg_bytes = embed_metadata(out, settings)
+                    buf.write(jpeg_bytes)
+                else:
+                    # Fallback to basic artist field
+                    import piexif  # type: ignore
+                    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
+                    if (artist or '').strip():
+                        exif_dict["0th"][piexif.ImageIFD.Artist] = artist  # type: ignore[attr-defined]
+                    exif_bytes = piexif.dump(exif_dict)
+                    out.save(buf, format="JPEG", quality=95, subsampling=0, progressive=True, optimize=True, exif=exif_bytes)
             except Exception:
                 out.save(buf, format="JPEG", quality=95, subsampling=0, progressive=True, optimize=True)
             buf.seek(0)
@@ -448,15 +460,27 @@ async def process_watermark_zip(
             except Exception as _ex:
                 logger.warning(f"invisible embed (zip) failed: {_ex}")
 
-            # Encode JPEG with optional EXIF Artist
+            # Encode JPEG with optional EXIF metadata
             buf = io.BytesIO()
             try:
-                import piexif  # type: ignore
-                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
-                if (artist or '').strip():
-                    exif_dict["0th"][piexif.ImageIFD.Artist] = artist  # type: ignore[attr-defined]
-                exif_bytes = piexif.dump(exif_dict)
-                out.save(buf, format="JPEG", quality=95, subsampling=0, progressive=True, optimize=True, exif=exif_bytes)
+                # Check if user has auto-embed metadata enabled
+                from utils.metadata import MetadataSettings, embed_metadata
+                meta_data = read_json_key(f"users/{uid}/settings/metadata.json") or {}
+                auto_embed = bool(meta_data.get("auto_embed", False))
+                
+                if auto_embed and meta_data.get("photographer_name"):
+                    # Use full metadata settings
+                    settings = MetadataSettings.from_dict(meta_data)
+                    _, jpeg_bytes = embed_metadata(out, settings)
+                    buf.write(jpeg_bytes)
+                else:
+                    # Fallback to basic artist field
+                    import piexif  # type: ignore
+                    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
+                    if (artist or '').strip():
+                        exif_dict["0th"][piexif.ImageIFD.Artist] = artist  # type: ignore[attr-defined]
+                    exif_bytes = piexif.dump(exif_dict)
+                    out.save(buf, format="JPEG", quality=95, subsampling=0, progressive=True, optimize=True, exif=exif_bytes)
             except Exception:
                 out.save(buf, format="JPEG", quality=95, subsampling=0, progressive=True, optimize=True)
             buf.seek(0)

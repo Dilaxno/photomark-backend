@@ -443,6 +443,13 @@ from routers import auth_ip, account  # noqa: E402
 app.include_router(auth_ip.router)
 app.include_router(account.router)
 
+# IPTC/EXIF metadata embedding endpoints
+try:
+    from routers import metadata  # noqa: E402
+    app.include_router(metadata.router)
+except Exception as _ex:
+    logger.warning(f"metadata router not available: {_ex}")
+
 # retouch endpoints (AI background)
 
 # retouch result upload endpoint
