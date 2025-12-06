@@ -17,7 +17,7 @@ from core.auth import (
 from sqlalchemy.orm import Session
 from core.database import get_db, SessionLocal
 from models.user import User
-from models.pricing import PricingEvent, Subscription
+from models.pricing import PricingEvent, Subscription, Invoice, PaymentMethod
 from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
 from models.shop_sales import ShopSale
 from models.shop import ShopSlug
@@ -1419,6 +1419,74 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                 "expiry": pm.get("expiry"),
                 "isDefault": bool(pm.get("isDefault")),
             }
+            
+            # Save payment method to Neon PostgreSQL database
+            try:
+                pm_id = str(pm.get("id") or "").strip()
+                pm_type = str(pm.get("type") or "card").strip().lower()
+                pm_last4 = str(pm.get("last4") or "").strip()[-4:] if pm.get("last4") else None
+                pm_expiry = str(pm.get("expiry") or "").strip() if pm.get("expiry") else None
+                pm_is_default = 1 if pm.get("isDefault") else 0
+                
+                # Parse expiry into month/year
+                pm_exp_month = None
+                pm_exp_year = None
+                if pm_expiry and "/" in pm_expiry:
+                    parts = pm_expiry.split("/")
+                    if len(parts) == 2:
+                        pm_exp_month = parts[0].strip()
+                        pm_exp_year = parts[1].strip()
+                
+                # Check if payment method already exists
+                existing_pm = None
+                if pm_id:
+                    existing_pm = db.query(PaymentMethod).filter(
+                        PaymentMethod.user_uid == uid,
+                        PaymentMethod.payment_method_id == pm_id
+                    ).first()
+                
+                if not existing_pm and pm_last4:
+                    # Try to find by fingerprint (type + last4)
+                    existing_pm = db.query(PaymentMethod).filter(
+                        PaymentMethod.user_uid == uid,
+                        PaymentMethod.type == pm_type,
+                        PaymentMethod.last4 == pm_last4
+                    ).first()
+                
+                if existing_pm:
+                    # Update existing payment method
+                    if pm_expiry:
+                        existing_pm.expiry = pm_expiry
+                        existing_pm.expiry_month = pm_exp_month
+                        existing_pm.expiry_year = pm_exp_year
+                    existing_pm.is_default = pm_is_default
+                    existing_pm.updated_at = datetime.utcnow()
+                else:
+                    # Create new payment method
+                    new_pm = PaymentMethod(
+                        payment_method_id=pm_id or f"{pm_type}-{pm_last4 or 'xxxx'}",
+                        user_uid=uid,
+                        type=pm_type,
+                        last4=pm_last4,
+                        expiry=pm_expiry,
+                        expiry_month=pm_exp_month,
+                        expiry_year=pm_exp_year,
+                        brand=pm_type.title() if pm_type else None,
+                        is_default=pm_is_default,
+                    )
+                    db.add(new_pm)
+                
+                # If this is default, unset other defaults
+                if pm_is_default:
+                    db.query(PaymentMethod).filter(
+                        PaymentMethod.user_uid == uid,
+                        PaymentMethod.payment_method_id != (pm_id or f"{pm_type}-{pm_last4 or 'xxxx'}")
+                    ).update({"is_default": 0})
+                
+                logger.info(f"[pricing.webhook] saved payment method to Neon DB for user {uid}")
+            except Exception as pm_db_ex:
+                logger.warning(f"[pricing.webhook] failed to save payment method to Neon DB: {pm_db_ex}")
+                # Don't fail the main operation
 
         meta.update({
             "isPaid": True,
@@ -1493,6 +1561,241 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         )
     except Exception:
         pass
+
+    # --- Step 11: Save invoice to Firestore for user billing history ---
+    try:
+        # Extract invoice/payment details from webhook
+        payment_id = _deep_find_first(event_obj, ("payment_id", "paymentId", "id")) if isinstance(event_obj, dict) else ""
+        if not payment_id and isinstance(payload, dict):
+            payment_id = _deep_find_first(payload, ("payment_id", "paymentId", "id"))
+        
+        # Get amount
+        amount_cents = 0
+        try:
+            amount_raw = (
+                event_obj.get("amount") or event_obj.get("total") or 
+                event_obj.get("amount_total") or event_obj.get("grand_total") or 0
+            )
+            amount_cents = int(amount_raw) if amount_raw else 0
+        except Exception:
+            pass
+        
+        # Get currency
+        currency = "USD"
+        try:
+            currency_raw = event_obj.get("currency") or event_obj.get("currency_code") or "USD"
+            currency = str(currency_raw).upper()
+        except Exception:
+            pass
+        
+        # Get invoice URL if provided by Dodo
+        invoice_url = ""
+        try:
+            invoice_url = _deep_find_first(event_obj, ("invoice_url", "invoiceUrl", "receipt_url", "receiptUrl")) if isinstance(event_obj, dict) else ""
+            if not invoice_url and isinstance(payload, dict):
+                invoice_url = _deep_find_first(payload, ("invoice_url", "invoiceUrl", "receipt_url", "receiptUrl"))
+        except Exception:
+            pass
+        
+        # Get payment date
+        payment_date = datetime.utcnow().isoformat().split("T")[0]
+        try:
+            created_at = event_obj.get("created_at") or event_obj.get("paid_at") or payload.get("created_at")
+            if created_at:
+                if isinstance(created_at, str):
+                    payment_date = created_at.split("T")[0]
+                elif isinstance(created_at, (int, float)):
+                    payment_date = datetime.utcfromtimestamp(created_at).isoformat().split("T")[0]
+        except Exception:
+            pass
+        
+        # Generate invoice ID
+        invoice_id = payment_id or f"INV-{uuid.uuid4().hex[:8].upper()}"
+        
+        # Plan display name
+        plan_display = {
+            "individual": "Individual Plan",
+            "studios": "Studios Plan", 
+            "golden": "Golden Lifetime Plan"
+        }.get(plan, plan.title() + " Plan")
+        
+        # Billing cycle display
+        billing_display = ""
+        if billing_cycle:
+            billing_display = f" ({billing_cycle.title()})"
+        
+        # Save invoice to Neon PostgreSQL database
+        try:
+            # Check for duplicate invoice
+            existing_invoice = db.query(Invoice).filter(Invoice.invoice_id == invoice_id).first()
+            if not existing_invoice:
+                # Parse invoice date
+                invoice_datetime = datetime.utcnow()
+                try:
+                    if payment_date:
+                        invoice_datetime = datetime.strptime(payment_date, "%Y-%m-%d")
+                except Exception:
+                    pass
+                
+                new_invoice = Invoice(
+                    invoice_id=invoice_id,
+                    user_uid=uid,
+                    payment_id=payment_id or None,
+                    subscription_id=sub_id or None,
+                    amount=round(amount_cents / 100, 2) if amount_cents else 0,
+                    currency=currency,
+                    status="paid",
+                    plan=plan,
+                    plan_display=plan_display + billing_display,
+                    billing_cycle=billing_cycle or None,
+                    download_url=invoice_url or None,
+                    invoice_date=invoice_datetime,
+                )
+                db.add(new_invoice)
+                db.commit()
+                logger.info(f"[pricing.webhook] saved invoice {invoice_id} to Neon DB for user {uid}")
+            else:
+                logger.info(f"[pricing.webhook] invoice {invoice_id} already exists in Neon DB")
+        except Exception as neon_ex:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.warning(f"[pricing.webhook] failed to save invoice to Neon DB: {neon_ex}")
+        
+        # Also save invoice to Firestore as backup
+        if firebase_enabled:
+            from firebase_admin import firestore as fb_firestore
+            try:
+                fdb = fb_firestore.client()
+                invoice_ref = fdb.collection("users").document(uid).collection("invoices").document(invoice_id)
+                invoice_ref.set({
+                    "id": invoice_id,
+                    "date": payment_date,
+                    "amount": amount_cents / 100 if amount_cents else 0,
+                    "currency": currency,
+                    "status": "paid",
+                    "plan": plan,
+                    "planDisplay": plan_display + billing_display,
+                    "billingCycle": billing_cycle or None,
+                    "downloadUrl": invoice_url or None,
+                    "paymentId": payment_id or None,
+                    "subscriptionId": sub_id or None,
+                    "createdAt": datetime.utcnow(),
+                })
+                logger.info(f"[pricing.webhook] saved invoice {invoice_id} to Firestore for user {uid}")
+            except Exception as inv_ex:
+                logger.warning(f"[pricing.webhook] failed to save invoice to Firestore: {inv_ex}")
+        
+        # Also save to R2 storage as backup
+        try:
+            invoices_key = f"users/{uid}/billing/invoices.json"
+            existing = read_json_key(invoices_key) or []
+            if not isinstance(existing, list):
+                existing = []
+            
+            # Check for duplicate
+            if not any(inv.get("id") == invoice_id for inv in existing):
+                existing.append({
+                    "id": invoice_id,
+                    "date": payment_date,
+                    "amount": amount_cents / 100 if amount_cents else 0,
+                    "currency": currency,
+                    "status": "paid",
+                    "plan": plan,
+                    "planDisplay": plan_display + billing_display,
+                    "billingCycle": billing_cycle or None,
+                    "downloadUrl": invoice_url or None,
+                    "paymentId": payment_id or None,
+                    "subscriptionId": sub_id or None,
+                })
+                # Keep last 100 invoices
+                existing = existing[-100:]
+                write_json_key(invoices_key, existing)
+        except Exception as r2_ex:
+            logger.warning(f"[pricing.webhook] failed to save invoice to R2: {r2_ex}")
+        
+        # --- Step 12: Send invoice email to user ---
+        try:
+            # Get user email
+            user_email = ""
+            try:
+                user_record = db.query(User).filter(User.uid == uid).first()
+                if user_record and user_record.email:
+                    user_email = user_record.email
+            except Exception:
+                pass
+            
+            # Fallback to email from webhook payload
+            if not user_email:
+                user_email = _first_email_from_payload(payload) or _first_email_from_payload(event_obj or {})
+            
+            if user_email:
+                # Format amount for display
+                amount_display = f"${(amount_cents / 100):.2f} {currency}" if amount_cents else "$0.00 USD"
+                
+                # Get frontend URL
+                frontend_origin = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud"
+                billing_url = f"{frontend_origin}/billing"
+                
+                # Plan features based on plan type
+                features = []
+                if plan == "individual":
+                    features = [
+                        "All available tools",
+                        "Up to 100,000 photos",
+                        "Priority support",
+                        "All future updates",
+                    ]
+                elif plan == "studios":
+                    features = [
+                        "All available tools",
+                        "Unlimited photos",
+                        "Team workflow tools",
+                        "Priority support",
+                    ]
+                elif plan == "golden":
+                    features = [
+                        "All Studios features",
+                        "Unlimited everything",
+                        "No recurring payments",
+                        "Lifetime updates",
+                    ]
+                
+                # Render email template
+                html = render_email(
+                    "invoice_notification.html",
+                    subject_line="Payment Receipt",
+                    heading="🎉 Thank you for your purchase!",
+                    subheading=f"Your payment has been processed successfully. Welcome to {plan_display}!",
+                    invoice_id=invoice_id,
+                    invoice_date=payment_date,
+                    plan_display=plan_display,
+                    billing_cycle=billing_cycle.title() if billing_cycle else None,
+                    amount=amount_display,
+                    is_golden=(plan == "golden"),
+                    features=features,
+                    billing_url=billing_url,
+                    download_url=invoice_url or None,
+                )
+                
+                # Send email
+                send_email_smtp(
+                    to_addr=user_email,
+                    subject=f"Payment Receipt - {plan_display}",
+                    html=html,
+                    from_addr="billing@photomark.cloud",
+                    from_name="Photomark Billing",
+                )
+                logger.info(f"[pricing.webhook] sent invoice email to {user_email} for invoice {invoice_id}")
+            else:
+                logger.warning(f"[pricing.webhook] no email found for user {uid}, skipping invoice email")
+        except Exception as email_ex:
+            logger.warning(f"[pricing.webhook] failed to send invoice email: {email_ex}")
+            # Don't fail the webhook if email fails
+            
+    except Exception as inv_err:
+        logger.warning(f"[pricing.webhook] invoice save error: {inv_err}")
 
     logger.info(f"[pricing.webhook] completed upgrade: uid={uid} plan={plan}")
     return {"ok": True, "upgraded": True, "uid": uid, "plan": plan}

@@ -5,11 +5,13 @@ from sqlalchemy.sql import func
 from datetime import datetime
 import os
 
-from core.auth import get_uid_from_request
+from core.auth import get_uid_from_request, firebase_enabled
 from core.database import get_db
 from models.user import User
 from models.gallery import GalleryAsset
-from core.config import s3, R2_BUCKET, STATIC_DIR as static_dir
+from models.pricing import Invoice, PaymentMethod
+from core.config import s3, R2_BUCKET, STATIC_DIR as static_dir, logger
+from utils.storage import read_json_key
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
@@ -87,11 +89,8 @@ async def billing_payment_methods(request: Request, db: Session = Depends(get_db
     """
     Return the customer's saved payment methods.
 
-    Source of truth:
-    - Stored on User.extra_metadata.paymentMethods as a list of:
-      { id, type, last4, expiry, isDefault }
-    - Backward-compat: if only extra_metadata.paymentMethod (single) exists,
-      convert it into a single-element list.
+    Primary source: Neon PostgreSQL database (payment_methods table)
+    Fallback: User.extra_metadata.paymentMethods for legacy data
 
     Response:
       { "methods": [ { id, type, last4, expiry, isDefault } ] }
@@ -104,6 +103,39 @@ async def billing_payment_methods(request: Request, db: Session = Depends(get_db
         if not user:
             return JSONResponse({"error": "User not found"}, status_code=404)
 
+        out = []
+        seen_ids = set()
+        
+        # Primary source: Neon PostgreSQL database
+        try:
+            db_methods = db.query(PaymentMethod).filter(PaymentMethod.user_uid == uid).order_by(PaymentMethod.is_default.desc(), PaymentMethod.created_at.desc()).all()
+            for pm in db_methods:
+                pm_id = pm.payment_method_id
+                if pm_id in seen_ids:
+                    continue
+                seen_ids.add(pm_id)
+                
+                # Normalize type
+                t = str(pm.type or "card").strip().lower()
+                if "visa" in t:
+                    t = "visa"
+                elif "master" in t:
+                    t = "mastercard"
+                elif "amex" in t or "american" in t:
+                    t = "amex"
+                
+                out.append({
+                    "id": pm_id,
+                    "type": t,
+                    "last4": pm.last4 or "",
+                    "expiry": pm.expiry or "",
+                    "isDefault": bool(pm.is_default),
+                })
+            logger.info(f"[billing.payment-methods] fetched {len(db_methods)} methods from Neon DB for user {uid}")
+        except Exception as db_ex:
+            logger.warning(f"[billing.payment-methods] Neon DB fetch failed: {db_ex}")
+
+        # Fallback: User metadata for legacy payment methods
         meta = user.extra_metadata or {}
         methods = meta.get("paymentMethods") or []
 
@@ -119,7 +151,6 @@ async def billing_payment_methods(request: Request, db: Session = Depends(get_db
             }
             methods = [normalized]
 
-        out = []
         if isinstance(methods, list):
             for m in methods:
                 if not isinstance(m, dict):
@@ -132,9 +163,14 @@ async def billing_payment_methods(request: Request, db: Session = Depends(get_db
                     t = "mastercard"
                 elif "amex" in t or "american" in t:
                     t = "amex"
-                # Keep non-card types as-is (apple_pay, google_pay, paypal, sepa, ach, wallet, etc.)
+                
+                pm_id = str((m.get("id") or m.get("payment_method_id") or "")).strip() or f"{t}-{str(m.get('last4') or '')[-4:]}"
+                if pm_id in seen_ids:
+                    continue
+                seen_ids.add(pm_id)
+                
                 out.append({
-                    "id": str((m.get("id") or m.get("payment_method_id") or "")).strip() or f"{t}-{str(m.get('last4') or '')[-4:]}",
+                    "id": pm_id,
                     "type": t,
                     "last4": str((m.get("last4") or m.get("last4_digits") or "")).strip()[-4:],
                     "expiry": str(m.get("expiry") or "").strip(),
@@ -336,3 +372,97 @@ def _backfill_user_storage(db: Session, uid: str) -> tuple[int, int]:
     except Exception:
         pass
     return processed, total
+
+
+@router.get("/invoices")
+async def billing_invoices(request: Request, db: Session = Depends(get_db)):
+    """
+    Fetch user's invoices from Neon PostgreSQL database.
+    Falls back to Firestore and R2 storage for legacy invoices.
+    Returns list of invoices with id, date, amount, status, and downloadUrl.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    invoices = []
+    seen_ids = set()
+    
+    # Primary source: Neon PostgreSQL database
+    try:
+        db_invoices = db.query(Invoice).filter(Invoice.user_uid == uid).order_by(Invoice.invoice_date.desc()).limit(100).all()
+        for inv in db_invoices:
+            inv_id = inv.invoice_id
+            if inv_id in seen_ids:
+                continue
+            seen_ids.add(inv_id)
+            invoices.append({
+                "id": inv_id,
+                "date": inv.invoice_date.strftime("%Y-%m-%d") if inv.invoice_date else "",
+                "amount": float(inv.amount or 0),
+                "currency": inv.currency or "USD",
+                "status": inv.status or "paid",
+                "plan": inv.plan or "",
+                "planDisplay": inv.plan_display or "",
+                "downloadUrl": inv.download_url or None,
+            })
+        logger.info(f"[billing.invoices] fetched {len(db_invoices)} invoices from Neon DB for user {uid}")
+    except Exception as ex:
+        logger.warning(f"[billing.invoices] Neon DB fetch failed: {ex}")
+    
+    # Fallback: Firestore for legacy invoices
+    if firebase_enabled:
+        try:
+            from firebase_admin import firestore as fb_firestore
+            fdb = fb_firestore.client()
+            invoices_ref = fdb.collection("users").document(uid).collection("invoices")
+            docs = invoices_ref.order_by("date", direction=fb_firestore.Query.DESCENDING).limit(100).stream()
+            
+            for doc in docs:
+                data = doc.to_dict()
+                inv_id = data.get("id") or doc.id
+                if inv_id in seen_ids:
+                    continue
+                seen_ids.add(inv_id)
+                invoices.append({
+                    "id": inv_id,
+                    "date": data.get("date") or "",
+                    "amount": float(data.get("amount") or 0),
+                    "currency": data.get("currency") or "USD",
+                    "status": data.get("status") or "paid",
+                    "plan": data.get("plan") or "",
+                    "planDisplay": data.get("planDisplay") or "",
+                    "downloadUrl": data.get("downloadUrl") or None,
+                })
+        except Exception as ex:
+            logger.warning(f"[billing.invoices] Firestore fetch failed: {ex}")
+    
+    # Fallback: R2 storage for legacy invoices
+    try:
+        invoices_key = f"users/{uid}/billing/invoices.json"
+        r2_invoices = read_json_key(invoices_key) or []
+        if isinstance(r2_invoices, list):
+            for inv in r2_invoices:
+                if not isinstance(inv, dict):
+                    continue
+                inv_id = inv.get("id")
+                if not inv_id or inv_id in seen_ids:
+                    continue
+                seen_ids.add(inv_id)
+                invoices.append({
+                    "id": inv_id,
+                    "date": inv.get("date") or "",
+                    "amount": float(inv.get("amount") or 0),
+                    "currency": inv.get("currency") or "USD",
+                    "status": inv.get("status") or "paid",
+                    "plan": inv.get("plan") or "",
+                    "planDisplay": inv.get("planDisplay") or "",
+                    "downloadUrl": inv.get("downloadUrl") or None,
+                })
+    except Exception as ex:
+        logger.warning(f"[billing.invoices] R2 fetch failed: {ex}")
+    
+    # Sort by date descending
+    invoices.sort(key=lambda x: x.get("date") or "", reverse=True)
+    
+    return {"invoices": invoices}

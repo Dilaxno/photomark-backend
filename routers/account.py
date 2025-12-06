@@ -922,6 +922,16 @@ async def cancel_plan(request: Request, db: Session = Depends(get_db)):
         if not user:
             return JSONResponse({"error": "User not found"}, status_code=404)
         
+        # Store previous plan for email
+        previous_plan = user.plan or "free"
+        previous_plan_display = {
+            "individual": "Individual Plan",
+            "studios": "Studios Plan",
+            "golden": "Golden Lifetime Plan",
+            "photographers": "Photographers Plan",
+            "agencies": "Agencies Plan",
+        }.get(previous_plan, previous_plan.title() + " Plan" if previous_plan else "Free Plan")
+        
         now = datetime.utcnow()
         user.plan = "free"
         user.updated_at = now
@@ -943,6 +953,32 @@ async def cancel_plan(request: Request, db: Session = Depends(get_db)):
             write_json_key(_entitlement_key(uid), ent)
         except Exception as ex:
             logger.warning(f"plan/cancel: failed to update entitlement mirror for {uid}: {ex}")
+
+        # Send cancellation email (best-effort)
+        try:
+            user_email = user.email
+            if user_email:
+                frontend_origin = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud"
+                pricing_url = f"{frontend_origin}/pricing"
+                
+                html = render_email(
+                    "plan_cancelled.html",
+                    previous_plan=previous_plan_display,
+                    cancelled_date=now.strftime("%B %d, %Y"),
+                    pricing_url=pricing_url,
+                )
+                
+                send_email_smtp(
+                    to_addr=user_email,
+                    subject="Your plan has been cancelled",
+                    html=html,
+                    from_addr="billing@photomark.cloud",
+                    from_name="Photomark Billing",
+                )
+                logger.info(f"plan/cancel: sent cancellation email to {user_email}")
+        except Exception as email_ex:
+            logger.warning(f"plan/cancel: failed to send cancellation email: {email_ex}")
+            # Don't fail the request if email fails
 
         return {"ok": True}
     except Exception as ex:

@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ subject_line }} - {{ app_name }}</title>
+    <style>
+      .btn {
+        display: inline-block;
+        background: {{ button_bg }};
+        color: {{ button_text }} !important;
+        padding: 12px 24px;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .btn-secondary {
+        display: inline-block;
+        background: transparent;
+        color: {{ button_bg }} !important;
+        padding: 12px 24px;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 600;
+        border: 1px solid {{ button_bg }};
+        margin-left: 12px;
+      }
+      .container { max-width: 640px; margin: 0 auto; }
+      .card { background: #111418; border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+      .muted { color: #c7c7c7; }
+      .invoice-table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+      .invoice-table td { padding: 12px 0; border-bottom: 1px solid #1a1f26; }
+      .invoice-table tr:last-child td { border-bottom: none; font-weight: 600; }
+      .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+      .badge-success { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+      .badge-golden { background: linear-gradient(135deg, rgba(251, 191, 36, 0.2), rgba(245, 158, 11, 0.2)); color: #fbbf24; }
+    </style>
+  </head>
+  <body style="margin:0;padding:24px;background: {{ brand_bg }}; color: #f5f5f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;">
+    <div class="container">
+      <div style="text-align:center;margin-bottom:20px;">
+        {% if logo_url %}
+          <img src="{{ logo_url }}" alt="{{ app_name }}" style="max-width:140px; height:auto;" />
+        {% else %}
+          <h2 style="margin:0;color:#f5f5f5;">{{ app_name }}</h2>
+        {% endif %}
+      </div>
+      
+      <div class="card">
+        <h1 style="margin:0 0 8px 0; font-size:26px; line-height:1.2;">{{ heading }}</h1>
+        <p style="margin:0 0 24px 0; color:#c7c7c7; font-size:15px;">{{ subheading }}</p>
+        
+        <div style="background: #0d1117; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+          <table class="invoice-table">
+            <tr>
+              <td style="color: #c7c7c7;">Invoice ID</td>
+              <td style="text-align: right; font-family: monospace;">{{ invoice_id }}</td>
+            </tr>
+            <tr>
+              <td style="color: #c7c7c7;">Date</td>
+              <td style="text-align: right;">{{ invoice_date }}</td>
+            </tr>
+            <tr>
+              <td style="color: #c7c7c7;">Plan</td>
+              <td style="text-align: right;">
+                {{ plan_display }}
+                {% if is_golden %}
+                <span class="badge badge-golden">Lifetime</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% if billing_cycle %}
+            <tr>
+              <td style="color: #c7c7c7;">Billing Cycle</td>
+              <td style="text-align: right;">{{ billing_cycle }}</td>
+            </tr>
+            {% endif %}
+            <tr>
+              <td style="color: #c7c7c7;">Status</td>
+              <td style="text-align: right;"><span class="badge badge-success">Paid</span></td>
+            </tr>
+            <tr>
+              <td style="font-size: 18px;">Total</td>
+              <td style="text-align: right; font-size: 24px; color: #22c55e;">{{ amount }}</td>
+            </tr>
+          </table>
+        </div>
+
+        {% if features %}
+        <div style="margin-bottom: 24px;">
+          <h3 style="margin: 0 0 12px 0; font-size: 14px; color: #c7c7c7; text-transform: uppercase; letter-spacing: 0.5px;">What's Included:</h3>
+          <ul style="margin: 0; padding-left: 0; list-style: none;">
+            {% for feature in features %}
+            <li style="margin-bottom: 8px; padding-left: 24px; position: relative;">
+              <span style="position: absolute; left: 0; color: #22c55e;">✓</span>
+              {{ feature }}
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        <div style="margin-top: 24px;">
+          <a class="btn" href="{{ billing_url }}">View Billing</a>
+          {% if download_url %}
+          <a class="btn-secondary" href="{{ download_url }}">Download Invoice</a>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card" style="background: #0d1117; border: 1px solid #1a1f26;">
+        <p style="margin: 0; font-size: 14px; color: #c7c7c7;">
+          <strong style="color: #f5f5f5;">🙏 Thank you for your support!</strong><br>
+          Your subscription helps us continue building amazing tools for photographers. If you have any questions, just reply to this email.
+        </p>
+      </div>
+
+      <p class="muted" style="font-size:12px; text-align:center; margin-top:18px;">
+        © {{ app_name }} — This is your payment receipt from billing@photomark.cloud
+      </p>
+    </div>
+  </body>
+</html>
