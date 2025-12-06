@@ -247,7 +247,8 @@ async def custom_domain_routing(request: Request, call_next):
                 try:
                     shop = _find_shop_by_host(db, host)
                     uploads_domain = _find_uploads_domain_by_host(db, host) if not shop else None
-                    if shop or uploads_domain:
+                    vault_domain = _find_vault_domain_by_host(db, host) if not shop and not uploads_domain else None
+                    if shop or uploads_domain or vault_domain:
                         # Proxy static asset request to frontend
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         # Strip /shop prefix if present (happens when URL is /shop/{slug} and assets are relative)
