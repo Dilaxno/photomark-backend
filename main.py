@@ -587,6 +587,13 @@ try:
 except Exception as _ex:
     logger.warning(f"dropbox router not available: {_ex}")
 
+# OneDrive backup/sync endpoints
+try:
+    from routers import onedrive  # noqa: E402
+    app.include_router(onedrive.router)
+except Exception as _ex:
+    logger.warning(f"onedrive router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
