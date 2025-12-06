@@ -580,6 +580,13 @@ try:
 except Exception as _ex:
     logger.warning(f"google_drive router not available: {_ex}")
 
+# Dropbox backup/sync endpoints
+try:
+    from routers import dropbox  # noqa: E402
+    app.include_router(dropbox.router)
+except Exception as _ex:
+    logger.warning(f"dropbox router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
