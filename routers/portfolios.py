@@ -94,12 +94,12 @@ def _pg_save_settings(db: Session, uid: str, data: dict):
   db.execute(text(
     """
     INSERT INTO portfolio_settings (uid, data)
-    VALUES (:uid, :data::jsonb)
+    VALUES (:uid, CAST(:data_json AS jsonb))
     ON CONFLICT (uid) DO UPDATE SET
       data = EXCLUDED.data,
       updated_at = NOW();
     """
-  ), {"uid": uid, "data": data_json})
+  ), {"uid": uid, "data_json": data_json})
   db.commit()
 
 def _pg_list_items(db: Session, uid: str) -> List[dict]:
