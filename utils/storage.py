@@ -12,6 +12,57 @@ _CACHE_TTL = int(os.getenv("URL_CACHE_TTL_SEC", "300") or "300")
 from botocore.exceptions import ClientError
 
 
+# Allowed subfolders for backup (only user-uploaded photos)
+_BACKUP_ALLOWED_PREFIXES = (
+    "/watermarked/",   # Watermarked uploads
+    "/external/",      # Raw uploads (My Uploads)
+    "/vaults/",        # Vault photos
+    "/portfolio/",     # Portfolio photos
+    "/gallery/",       # Gallery photos
+    "/photos/",        # General photos
+)
+
+# Excluded paths (profile, branding, settings, shop assets)
+_BACKUP_EXCLUDED_PREFIXES = (
+    "/settings/",
+    "/billing/",
+    "/profile/",
+    "/avatar/",
+    "/logo/",
+    "/brandkit/",
+    "/brand-kit/",
+    "/brand_kit/",
+    "/pfp/",
+    "/banner/",
+    "/shop/",
+    "shops/",  # Shop assets stored under shops/ prefix
+)
+
+
+def _should_backup_key(key: str) -> bool:
+    """Determine if a storage key should be mirrored to backup.
+    Only backs up actual user photos (uploads, vaults, gallery, portfolio).
+    Excludes profile photos, shop logos, brand kit, settings, etc.
+    """
+    k = (key or "").lower()
+    
+    # Skip shop assets entirely
+    if k.startswith("shops/"):
+        return False
+    
+    # Check exclusions first
+    for excl in _BACKUP_EXCLUDED_PREFIXES:
+        if excl in k:
+            return False
+    
+    # Only backup if in allowed photo folders
+    for allowed in _BACKUP_ALLOWED_PREFIXES:
+        if allowed in k:
+            return True
+    
+    return False
+
+
 def write_json_key(key: str, payload: dict):
     data = json.dumps(payload, ensure_ascii=False)
     if s3 and R2_BUCKET:
@@ -68,8 +119,9 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
         bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
 
     # Attempt backup mirror (best-effort; non-blocking on failure)
+    # Only backup actual user photos, not profile/shop/branding assets
     try:
-        if s3_backup and BACKUP_BUCKET:
+        if s3_backup and BACKUP_BUCKET and _should_backup_key(key):
             try:
                 s3_backup.Bucket(BACKUP_BUCKET).put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
                 logger.info(f"Backup mirrored to B2: {BACKUP_BUCKET}/{key}")
