@@ -71,24 +71,35 @@ def _pg_ensure_settings_table(db: Session):
 
 
 def _pg_get_settings(db: Session, uid: str) -> Optional[dict]:
+  import json
   _pg_ensure_settings_table(db)
   row = db.execute(text("SELECT data FROM portfolio_settings WHERE uid = :uid"), {"uid": uid}).mappings().first()
   if row:
-    return row.get("data")
+    data = row.get("data")
+    # Handle case where data might be a string or already a dict
+    if isinstance(data, str):
+      try:
+        return json.loads(data)
+      except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
   return None
 
 
 def _pg_save_settings(db: Session, uid: str, data: dict):
+  import json
   _pg_ensure_settings_table(db)
+  # Serialize dict to JSON string for JSONB column
+  data_json = json.dumps(data) if isinstance(data, dict) else '{}'
   db.execute(text(
     """
     INSERT INTO portfolio_settings (uid, data)
-    VALUES (:uid, :data)
+    VALUES (:uid, :data::jsonb)
     ON CONFLICT (uid) DO UPDATE SET
       data = EXCLUDED.data,
       updated_at = NOW();
     """
-  ), {"uid": uid, "data": data})
+  ), {"uid": uid, "data": data_json})
   db.commit()
 
 def _pg_list_items(db: Session, uid: str) -> List[dict]:
