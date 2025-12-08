@@ -56,6 +56,7 @@ def init_db():
     from models.user import User  # noqa: F401
     from models.shop import Shop, ShopSlug  # noqa: F401
     from models.uploads_domain import UploadsDomain  # noqa: F401
+    from models.chat_workspace import ChatWorkspace  # noqa: F401
     
     Base.metadata.create_all(bind=engine)
     # Run idempotent DDL inside a transaction so changes are committed

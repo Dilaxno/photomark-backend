@@ -243,6 +243,11 @@ def get_presigned_url(key: str, expires_in: int = 3600) -> str:
         return ""
 
 
+def write_bytes_key(key: str, data: bytes, content_type: str = "image/jpeg") -> str:
+    """Write raw bytes to storage. Alias for upload_bytes for consistency with read_bytes_key."""
+    return upload_bytes(key, data, content_type)
+
+
 def read_bytes_key(key: str) -> Optional[bytes]:
     try:
         if s3 and R2_BUCKET:

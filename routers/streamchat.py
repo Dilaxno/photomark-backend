@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from models.user import User
 from models.collaborator import Collaborator
+from models.chat_workspace import ChatWorkspace
 
 router = APIRouter(prefix="/api/chat/stream", tags=["streamchat"]) 
 
@@ -691,11 +692,7 @@ async def message_notify(
 # ============================================================================
 # WORKSPACE SYNC ENDPOINTS
 # ============================================================================
-# Workspaces are stored per owner and synced to collaborators who are members
-
-# In-memory workspace storage (in production, use database)
-# Format: { owner_uid: [workspace1, workspace2, ...] }
-_WORKSPACES: dict[str, list[dict]] = {}
+# Workspaces are stored in database and synced to collaborators who are members
 
 
 @router.get("/workspaces")
@@ -712,7 +709,10 @@ async def get_workspaces(request: Request, db: Session = Depends(get_db)):
     try:
         if is_collaborator:
             # Collaborator: get owner's workspaces and filter to ones they're part of
-            owner_workspaces = _WORKSPACES.get(owner_uid, [])
+            owner_workspaces = db.query(ChatWorkspace).filter(
+                ChatWorkspace.owner_uid == owner_uid,
+                ChatWorkspace.active == True
+            ).order_by(ChatWorkspace.last_message_at.desc().nullslast(), ChatWorkspace.created_at.desc()).all()
             
             # Get collaborator's email from database
             collab_email = None
@@ -735,32 +735,36 @@ async def get_workspaces(request: Request, db: Session = Depends(get_db)):
             # Filter workspaces: group workspaces where they're a member, or direct workspaces specifically for them
             my_workspaces = []
             for ws in owner_workspaces:
-                ws_type = ws.get("type", "group")
-                members = ws.get("members", [])
+                ws_type = ws.type or "group"
+                members = ws.members or []
                 
                 if ws_type == "group":
                     # Group workspace: show if collaborator is a member
                     if collab_email in members:
-                        my_workspaces.append(ws)
+                        my_workspaces.append(ws.to_dict())
                 else:
                     # Direct (1:1) workspace: only show if this collaborator is the specific member
                     if len(members) == 1 and members[0] == collab_email:
-                        my_workspaces.append(ws)
+                        my_workspaces.append(ws.to_dict())
             
             return {"ok": True, "workspaces": my_workspaces, "is_collaborator": True, "owner_uid": owner_uid}
         else:
             # Owner: return all their workspaces
-            workspaces = _WORKSPACES.get(sender_uid, [])
-            return {"ok": True, "workspaces": workspaces, "is_collaborator": False}
+            workspaces = db.query(ChatWorkspace).filter(
+                ChatWorkspace.owner_uid == sender_uid,
+                ChatWorkspace.active == True
+            ).order_by(ChatWorkspace.last_message_at.desc().nullslast(), ChatWorkspace.created_at.desc()).all()
+            return {"ok": True, "workspaces": [ws.to_dict() for ws in workspaces], "is_collaborator": False}
     except Exception as ex:
         logger.exception(f"get_workspaces failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
 @router.post("/workspaces")
-async def save_workspaces(request: Request, workspaces: list[dict] = Body(default=[])):
+async def save_workspaces(request: Request, workspaces: list[dict] = Body(default=[]), db: Session = Depends(get_db)):
     """
-    Save workspaces for the owner. Only owners can save workspaces.
+    Save/sync workspaces for the owner. Only owners can save workspaces.
+    This upserts workspaces - creates new ones and updates existing ones.
     """
     sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
     if not sender_uid:
@@ -770,26 +774,61 @@ async def save_workspaces(request: Request, workspaces: list[dict] = Body(defaul
         return JSONResponse({"error": "Only owners can save workspaces"}, status_code=403)
     
     try:
-        # Validate and sanitize workspaces
-        clean_workspaces = []
+        count = 0
         for ws in (workspaces or [])[:100]:  # Limit to 100 workspaces
             if not isinstance(ws, dict):
                 continue
-            clean_ws = {
-                "id": str(ws.get("id", "")).strip()[:128],
-                "name": str(ws.get("name", "")).strip()[:100],
-                "type": str(ws.get("type", "group")).strip()[:20],
-                "members": [str(m).strip()[:255] for m in (ws.get("members") or [])[:50]],
-                "owner_uid": sender_uid,
-                "created_at": str(ws.get("created_at", "")).strip()[:50],
-                "last_message_at": str(ws.get("last_message_at", "")).strip()[:50] if ws.get("last_message_at") else None,
-            }
-            if clean_ws["id"]:
-                clean_workspaces.append(clean_ws)
+            ws_id = str(ws.get("id", "")).strip()[:128]
+            if not ws_id:
+                continue
+            
+            # Check if workspace exists
+            existing = db.query(ChatWorkspace).filter(
+                ChatWorkspace.id == ws_id,
+                ChatWorkspace.owner_uid == sender_uid
+            ).first()
+            
+            members = [str(m).strip()[:255] for m in (ws.get("members") or [])[:50]]
+            last_msg_at = None
+            if ws.get("last_message_at"):
+                try:
+                    last_msg_at = datetime.fromisoformat(str(ws.get("last_message_at")).replace("Z", "+00:00"))
+                except:
+                    pass
+            
+            if existing:
+                # Update existing workspace
+                existing.name = str(ws.get("name", "")).strip()[:255] or existing.name
+                existing.type = str(ws.get("type", "direct")).strip()[:20]
+                existing.members = members
+                if last_msg_at:
+                    existing.last_message_at = last_msg_at
+            else:
+                # Create new workspace
+                created_at = None
+                if ws.get("created_at"):
+                    try:
+                        created_at = datetime.fromisoformat(str(ws.get("created_at")).replace("Z", "+00:00"))
+                    except:
+                        pass
+                
+                new_ws = ChatWorkspace(
+                    id=ws_id,
+                    owner_uid=sender_uid,
+                    name=str(ws.get("name", "")).strip()[:255] or "Chat",
+                    type=str(ws.get("type", "direct")).strip()[:20],
+                    members=members,
+                    last_message_at=last_msg_at,
+                )
+                if created_at:
+                    new_ws.created_at = created_at
+                db.add(new_ws)
+            count += 1
         
-        _WORKSPACES[sender_uid] = clean_workspaces
-        return {"ok": True, "count": len(clean_workspaces)}
+        db.commit()
+        return {"ok": True, "count": count}
     except Exception as ex:
+        db.rollback()
         logger.exception(f"save_workspaces failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
@@ -837,29 +876,27 @@ async def create_workspace(
         import string
         ws_id = f"ws_{int(time.time())}_{(''.join(random.choices(string.ascii_lowercase + string.digits, k=8)))}"
         
-        new_workspace = {
-            "id": ws_id,
-            "name": str(name or "").strip()[:100] or (valid_members[0] if workspace_type == "direct" else "Group Chat"),
-            "type": "direct" if workspace_type == "direct" else "group",
-            "members": valid_members,
-            "owner_uid": sender_uid,
-            "created_at": datetime.utcnow().isoformat(),
-            "last_message_at": None,
-        }
+        # Create workspace in database
+        new_workspace = ChatWorkspace(
+            id=ws_id,
+            owner_uid=sender_uid,
+            name=str(name or "").strip()[:255] or (valid_members[0] if workspace_type == "direct" else "Group Chat"),
+            type="direct" if workspace_type == "direct" else "group",
+            members=valid_members,
+        )
+        db.add(new_workspace)
+        db.commit()
+        db.refresh(new_workspace)
         
-        # Add to owner's workspaces
-        if sender_uid not in _WORKSPACES:
-            _WORKSPACES[sender_uid] = []
-        _WORKSPACES[sender_uid].insert(0, new_workspace)
-        
-        return {"ok": True, "workspace": new_workspace}
+        return {"ok": True, "workspace": new_workspace.to_dict()}
     except Exception as ex:
+        db.rollback()
         logger.exception(f"create_workspace failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
 @router.delete("/workspaces/{workspace_id}")
-async def delete_workspace(request: Request, workspace_id: str):
+async def delete_workspace(request: Request, workspace_id: str, db: Session = Depends(get_db)):
     """
     Delete a workspace. Only owners can delete their workspaces.
     """
@@ -872,11 +909,52 @@ async def delete_workspace(request: Request, workspace_id: str):
     
     try:
         ws_id_clean = str(workspace_id or "").strip()[:128]
-        if sender_uid in _WORKSPACES:
-            _WORKSPACES[sender_uid] = [ws for ws in _WORKSPACES[sender_uid] if ws.get("id") != ws_id_clean]
+        workspace = db.query(ChatWorkspace).filter(
+            ChatWorkspace.id == ws_id_clean,
+            ChatWorkspace.owner_uid == sender_uid
+        ).first()
+        
+        if workspace:
+            workspace.active = False  # Soft delete
+            db.commit()
+        
         return {"ok": True}
     except Exception as ex:
+        db.rollback()
         logger.exception(f"delete_workspace failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/workspaces/{workspace_id}/activity")
+async def update_workspace_activity(request: Request, workspace_id: str, db: Session = Depends(get_db)):
+    """
+    Update workspace last_message_at timestamp when a message is sent.
+    Both owners and collaborators can update activity.
+    """
+    sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        ws_id_clean = str(workspace_id or "").strip()[:128]
+        # For collaborators, use owner_uid; for owners, use sender_uid
+        target_owner = owner_uid if is_collaborator else sender_uid
+        
+        workspace = db.query(ChatWorkspace).filter(
+            ChatWorkspace.id == ws_id_clean,
+            ChatWorkspace.owner_uid == target_owner,
+            ChatWorkspace.active == True
+        ).first()
+        
+        if workspace:
+            workspace.last_message_at = datetime.utcnow()
+            db.commit()
+            return {"ok": True}
+        
+        return {"ok": False, "error": "Workspace not found"}
+    except Exception as ex:
+        db.rollback()
+        logger.exception(f"update_workspace_activity failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
