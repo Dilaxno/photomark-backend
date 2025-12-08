@@ -1,6 +1,6 @@
 """
-Showcase Builder Settings Router
-Handles persistence for the Showcase page builder (similar to Squarespace)
+Website Builder Settings Router
+Handles persistence for the Website page builder (similar to Squarespace)
 """
 import json
 from fastapi import APIRouter, Request, Depends
@@ -12,14 +12,14 @@ from core.config import logger
 from core.auth import get_uid_from_request
 from core.database import get_db
 
-router = APIRouter(prefix="/api/showcase", tags=["showcase"])
+router = APIRouter(prefix="/api/website", tags=["website"])
 
 
-def _ensure_showcase_table(db: Session):
-    """Create showcase_settings table if it doesn't exist."""
+def _ensure_website_table(db: Session):
+    """Create website_settings table if it doesn't exist."""
     db.execute(text(
         """
-        CREATE TABLE IF NOT EXISTS showcase_settings (
+        CREATE TABLE IF NOT EXISTS website_settings (
             uid VARCHAR(64) PRIMARY KEY,
             data JSONB NOT NULL DEFAULT '{}',
             created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -30,11 +30,11 @@ def _ensure_showcase_table(db: Session):
     db.commit()
 
 
-def _get_showcase_settings(db: Session, uid: str) -> dict | None:
-    """Get showcase settings for a user."""
-    _ensure_showcase_table(db)
+def _get_website_settings(db: Session, uid: str) -> dict | None:
+    """Get website settings for a user."""
+    _ensure_website_table(db)
     row = db.execute(
-        text("SELECT data FROM showcase_settings WHERE uid = :uid"),
+        text("SELECT data FROM website_settings WHERE uid = :uid"),
         {"uid": uid}
     ).mappings().first()
     
@@ -49,13 +49,13 @@ def _get_showcase_settings(db: Session, uid: str) -> dict | None:
     return None
 
 
-def _save_showcase_settings(db: Session, uid: str, data: dict):
-    """Save showcase settings for a user."""
-    _ensure_showcase_table(db)
+def _save_website_settings(db: Session, uid: str, data: dict):
+    """Save website settings for a user."""
+    _ensure_website_table(db)
     data_json = json.dumps(data) if isinstance(data, dict) else '{}'
     db.execute(text(
         """
-        INSERT INTO showcase_settings (uid, data)
+        INSERT INTO website_settings (uid, data)
         VALUES (:uid, CAST(:data_json AS jsonb))
         ON CONFLICT (uid) DO UPDATE SET
             data = EXCLUDED.data,
@@ -67,22 +67,22 @@ def _save_showcase_settings(db: Session, uid: str, data: dict):
 
 @router.get("/settings")
 async def get_settings(request: Request, db: Session = Depends(get_db)):
-    """Get showcase settings for the authenticated user."""
+    """Get website settings for the authenticated user."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     try:
-        data = _get_showcase_settings(db, uid)
+        data = _get_website_settings(db, uid)
         return {"ok": True, "data": data}
     except Exception as ex:
-        logger.warning(f"get_showcase_settings failed: {ex}")
+        logger.warning(f"get_website_settings failed: {ex}")
         return JSONResponse({"error": "server error"}, status_code=500)
 
 
 @router.post("/settings")
 async def save_settings(request: Request, payload: dict, db: Session = Depends(get_db)):
-    """Save showcase settings for the authenticated user."""
+    """Save website settings for the authenticated user."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -92,8 +92,8 @@ async def save_settings(request: Request, payload: dict, db: Session = Depends(g
         if not isinstance(data, dict):
             return JSONResponse({"error": "Invalid data format"}, status_code=400)
         
-        _save_showcase_settings(db, uid, data)
+        _save_website_settings(db, uid, data)
         return {"ok": True}
     except Exception as ex:
-        logger.warning(f"save_showcase_settings failed: {ex}")
+        logger.warning(f"save_website_settings failed: {ex}")
         return JSONResponse({"error": "server error"}, status_code=500)
