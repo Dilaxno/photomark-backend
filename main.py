@@ -594,6 +594,13 @@ try:
 except Exception as _ex:
     logger.warning(f"onedrive router not available: {_ex}")
 
+# Cloud storage picker (import from Google Drive, Dropbox, OneDrive)
+try:
+    from routers import cloud_picker  # noqa: E402
+    app.include_router(cloud_picker.router)
+except Exception as _ex:
+    logger.warning(f"cloud_picker router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
