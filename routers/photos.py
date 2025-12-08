@@ -99,23 +99,51 @@ def _build_manifest(uid: str) -> dict:
 
 @router.get("/gallery/storage")
 async def get_storage_usage(request: Request, db: Session = Depends(get_db)):
-    """Get storage usage for the current user."""
+    """Get storage usage for the current user from Neon DB."""
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     uid = eff_uid
     try:
-        # Sum up all asset sizes from the database
         from sqlalchemy import func
+        from models.user import User
+        
+        # Get user record from Neon DB for storage limit
+        user = db.query(User).filter(User.uid == uid).first()
+        
+        # Calculate actual storage used by summing all asset sizes
         total_bytes = db.query(func.coalesce(func.sum(GalleryAsset.size_bytes), 0)).filter(
             GalleryAsset.user_uid == uid
         ).scalar() or 0
         
-        return {"used_bytes": int(total_bytes), "uid": uid}
+        # Get storage limit from user record, with plan-based defaults
+        if user:
+            storage_limit = user.storage_limit_bytes or 2 * 1024 * 1024 * 1024  # 2GB default
+            plan = (user.plan or 'free').lower()
+            # Override limit based on plan if not set correctly
+            if plan in ('studios', 'golden', 'golden_offer'):
+                storage_limit = max(storage_limit, 100 * 1024 * 1024 * 1024)  # 100GB for Studios
+            elif plan == 'individual':
+                storage_limit = max(storage_limit, 20 * 1024 * 1024 * 1024)  # 20GB for Individual
+            
+            # Update user's storage_used_bytes in DB if different (sync)
+            if user.storage_used_bytes != int(total_bytes):
+                user.storage_used_bytes = int(total_bytes)
+                db.commit()
+        else:
+            storage_limit = 2 * 1024 * 1024 * 1024  # 2GB default for free
+            plan = 'free'
+        
+        return {
+            "used_bytes": int(total_bytes),
+            "limit_bytes": int(storage_limit),
+            "plan": plan if user else 'free',
+            "uid": uid
+        }
     except Exception as ex:
         logger.warning(f"storage usage query failed for {uid}: {ex}")
-        return {"used_bytes": 0, "uid": uid}
+        return {"used_bytes": 0, "limit_bytes": 2 * 1024 * 1024 * 1024, "plan": "free", "uid": uid}
 
 
 @router.post("/embed/refresh")

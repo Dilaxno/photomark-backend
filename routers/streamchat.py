@@ -878,3 +878,92 @@ async def delete_workspace(request: Request, workspace_id: str):
     except Exception as ex:
         logger.exception(f"delete_workspace failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/workspace/invite")
+async def workspace_invite(
+    request: Request,
+    workspace_name: str = Body(..., embed=True),
+    workspace_type: str = Body("direct", embed=True),
+    member_emails: list[str] = Body(default=[]),
+    db: Session = Depends(get_db)
+):
+    """
+    Send email invitations to collaborators when they are added to a workspace.
+    Only owners can send workspace invitations.
+    """
+    sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    if is_collaborator:
+        return JSONResponse({"error": "Only owners can send workspace invitations"}, status_code=403)
+    
+    try:
+        # Get owner info
+        owner = db.query(User).filter(User.uid == sender_uid).first()
+        owner_name = (owner.display_name if owner else None) or "Your team owner"
+        
+        # Validate member emails are collaborators of this owner
+        valid_emails = []
+        try:
+            collabs = db.query(Collaborator).filter(
+                Collaborator.owner_uid == sender_uid,
+                Collaborator.active == True
+            ).all()
+            collab_emails = {(c.email or "").lower() for c in collabs}
+            for em in (member_emails or [])[:50]:
+                em_clean = str(em or "").strip().lower()[:255]
+                if em_clean and "@" in em_clean and em_clean in collab_emails:
+                    valid_emails.append(em_clean)
+        except Exception as ex:
+            logger.warning(f"Error validating invite emails: {ex}")
+        
+        if not valid_emails:
+            return {"ok": True, "sent": 0, "message": "No valid collaborator emails to notify"}
+        
+        # Send invitation emails
+        app_name = os.getenv("APP_NAME", "Photomark")
+        front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+        
+        workspace_name_clean = _sanitize_html(str(workspace_name or "").strip()[:100])
+        workspace_type_clean = str(workspace_type or "direct").strip().lower()
+        
+        sent_count = 0
+        for email in valid_emails:
+            try:
+                # Rate limit per recipient
+                rate_key = f"ws_invite:{email}:{workspace_name_clean}"
+                if not _should_send_email_notification(rate_key):
+                    continue
+                
+                if workspace_type_clean == "direct":
+                    subject = f"{owner_name} started a direct chat with you on {app_name}"
+                    intro = (
+                        f"<b>{owner_name}</b> has started a direct conversation with you in {app_name} Team Chat.<br><br>"
+                        f"Click below to open the chat and start messaging."
+                    )
+                else:
+                    subject = f"You've been added to '{workspace_name_clean}' workspace on {app_name}"
+                    intro = (
+                        f"<b>{owner_name}</b> has added you to the <b>{workspace_name_clean}</b> workspace in {app_name} Team Chat.<br><br>"
+                        f"Click below to join the conversation with your team."
+                    )
+                
+                html = render_email(
+                    "email_basic.html",
+                    title="Team Chat Invitation",
+                    intro=intro,
+                    button_label="Open Team Chat",
+                    button_url=f"{front}/collab-dashboard",
+                )
+                
+                if send_email_smtp(email, subject, html):
+                    sent_count += 1
+            except Exception as ex:
+                logger.warning(f"Failed to send workspace invite to {email}: {ex}")
+        
+        return {"ok": True, "sent": sent_count}
+    except Exception as ex:
+        logger.exception(f"workspace_invite failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
