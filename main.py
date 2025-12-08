@@ -490,6 +490,13 @@ app.include_router(affiliates.router)
 from routers import portfolios  # noqa: E402
 app.include_router(portfolios.router)
 
+# showcase builder endpoints (Squarespace-style page builder)
+try:
+    from routers import showcase  # noqa: E402
+    app.include_router(showcase.router)
+except Exception as _ex:
+    logger.warning(f"showcase router not available: {_ex}")
+
 # Pricing webhook (replaces legacy Dodo webhook)
 try:
     from routers import pricing_webhook  # noqa: E402
