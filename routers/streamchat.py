@@ -686,3 +686,195 @@ async def message_notify(
     except Exception as ex:
         logger.exception(f"message_notify failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+# ============================================================================
+# WORKSPACE SYNC ENDPOINTS
+# ============================================================================
+# Workspaces are stored per owner and synced to collaborators who are members
+
+# In-memory workspace storage (in production, use database)
+# Format: { owner_uid: [workspace1, workspace2, ...] }
+_WORKSPACES: dict[str, list[dict]] = {}
+
+
+@router.get("/workspaces")
+async def get_workspaces(request: Request, db: Session = Depends(get_db)):
+    """
+    Get workspaces for the current user.
+    - For owners: returns all their workspaces
+    - For collaborators: returns workspaces they are members of (filtered by their email)
+    """
+    sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        if is_collaborator:
+            # Collaborator: get owner's workspaces and filter to ones they're part of
+            owner_workspaces = _WORKSPACES.get(owner_uid, [])
+            
+            # Get collaborator's email from database
+            collab_email = None
+            try:
+                collabs = db.query(Collaborator).filter(
+                    Collaborator.owner_uid == owner_uid,
+                    Collaborator.active == True
+                ).all()
+                for c in collabs:
+                    normalized = (c.email or "").lower().replace("@", "_").replace(".", "_")[:64]
+                    if sender_uid == normalized:
+                        collab_email = c.email
+                        break
+            except Exception:
+                pass
+            
+            if not collab_email:
+                return {"ok": True, "workspaces": [], "is_collaborator": True}
+            
+            # Filter workspaces: group workspaces where they're a member, or direct workspaces specifically for them
+            my_workspaces = []
+            for ws in owner_workspaces:
+                ws_type = ws.get("type", "group")
+                members = ws.get("members", [])
+                
+                if ws_type == "group":
+                    # Group workspace: show if collaborator is a member
+                    if collab_email in members:
+                        my_workspaces.append(ws)
+                else:
+                    # Direct (1:1) workspace: only show if this collaborator is the specific member
+                    if len(members) == 1 and members[0] == collab_email:
+                        my_workspaces.append(ws)
+            
+            return {"ok": True, "workspaces": my_workspaces, "is_collaborator": True, "owner_uid": owner_uid}
+        else:
+            # Owner: return all their workspaces
+            workspaces = _WORKSPACES.get(sender_uid, [])
+            return {"ok": True, "workspaces": workspaces, "is_collaborator": False}
+    except Exception as ex:
+        logger.exception(f"get_workspaces failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/workspaces")
+async def save_workspaces(request: Request, workspaces: list[dict] = Body(default=[])):
+    """
+    Save workspaces for the owner. Only owners can save workspaces.
+    """
+    sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    if is_collaborator:
+        return JSONResponse({"error": "Only owners can save workspaces"}, status_code=403)
+    
+    try:
+        # Validate and sanitize workspaces
+        clean_workspaces = []
+        for ws in (workspaces or [])[:100]:  # Limit to 100 workspaces
+            if not isinstance(ws, dict):
+                continue
+            clean_ws = {
+                "id": str(ws.get("id", "")).strip()[:128],
+                "name": str(ws.get("name", "")).strip()[:100],
+                "type": str(ws.get("type", "group")).strip()[:20],
+                "members": [str(m).strip()[:255] for m in (ws.get("members") or [])[:50]],
+                "owner_uid": sender_uid,
+                "created_at": str(ws.get("created_at", "")).strip()[:50],
+                "last_message_at": str(ws.get("last_message_at", "")).strip()[:50] if ws.get("last_message_at") else None,
+            }
+            if clean_ws["id"]:
+                clean_workspaces.append(clean_ws)
+        
+        _WORKSPACES[sender_uid] = clean_workspaces
+        return {"ok": True, "count": len(clean_workspaces)}
+    except Exception as ex:
+        logger.exception(f"save_workspaces failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/workspaces/create")
+async def create_workspace(
+    request: Request,
+    name: str = Body(..., embed=True),
+    workspace_type: str = Body("direct", embed=True),
+    members: list[str] = Body(default=[]),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new workspace. Only owners can create workspaces.
+    """
+    sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    if is_collaborator:
+        return JSONResponse({"error": "Only owners can create workspaces"}, status_code=403)
+    
+    try:
+        # Validate members are collaborators of this owner
+        valid_members = []
+        try:
+            collabs = db.query(Collaborator).filter(
+                Collaborator.owner_uid == sender_uid,
+                Collaborator.active == True
+            ).all()
+            collab_emails = {(c.email or "").lower() for c in collabs}
+            for m in (members or [])[:50]:
+                m_clean = str(m or "").strip().lower()[:255]
+                if m_clean and m_clean in collab_emails:
+                    valid_members.append(m_clean)
+        except Exception as ex:
+            logger.warning(f"Error validating workspace members: {ex}")
+        
+        if not valid_members:
+            return JSONResponse({"error": "At least one valid collaborator member required"}, status_code=400)
+        
+        # Generate workspace ID
+        import time
+        import random
+        import string
+        ws_id = f"ws_{int(time.time())}_{(''.join(random.choices(string.ascii_lowercase + string.digits, k=8)))}"
+        
+        new_workspace = {
+            "id": ws_id,
+            "name": str(name or "").strip()[:100] or (valid_members[0] if workspace_type == "direct" else "Group Chat"),
+            "type": "direct" if workspace_type == "direct" else "group",
+            "members": valid_members,
+            "owner_uid": sender_uid,
+            "created_at": datetime.utcnow().isoformat(),
+            "last_message_at": None,
+        }
+        
+        # Add to owner's workspaces
+        if sender_uid not in _WORKSPACES:
+            _WORKSPACES[sender_uid] = []
+        _WORKSPACES[sender_uid].insert(0, new_workspace)
+        
+        return {"ok": True, "workspace": new_workspace}
+    except Exception as ex:
+        logger.exception(f"create_workspace failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.delete("/workspaces/{workspace_id}")
+async def delete_workspace(request: Request, workspace_id: str):
+    """
+    Delete a workspace. Only owners can delete their workspaces.
+    """
+    sender_uid, owner_uid, is_collaborator = _get_sender_info_from_token(request)
+    if not sender_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    if is_collaborator:
+        return JSONResponse({"error": "Only owners can delete workspaces"}, status_code=403)
+    
+    try:
+        ws_id_clean = str(workspace_id or "").strip()[:128]
+        if sender_uid in _WORKSPACES:
+            _WORKSPACES[sender_uid] = [ws for ws in _WORKSPACES[sender_uid] if ws.get("id") != ws_id_clean]
+        return {"ok": True}
+    except Exception as ex:
+        logger.exception(f"delete_workspace failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)

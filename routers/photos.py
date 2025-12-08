@@ -97,6 +97,27 @@ def _build_manifest(uid: str) -> dict:
     return {"photos": top10}
 
 
+@router.get("/gallery/storage")
+async def get_storage_usage(request: Request, db: Session = Depends(get_db)):
+    """Get storage usage for the current user."""
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    uid = eff_uid
+    try:
+        # Sum up all asset sizes from the database
+        from sqlalchemy import func
+        total_bytes = db.query(func.coalesce(func.sum(GalleryAsset.size_bytes), 0)).filter(
+            GalleryAsset.user_uid == uid
+        ).scalar() or 0
+        
+        return {"used_bytes": int(total_bytes), "uid": uid}
+    except Exception as ex:
+        logger.warning(f"storage usage query failed for {uid}: {ex}")
+        return {"used_bytes": 0, "uid": uid}
+
+
 @router.post("/embed/refresh")
 async def api_embed_refresh(request: Request):
     eff_uid, req_uid = resolve_workspace_uid(request)
