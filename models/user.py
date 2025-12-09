@@ -14,6 +14,7 @@ class User(Base):
     
     # Basic info
     email = Column(String(255), unique=True, index=True, nullable=False)
+    secondary_email = Column(String(255), nullable=True, index=True)  # Backup/recovery email
     display_name = Column(String(255), nullable=True)
     photo_url = Column(Text, nullable=True)
     
@@ -75,6 +76,7 @@ class User(Base):
         return {
             "uid": self.uid,
             "email": self.email,
+            "secondaryEmail": self.secondary_email,
             "displayName": self.display_name,
             "photoUrl": self.photo_url,
             "accountType": self.account_type,

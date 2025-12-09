@@ -1339,3 +1339,95 @@ async def upload_brand_font(request: Request, file: UploadFile = File(...)):
     except Exception as ex:
         logger.warning(f"upload_brand_font failed for {uid}: {ex}")
         return JSONResponse({"error": "Failed to upload font"}, status_code=500)
+
+
+# ============== Secondary Email ==============
+
+@router.get("/secondary-email")
+async def get_secondary_email(request: Request, db: Session = Depends(get_db)):
+    """
+    Get the user's secondary email address.
+    Returns: { secondary_email: str | null }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return {"secondary_email": None}
+        
+        return {"secondary_email": user.secondary_email}
+    except Exception as ex:
+        logger.warning(f"get_secondary_email failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to get secondary email"}, status_code=500)
+
+
+@router.post("/secondary-email")
+async def set_secondary_email(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Set or update the user's secondary email address.
+    Body: { "secondary_email": str | null }
+    Returns: { ok: true, secondary_email: str | null }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    secondary_email = (payload or {}).get("secondary_email")
+    
+    # Allow null/empty to clear the secondary email
+    if secondary_email:
+        secondary_email = str(secondary_email).strip().lower()
+        # Basic email validation
+        if "@" not in secondary_email or "." not in secondary_email:
+            return JSONResponse({"error": "Invalid email format"}, status_code=400)
+    else:
+        secondary_email = None
+    
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        # Check if secondary email is same as primary
+        if secondary_email and secondary_email == user.email:
+            return JSONResponse({"error": "Secondary email cannot be the same as primary email"}, status_code=400)
+        
+        # Update secondary email
+        user.secondary_email = secondary_email
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return {"ok": True, "secondary_email": user.secondary_email}
+    except Exception as ex:
+        db.rollback()
+        logger.warning(f"set_secondary_email failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to update secondary email"}, status_code=500)
+
+
+@router.delete("/secondary-email")
+async def delete_secondary_email(request: Request, db: Session = Depends(get_db)):
+    """
+    Remove the user's secondary email address.
+    Returns: { ok: true }
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        user.secondary_email = None
+        user.updated_at = datetime.utcnow()
+        db.commit()
+        
+        return {"ok": True}
+    except Exception as ex:
+        db.rollback()
+        logger.warning(f"delete_secondary_email failed for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to remove secondary email"}, status_code=500)
