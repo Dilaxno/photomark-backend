@@ -34,7 +34,7 @@ class User(Base):
     
     # Usage and limits
     storage_used_bytes = Column(Integer, default=0)
-    storage_limit_bytes = Column(Integer, default=1073741824)  # 1GB default
+    storage_limit_bytes = Column(Integer, default=5368709120)  # 5GB default for free plan
     monthly_uploads = Column(Integer, default=0)
     monthly_upload_limit = Column(Integer, default=100)
     

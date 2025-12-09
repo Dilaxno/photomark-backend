@@ -119,20 +119,21 @@ async def get_storage_usage(request: Request, db: Session = Depends(get_db)):
         
         # Get storage limit from user record, with plan-based defaults
         if user:
-            storage_limit = user.storage_limit_bytes or 2 * 1024 * 1024 * 1024  # 2GB default
             plan = (user.plan or 'free').lower()
-            # Override limit based on plan if not set correctly
+            # Set storage limit based on plan
             if plan in ('studios', 'golden', 'golden_offer'):
-                storage_limit = max(storage_limit, 100 * 1024 * 1024 * 1024)  # 100GB for Studios
+                storage_limit = 10 * 1024 * 1024 * 1024 * 1024  # 10TB (effectively unlimited) for Studios
             elif plan == 'individual':
-                storage_limit = max(storage_limit, 20 * 1024 * 1024 * 1024)  # 20GB for Individual
+                storage_limit = 1024 * 1024 * 1024 * 1024  # 1TB for Individual
+            else:
+                storage_limit = 5 * 1024 * 1024 * 1024  # 5GB for Free
             
             # Update user's storage_used_bytes in DB if different (sync)
             if user.storage_used_bytes != int(total_bytes):
                 user.storage_used_bytes = int(total_bytes)
                 db.commit()
         else:
-            storage_limit = 2 * 1024 * 1024 * 1024  # 2GB default for free
+            storage_limit = 5 * 1024 * 1024 * 1024  # 5GB default for free
             plan = 'free'
         
         return {
@@ -143,7 +144,7 @@ async def get_storage_usage(request: Request, db: Session = Depends(get_db)):
         }
     except Exception as ex:
         logger.warning(f"storage usage query failed for {uid}: {ex}")
-        return {"used_bytes": 0, "limit_bytes": 2 * 1024 * 1024 * 1024, "plan": "free", "uid": uid}
+        return {"used_bytes": 0, "limit_bytes": 5 * 1024 * 1024 * 1024, "plan": "free", "uid": uid}
 
 
 @router.post("/embed/refresh")
