@@ -120,7 +120,10 @@ async def add_security_headers(request, call_next):
     try:
         response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        # Additional security headers
+        response.headers.setdefault("X-XSS-Protection", "1; mode=block")
+        response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 
         embed_ancestors = (os.getenv("EMBED_FRAME_ANCESTORS") or "https:").strip()
         # If embedding is allowed, rely on CSP and relax X-Frame-Options

@@ -19,9 +19,19 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])  # secure endpoints via 
 
 def _get_admin_secret() -> str:
     secret = (os.getenv("ADMIN_SECRET") or "").strip()
-    # SECURITY: Warn if admin secret is too weak (less than 16 chars or all numeric)
-    if secret and (len(secret) < 16 or secret.isdigit()):
-        logger.warning("[SECURITY] ADMIN_SECRET is weak - use a strong random string (min 32 chars)")
+    # SECURITY: Enforce minimum secret strength
+    if secret:
+        is_weak = (
+            len(secret) < 32 or  # Must be at least 32 chars
+            secret.isdigit() or  # Can't be all numbers
+            secret.isalpha() or  # Can't be all letters
+            secret.lower() == secret  # Must have mixed case or special chars
+        )
+        if is_weak:
+            logger.error("[SECURITY] ADMIN_SECRET is too weak! Use: openssl rand -hex 32")
+            # In production, reject weak secrets entirely
+            if os.getenv("DEBUG", "").lower() not in ("1", "true", "yes"):
+                return ""  # Disable admin endpoints with weak secret in production
     return secret
 
 

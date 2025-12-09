@@ -196,6 +196,8 @@ async def auth_password_reset_request(request: Request, payload: dict = Body(...
     Send OTP code to email for password reset.
     Body: { "email": str }
     Returns: { ok: true }
+    
+    SECURITY: Always returns success to prevent email enumeration attacks.
     """
     from utils.rate_limit import password_reset_throttle
     
@@ -203,12 +205,25 @@ async def auth_password_reset_request(request: Request, payload: dict = Body(...
     if not email:
         return JSONResponse({"error": "email required"}, status_code=400)
     
-    # Rate limit by email to prevent enumeration/abuse
+    # Rate limit by IP AND email to prevent enumeration/abuse
+    ip = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    
     try:
+        # Rate limit by IP (stricter)
+        ip_result = password_reset_throttle.limit(f"pw_reset_ip:{ip}", cost=1)
+        if ip_result.limited:
+            logger.warning(f"[auth.password_reset] Rate limited IP: {ip}")
+            return JSONResponse({"error": "Too many requests. Please try again later."}, status_code=429)
+        
+        # Rate limit by email
         result = password_reset_throttle.limit(f"pw_reset:{email}", cost=1)
         if result.limited:
             logger.warning(f"[auth.password_reset] Rate limited for email: {email}")
-            return JSONResponse({"error": "Too many password reset requests. Please try again later."}, status_code=429)
+            # SECURITY: Return success to prevent enumeration
+            return {"ok": True}
     except Exception as ex:
         logger.warning(f"[auth.password_reset] Rate limit check failed: {ex}")
     
@@ -220,7 +235,9 @@ async def auth_password_reset_request(request: Request, payload: dict = Body(...
         user = fb_auth.get_user_by_email(email)
         uid = getattr(user, "uid", None)
         if not uid:
-            return JSONResponse({"error": "account not found"}, status_code=404)
+            # SECURITY: Return success even if user doesn't exist (prevent enumeration)
+            logger.info(f"[auth.password_reset] Email not found (hidden): {email}")
+            return {"ok": True}
 
         # Generate 6-digit OTP
         code = f"{secrets.randbelow(1_000_000):06d}"
