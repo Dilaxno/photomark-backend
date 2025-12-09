@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Request, Depends
+from fastapi import APIRouter, Body, Request, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse
 from core.auth import firebase_enabled, fb_auth, get_uid_from_request  # type: ignore
 from core.config import logger
@@ -6,8 +6,84 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from core.database import get_db
 from models.user import User
+from models.login_history import LoginHistory
+from utils.emailing import render_email, send_email_smtp
+import httpx
 
-router = APIRouter(prefix="/api/auth/ip", tags=["auth-ip"]) 
+router = APIRouter(prefix="/api/auth/ip", tags=["auth-ip"])
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP from request, handling proxies."""
+    # Check X-Forwarded-For header (when behind proxy/load balancer)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    # Check X-Real-IP header
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    # Fall back to direct client IP
+    return request.client.host if request.client else "unknown"
+
+
+async def get_ip_location(ip: str) -> dict:
+    """Get city, country, and country code from IP address using ip-api.com (free, no API key needed)."""
+    try:
+        # Skip geolocation for localhost/private IPs
+        if ip in ("127.0.0.1", "localhost", "unknown") or ip.startswith(("192.168.", "10.", "172.")):
+            return {"city": "Local Network", "country": "Local", "country_code": None}
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"http://ip-api.com/json/{ip}?fields=status,city,country,countryCode")
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success":
+                    return {
+                        "city": data.get("city", "Unknown"),
+                        "country": data.get("country", "Unknown"),
+                        "country_code": data.get("countryCode"),  # ISO 3166-1 alpha-2
+                    }
+    except Exception as ex:
+        logger.warning(f"IP geolocation failed for {ip}: {ex}")
+    return {"city": "Unknown", "country": "Unknown", "country_code": None}
+
+
+def send_new_ip_login_email(email: str, display_name: str, ip: str, city: str, country: str):
+    """Send email notification about login from new IP."""
+    try:
+        location = f"{city}, {country}" if city != "Unknown" else "Unknown location"
+        login_time = datetime.utcnow().strftime("%B %d, %Y at %H:%M UTC")
+        
+        html = render_email(
+            "email_basic.html",
+            title="New Login Detected",
+            intro=f"""Hi {display_name or 'there'},<br><br>
+We noticed a login to your account from a new location:<br><br>
+<strong>IP Address:</strong> {ip}<br>
+<strong>Location:</strong> {location}<br>
+<strong>Time:</strong> {login_time}<br><br>
+If this was you, no action is needed. If you don't recognize this activity, please secure your account by changing your password immediately.""",
+            button_label="",
+            button_url="",
+            footer_note="This is an automated security notification. If you have any concerns, please contact support.",
+        )
+        text = f"""Hi {display_name or 'there'},
+
+We noticed a login to your account from a new location:
+
+IP Address: {ip}
+Location: {location}
+Time: {login_time}
+
+If this was you, no action is needed. If you don't recognize this activity, please secure your account by changing your password immediately.
+
+This is an automated security notification."""
+
+        send_email_smtp(email, "New Login Detected - Security Alert", html, text)
+        logger.info(f"[auth_ip] Sent new IP login notification to {email} for IP {ip}")
+    except Exception as ex:
+        logger.exception(f"[auth_ip] Failed to send new IP login email: {ex}") 
 
 
 @router.post("/register-signup")
@@ -67,29 +143,112 @@ async def register_signup(payload: dict = Body(...), db: Session = Depends(get_d
 
 
 @router.post("/last-login")
-async def last_login(request: Request, db: Session = Depends(get_db)):
+async def last_login(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
         email = None
+        display_name = None
         if firebase_enabled and fb_auth:
             try:
                 user = fb_auth.get_user(uid)
                 email = (getattr(user, "email", None) or "").lower()
+                display_name = getattr(user, "display_name", None)
             except Exception:
                 pass
-        # Update PostgreSQL user last_login_at and email if we have it
+        
+        # Get client IP
+        current_ip = get_client_ip(request)
+        
+        # Update PostgreSQL user last_login_at, email, and check IP
         try:
             u = db.query(User).filter(User.uid == uid).first()
             if u:
                 if email:
                     u.email = email
+                
+                # Check if IP has changed
+                previous_ip = u.last_login_ip
+                ip_changed = previous_ip and previous_ip != current_ip and current_ip != "unknown"
+                
+                # Update login info
                 u.last_login_at = datetime.utcnow()
+                u.last_login_ip = current_ip
                 db.commit()
-        except Exception:
+                
+                # Get location and store login history in background
+                async def process_login():
+                    location = await get_ip_location(current_ip)
+                    
+                    # Store login history
+                    try:
+                        from core.database import SessionLocal
+                        db_session = SessionLocal()
+                        try:
+                            login_record = LoginHistory(
+                                uid=uid,
+                                ip_address=current_ip,
+                                city=location["city"],
+                                country=location["country"],
+                                country_code=location.get("country_code"),
+                            )
+                            db_session.add(login_record)
+                            db_session.commit()
+                            logger.info(f"[auth_ip] Stored login history for {uid} from {current_ip}")
+                        finally:
+                            db_session.close()
+                    except Exception as ex:
+                        logger.warning(f"[auth_ip] Failed to store login history: {ex}")
+                    
+                    # Send notification email if IP changed
+                    if ip_changed and email:
+                        send_new_ip_login_email(
+                            email=email,
+                            display_name=display_name or u.display_name,
+                            ip=current_ip,
+                            city=location["city"],
+                            country=location["country"]
+                        )
+                        logger.info(f"[auth_ip] IP changed for user {uid}: {previous_ip} -> {current_ip}")
+                
+                import asyncio
+                asyncio.create_task(process_login())
+                    
+        except Exception as ex:
+            logger.warning(f"[auth_ip] DB update failed: {ex}")
             db.rollback()
         return {"ok": True}
     except Exception as ex:
         logger.warning(f"last-login failed for {uid}: {ex}")
         return {"ok": False}
+
+
+
+@router.get("/login-history")
+async def get_login_history(request: Request, db: Session = Depends(get_db), limit: int = 20):
+    """
+    Get recent login history for the authenticated user.
+    Returns list of logins with IP, city, country, country_code, and timestamp.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Get recent logins, ordered by most recent first
+        logins = (
+            db.query(LoginHistory)
+            .filter(LoginHistory.uid == uid)
+            .order_by(LoginHistory.logged_in_at.desc())
+            .limit(min(limit, 50))  # Cap at 50 max
+            .all()
+        )
+        
+        return {
+            "logins": [login.to_dict() for login in logins],
+            "count": len(logins)
+        }
+    except Exception as ex:
+        logger.exception(f"[auth_ip] Failed to get login history for {uid}: {ex}")
+        return JSONResponse({"error": "Failed to retrieve login history"}, status_code=500)

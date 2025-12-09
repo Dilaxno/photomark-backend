@@ -52,6 +52,9 @@ class User(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     
+    # Login IP tracking for security notifications
+    last_login_ip = Column(String(45), nullable=True)  # IPv6 max length is 45 chars
+    
     # Additional metadata as JSON
     extra_metadata = Column(JSON, default={})
     
