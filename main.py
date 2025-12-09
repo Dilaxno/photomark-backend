@@ -228,6 +228,21 @@ def _find_vault_domain_by_host(db, host: str):
         logger.error(f"[custom-domain] Vault domain lookup error: {e}")
         return None
 
+
+def _find_website_domain_by_host(db, host: str):
+    """Find website domain record by hostname"""
+    try:
+        from models.website_domain import WebsiteDomain
+        host_l = (host or "").strip().lower().rstrip(".")
+        domain = db.query(WebsiteDomain).filter(WebsiteDomain.hostname == host_l).first()
+        logger.info(f"[custom-domain] Website domain lookup for '{host_l}': found={domain is not None}, enabled={domain.enabled if domain else None}")
+        if domain and domain.enabled:
+            return domain
+        return None
+    except Exception as e:
+        logger.error(f"[custom-domain] Website domain lookup error: {e}")
+        return None
+
 @app.middleware("http")
 async def custom_domain_routing(request: Request, call_next):
     try:
@@ -255,7 +270,8 @@ async def custom_domain_routing(request: Request, call_next):
                     shop = _find_shop_by_host(db, host)
                     uploads_domain = _find_uploads_domain_by_host(db, host) if not shop else None
                     vault_domain = _find_vault_domain_by_host(db, host) if not shop and not uploads_domain else None
-                    if shop or uploads_domain or vault_domain:
+                    website_domain = _find_website_domain_by_host(db, host) if not shop and not uploads_domain and not vault_domain else None
+                    if shop or uploads_domain or vault_domain or website_domain:
                         # Proxy static asset request to frontend
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         # Strip /shop prefix if present (happens when URL is /shop/{slug} and assets are relative)
@@ -341,6 +357,26 @@ window.__SHOP_SLUG__="{slug}";
                             try{{history.replaceState(null,'','/#share?token={share_token or ""}')}}catch(e){{}}
                         </script>"""
                         html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
+                        return Response(content=html, media_type="text/html", status_code=200)
+                
+                # Check for website custom domain
+                website_domain = _find_website_domain_by_host(db, host)
+                logger.info(f"[custom-domain] Found website_domain: {website_domain.hostname if website_domain else None}")
+                if website_domain:
+                    # Serve the website page
+                    website_id = website_domain.website_id
+                    uid = website_domain.uid
+                    front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        r = await client.get(f"{front}/", follow_redirects=True)
+                        html = r.text
+                        # Inject script to set website custom domain mode
+                        inject = f"""<script>
+                            window.__WEBSITE_CUSTOM_DOMAIN__ = true;
+                            window.__WEBSITE_ID__ = "{website_id or ''}";
+                            window.__WEBSITE_OWNER_UID__ = "{uid or ''}";
+                        </script>"""
+                        html = html.replace("<head>", "<head>" + inject) if "<head>" in html else (inject + html)
                         return Response(content=html, media_type="text/html", status_code=200)
             finally:
                 try:
@@ -714,6 +750,24 @@ async def domains_validate(request: Request):
                         logger.info(f"Domain {domain} found but not enabled/verified yet")
             except Exception as e:
                 logger.warning(f"Vault domain query failed: {e}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            
+            # Check website custom domains (using dedicated table)
+            try:
+                from models.website_domain import WebsiteDomain
+                website_domain = db.query(WebsiteDomain).filter(WebsiteDomain.hostname == domain).first()
+                if website_domain:
+                    logger.info(f"Domain {domain} found in website_domains (enabled={website_domain.enabled}, dns_verified={website_domain.dns_verified})")
+                    if website_domain.enabled or website_domain.dns_verified:
+                        logger.info(f"Domain {domain} validated via website_domains table")
+                        return PlainTextResponse("ok", status_code=200)
+                    else:
+                        logger.info(f"Domain {domain} found but not enabled/verified yet")
+            except Exception as e:
+                logger.warning(f"Website domain query failed: {e}")
                 try:
                     db.rollback()
                 except Exception:
