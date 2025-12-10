@@ -15,6 +15,20 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from models.user import User
 
+# Paid plans that have access to Lightroom plugin
+PAID_PLANS = ["pro", "business", "enterprise", "agencies"]
+
+
+def _is_paid_user(db: Session, uid: str) -> bool:
+    """Check if user has a paid plan."""
+    try:
+        user = db.query(User).filter(User.uid == uid).first()
+        if not user:
+            return False
+        return user.plan in PAID_PLANS
+    except Exception:
+        return False
+
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
@@ -66,17 +80,25 @@ async def list_api_tokens(request: Request):
 
 
 @router.post("/tokens")
-async def create_api_token(request: Request, payload: dict = Body(...)):
+async def create_api_token(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
     """
     Create a new API token for integrations (Lightroom, etc.).
     Body: { "name": str (e.g., "Lightroom"), "expires_days": int (optional, default 365) }
     Returns: { "token": str, "id": str, "expires_at": str }
     
     IMPORTANT: The token is only returned once. Store it securely.
+    NOTE: This feature is only available for paid users.
     """
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # Check if user has a paid plan
+    if not _is_paid_user(db, uid):
+        return JSONResponse(
+            {"error": "Lightroom plugin is a premium feature. Please upgrade to a paid plan."},
+            status_code=403
+        )
     
     name = str((payload or {}).get("name") or "").strip()
     if not name:
