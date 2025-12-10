@@ -46,6 +46,69 @@ except Exception as ex:
 
 
 
+def _verify_photomark_api_token(token: str) -> Optional[str]:
+    """
+    Verify a Photomark API token (pm_{uid_prefix}_{token}) and return the user UID.
+    Used for integrations like Lightroom plugin.
+    """
+    if not token or not token.startswith("pm_"):
+        return None
+    
+    try:
+        import hashlib
+        from datetime import datetime
+        
+        parts = token.split("_", 2)
+        if len(parts) != 3:
+            return None
+        
+        _, uid_prefix, actual_token = parts
+        token_hash = hashlib.sha256(actual_token.encode()).hexdigest()
+        
+        # Find user by uid prefix - check common storage locations
+        # This searches for users whose uid starts with the prefix
+        from utils.storage import read_json_key
+        import os
+        
+        # Try to find the user's token file
+        # We need to iterate through potential users - in production use a database index
+        # For now, we'll use a token lookup table
+        lookup_key = f"auth/api_token_lookup/{token_hash[:16]}.json"
+        lookup = read_json_key(lookup_key)
+        
+        if lookup and lookup.get("uid"):
+            uid = lookup["uid"]
+            # Verify the token is still valid
+            tokens_key = f"users/{uid}/integrations/api_tokens.json"
+            data = read_json_key(tokens_key) or {}
+            tokens = data.get("tokens", [])
+            
+            now = datetime.utcnow()
+            for t in tokens:
+                if t.get("hash") == token_hash and t.get("is_active", True):
+                    # Check expiry
+                    exp_str = t.get("expires_at")
+                    if exp_str:
+                        try:
+                            exp = datetime.fromisoformat(exp_str)
+                            if now > exp:
+                                continue
+                        except Exception:
+                            pass
+                    
+                    # Update last_used_at
+                    t["last_used_at"] = now.isoformat()
+                    from utils.storage import write_json_key
+                    write_json_key(tokens_key, data)
+                    
+                    return uid
+        
+        return None
+    except Exception as ex:
+        logger.warning(f"API token verification failed: {ex}")
+        return None
+
+
 def get_uid_from_request(request: Request) -> Optional[str]:
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header or not auth_header.lower().startswith("bearer "):
@@ -54,6 +117,11 @@ def get_uid_from_request(request: Request) -> Optional[str]:
     if not token:
         return None
     
+    # Check if it's a Photomark API token (for integrations like Lightroom)
+    if token.startswith("pm_"):
+        return _verify_photomark_api_token(token)
+    
+    # Otherwise, verify as Firebase ID token
     if not firebase_enabled or not fb_auth:
         return None
     try:

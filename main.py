@@ -482,6 +482,13 @@ from routers import auth_ip, account  # noqa: E402
 app.include_router(auth_ip.router)
 app.include_router(account.router)
 
+# Integrations (API tokens for Lightroom, etc.)
+try:
+    from routers import integrations  # noqa: E402
+    app.include_router(integrations.router)
+except Exception as _ex:
+    logger.warning(f"integrations router not available: {_ex}")
+
 # IPTC/EXIF metadata embedding endpoints
 try:
     from routers import metadata  # noqa: E402
