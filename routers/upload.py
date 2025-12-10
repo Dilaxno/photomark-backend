@@ -509,32 +509,38 @@ async def process_watermark_zip(
         return StreamingResponse(io.BytesIO(data), media_type='image/jpeg', headers=headers)
 
     # Otherwise, build a ZIP with manifest
+    # Process all files FIRST (outside the zipfile context) to avoid async issues
+    processed: list[tuple[str, str, bytes]] = []  # (orig_name, output_name, data)
+    used_names: set[str] = set()
+    
+    def _unique_name(n: str) -> str:
+        base, ext = os.path.splitext(n)
+        cand = n
+        i = 1
+        while cand in used_names:
+            cand = f"{base}_{i}{ext}"
+            i += 1
+        used_names.add(cand)
+        return cand
+    
+    for uf in files:
+        res = await _process_one(uf)
+        if not res:
+            continue
+        name, data = res
+        final_name = _unique_name(name)
+        orig = os.path.basename(uf.filename or '') or 'image.jpg'
+        processed.append((orig, final_name, data))
+    
+    # Now create the ZIP synchronously with all data ready
     mem = io.BytesIO()
-    mappings: list[tuple[str, str]] = []
     with zipfile.ZipFile(mem, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-        used_names: set[str] = set()
-        def _unique_name(n: str) -> str:
-            base, ext = os.path.splitext(n)
-            cand = n
-            i = 1
-            while cand in used_names:
-                cand = f"{base}_{i}{ext}"
-                i += 1
-            used_names.add(cand)
-            return cand
-        for uf in files:
-            res = await _process_one(uf)
-            if not res:
-                continue
-            name, data = res
-            final_name = _unique_name(name)
-            orig = os.path.basename(uf.filename or '') or 'image.jpg'
-            mappings.append((orig, final_name))
+        for orig, final_name, data in processed:
             zf.writestr(final_name, data)
         # Write manifest
         try:
-            if mappings:
-                lines = ["Original Filename -> Output Filename"] + [f"{o} -> {n}" for (o, n) in mappings]
+            if processed:
+                lines = ["Original Filename -> Output Filename"] + [f"{o} -> {n}" for (o, n, _) in processed]
                 zf.writestr('manifest.txt', "\n".join(lines))
         except Exception:
             pass
