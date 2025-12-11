@@ -384,6 +384,240 @@ async def dropbox_sync_status(request: Request):
     }
 
 
+@router.get("/folders")
+async def dropbox_list_folders(
+    request: Request,
+    path: str = Query(""),  # Empty string = root
+):
+    """List all folders in user's Dropbox."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    token_data = read_json_key(_dropbox_token_key(uid))
+    if not token_data or not token_data.get("access_token"):
+        return JSONResponse({"error": "Dropbox not connected"}, status_code=401)
+
+    access_token = await _ensure_valid_token(uid, token_data)
+    if not access_token:
+        return JSONResponse({"error": "Dropbox token expired"}, status_code=401)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{DROPBOX_API_BASE}/files/list_folder",
+                json={
+                    "path": path if path else "",
+                    "recursive": False,
+                    "include_deleted": False,
+                    "include_has_explicit_shared_members": False,
+                    "include_mounted_folders": True,
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            if resp.status_code != 200:
+                return JSONResponse({"error": "Failed to list folders"}, status_code=500)
+
+            data = resp.json()
+            entries = data.get("entries", [])
+            
+            # Filter to only folders
+            folders = [
+                {
+                    "id": e.get("id"),
+                    "name": e.get("name"),
+                    "path": e.get("path_display"),
+                }
+                for e in entries if e.get(".tag") == "folder"
+            ]
+            
+            return {"folders": folders, "path": path}
+
+    except Exception as ex:
+        logger.exception(f"Dropbox folders error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.get("/files")
+async def dropbox_list_files(
+    request: Request,
+    path: str = Query(""),  # Empty string = root
+    cursor: str = Query(None),
+):
+    """List image files in a Dropbox folder for importing."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    token_data = read_json_key(_dropbox_token_key(uid))
+    if not token_data or not token_data.get("access_token"):
+        return JSONResponse({"error": "Dropbox not connected"}, status_code=401)
+
+    access_token = await _ensure_valid_token(uid, token_data)
+    if not access_token:
+        return JSONResponse({"error": "Dropbox token expired"}, status_code=401)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            if cursor:
+                # Continue from cursor
+                resp = await client.post(
+                    f"{DROPBOX_API_BASE}/files/list_folder/continue",
+                    json={"cursor": cursor},
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json"
+                    }
+                )
+            else:
+                resp = await client.post(
+                    f"{DROPBOX_API_BASE}/files/list_folder",
+                    json={
+                        "path": path if path else "",
+                        "recursive": False,
+                        "include_deleted": False,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json"
+                    }
+                )
+
+            if resp.status_code != 200:
+                return JSONResponse({"error": "Failed to list files"}, status_code=500)
+
+            data = resp.json()
+            entries = data.get("entries", [])
+            has_more = data.get("has_more", False)
+            next_cursor = data.get("cursor") if has_more else None
+            
+            # Filter to only image files
+            image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tiff", ".tif", ".bmp"}
+            files = []
+            for e in entries:
+                if e.get(".tag") == "file":
+                    name = e.get("name", "")
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in image_extensions:
+                        files.append({
+                            "id": e.get("id"),
+                            "name": name,
+                            "path": e.get("path_display"),
+                            "size": e.get("size"),
+                            "modified": e.get("client_modified"),
+                        })
+            
+            return {
+                "files": files,
+                "path": path,
+                "cursor": next_cursor,
+                "has_more": has_more
+            }
+
+    except Exception as ex:
+        logger.exception(f"Dropbox files error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/import")
+async def dropbox_import_files(
+    request: Request,
+    file_paths: List[str] = Body(...),
+):
+    """Import/download files from Dropbox to user's gallery."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    token_data = read_json_key(_dropbox_token_key(uid))
+    if not token_data or not token_data.get("access_token"):
+        return JSONResponse({"error": "Dropbox not connected"}, status_code=401)
+
+    access_token = await _ensure_valid_token(uid, token_data)
+    if not access_token:
+        return JSONResponse({"error": "Dropbox token expired"}, status_code=401)
+
+    if not file_paths:
+        return JSONResponse({"error": "No files selected"}, status_code=400)
+
+    if len(file_paths) > 50:
+        return JSONResponse({"error": "Maximum 50 files per import"}, status_code=400)
+
+    imported = []
+    failed = []
+
+    try:
+        import json
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for file_path in file_paths:
+                try:
+                    # Download file content
+                    dropbox_arg = json.dumps({"path": file_path})
+                    download_resp = await client.post(
+                        f"{DROPBOX_CONTENT_BASE}/files/download",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Dropbox-API-Arg": dropbox_arg
+                        }
+                    )
+
+                    if download_resp.status_code != 200:
+                        failed.append({"path": file_path, "error": "Download failed"})
+                        continue
+
+                    file_bytes = download_resp.content
+                    
+                    # Get filename from path
+                    filename = file_path.split("/")[-1] if "/" in file_path else file_path
+
+                    # Determine content type and extension
+                    ext = os.path.splitext(filename)[1].lower() or ".jpg"
+                    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".tiff", ".tif"):
+                        ext = ".jpg"
+                    ct_map = {
+                        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                        ".webp": "image/webp", ".gif": "image/gif", ".heic": "image/heic",
+                        ".tiff": "image/tiff", ".tif": "image/tiff"
+                    }
+                    content_type = ct_map.get(ext, "image/jpeg")
+
+                    # Save to user's external folder
+                    from datetime import datetime as _dt
+                    date_prefix = _dt.utcnow().strftime("%Y/%m/%d")
+                    base = os.path.splitext(filename)[0] or "import"
+                    stamp = int(_dt.utcnow().timestamp())
+                    key = f"users/{uid}/external/{date_prefix}/{base}-{stamp}{ext}"
+
+                    from utils.storage import upload_bytes
+                    url = upload_bytes(key, file_bytes, content_type=content_type)
+
+                    imported.append({
+                        "path": file_path,
+                        "filename": filename,
+                        "key": key,
+                        "url": url
+                    })
+
+                except Exception as ex:
+                    logger.warning(f"Import failed for {file_path}: {ex}")
+                    failed.append({"path": file_path, "error": str(ex)})
+
+        return {
+            "ok": True,
+            "imported": len(imported),
+            "failed": len(failed),
+            "details": {"imported": imported, "failed": failed}
+        }
+
+    except Exception as ex:
+        logger.exception(f"Dropbox import error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
 # ============ Helper Functions ============
 
 async def _create_folder_if_not_exists(access_token: str, folder_path: str) -> str:

@@ -378,6 +378,248 @@ async def onedrive_sync_status(request: Request):
     }
 
 
+@router.get("/folders")
+async def onedrive_list_folders(
+    request: Request,
+    folder_id: str = Query(None),  # None = root
+):
+    """List all folders in user's OneDrive."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    token_data = read_json_key(_onedrive_token_key(uid))
+    if not token_data or not token_data.get("access_token"):
+        return JSONResponse({"error": "OneDrive not connected"}, status_code=401)
+
+    access_token = await _ensure_valid_token(uid, token_data)
+    if not access_token:
+        return JSONResponse({"error": "OneDrive token expired"}, status_code=401)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            if folder_id:
+                url = f"{GRAPH_API_BASE}/me/drive/items/{folder_id}/children"
+            else:
+                url = f"{GRAPH_API_BASE}/me/drive/root/children"
+
+            resp = await client.get(
+                url,
+                params={
+                    "$filter": "folder ne null",
+                    "$select": "id,name,folder,parentReference,lastModifiedDateTime",
+                    "$orderby": "name",
+                    "$top": 100
+                },
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+
+            if resp.status_code != 200:
+                return JSONResponse({"error": "Failed to list folders"}, status_code=500)
+
+            data = resp.json()
+            items = data.get("value", [])
+            
+            folders = [
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "modified": item.get("lastModifiedDateTime"),
+                    "parent_id": item.get("parentReference", {}).get("id"),
+                }
+                for item in items if "folder" in item
+            ]
+
+            return {"folders": folders, "folder_id": folder_id}
+
+    except Exception as ex:
+        logger.exception(f"OneDrive folders error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.get("/files")
+async def onedrive_list_files(
+    request: Request,
+    folder_id: str = Query(None),  # None = root
+    skip_token: str = Query(None),
+):
+    """List image files in a OneDrive folder for importing."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    token_data = read_json_key(_onedrive_token_key(uid))
+    if not token_data or not token_data.get("access_token"):
+        return JSONResponse({"error": "OneDrive not connected"}, status_code=401)
+
+    access_token = await _ensure_valid_token(uid, token_data)
+    if not access_token:
+        return JSONResponse({"error": "OneDrive token expired"}, status_code=401)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            if folder_id:
+                url = f"{GRAPH_API_BASE}/me/drive/items/{folder_id}/children"
+            else:
+                url = f"{GRAPH_API_BASE}/me/drive/root/children"
+
+            params = {
+                "$filter": "file ne null",
+                "$select": "id,name,file,size,lastModifiedDateTime,@microsoft.graph.downloadUrl",
+                "$orderby": "lastModifiedDateTime desc",
+                "$top": 50
+            }
+            if skip_token:
+                params["$skiptoken"] = skip_token
+
+            resp = await client.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+
+            if resp.status_code != 200:
+                return JSONResponse({"error": "Failed to list files"}, status_code=500)
+
+            data = resp.json()
+            items = data.get("value", [])
+            next_link = data.get("@odata.nextLink")
+            
+            # Extract skip token from next link if present
+            next_skip_token = None
+            if next_link and "$skiptoken=" in next_link:
+                next_skip_token = next_link.split("$skiptoken=")[1].split("&")[0]
+
+            # Filter to only image files
+            image_mimes = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/tiff", "image/bmp"}
+            files = []
+            for item in items:
+                if "file" in item:
+                    mime_type = item.get("file", {}).get("mimeType", "")
+                    if mime_type in image_mimes or any(item.get("name", "").lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tiff", ".tif"]):
+                        files.append({
+                            "id": item.get("id"),
+                            "name": item.get("name"),
+                            "size": item.get("size"),
+                            "modified": item.get("lastModifiedDateTime"),
+                            "mime_type": mime_type,
+                        })
+
+            return {
+                "files": files,
+                "folder_id": folder_id,
+                "skip_token": next_skip_token,
+                "has_more": next_skip_token is not None
+            }
+
+    except Exception as ex:
+        logger.exception(f"OneDrive files error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/import")
+async def onedrive_import_files(
+    request: Request,
+    file_ids: List[str] = Body(...),
+):
+    """Import/download files from OneDrive to user's gallery."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    token_data = read_json_key(_onedrive_token_key(uid))
+    if not token_data or not token_data.get("access_token"):
+        return JSONResponse({"error": "OneDrive not connected"}, status_code=401)
+
+    access_token = await _ensure_valid_token(uid, token_data)
+    if not access_token:
+        return JSONResponse({"error": "OneDrive token expired"}, status_code=401)
+
+    if not file_ids:
+        return JSONResponse({"error": "No files selected"}, status_code=400)
+
+    if len(file_ids) > 50:
+        return JSONResponse({"error": "Maximum 50 files per import"}, status_code=400)
+
+    imported = []
+    failed = []
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for file_id in file_ids:
+                try:
+                    # Get file metadata with download URL
+                    meta_resp = await client.get(
+                        f"{GRAPH_API_BASE}/me/drive/items/{file_id}",
+                        params={"$select": "id,name,file,size,@microsoft.graph.downloadUrl"},
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+
+                    if meta_resp.status_code != 200:
+                        failed.append({"file_id": file_id, "error": "Could not get file info"})
+                        continue
+
+                    file_meta = meta_resp.json()
+                    filename = file_meta.get("name", "image.jpg")
+                    download_url = file_meta.get("@microsoft.graph.downloadUrl")
+
+                    if not download_url:
+                        failed.append({"file_id": file_id, "error": "No download URL"})
+                        continue
+
+                    # Download file content
+                    download_resp = await client.get(download_url)
+
+                    if download_resp.status_code != 200:
+                        failed.append({"file_id": file_id, "error": "Download failed"})
+                        continue
+
+                    file_bytes = download_resp.content
+
+                    # Determine content type and extension
+                    ext = os.path.splitext(filename)[1].lower() or ".jpg"
+                    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".tiff", ".tif"):
+                        ext = ".jpg"
+                    ct_map = {
+                        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                        ".webp": "image/webp", ".gif": "image/gif", ".heic": "image/heic",
+                        ".tiff": "image/tiff", ".tif": "image/tiff"
+                    }
+                    content_type = ct_map.get(ext, "image/jpeg")
+
+                    # Save to user's external folder
+                    from datetime import datetime as _dt
+                    date_prefix = _dt.utcnow().strftime("%Y/%m/%d")
+                    base = os.path.splitext(filename)[0] or "import"
+                    stamp = int(_dt.utcnow().timestamp())
+                    key = f"users/{uid}/external/{date_prefix}/{base}-{stamp}{ext}"
+
+                    from utils.storage import upload_bytes
+                    url = upload_bytes(key, file_bytes, content_type=content_type)
+
+                    imported.append({
+                        "file_id": file_id,
+                        "filename": filename,
+                        "key": key,
+                        "url": url
+                    })
+
+                except Exception as ex:
+                    logger.warning(f"Import failed for {file_id}: {ex}")
+                    failed.append({"file_id": file_id, "error": str(ex)})
+
+        return {
+            "ok": True,
+            "imported": len(imported),
+            "failed": len(failed),
+            "details": {"imported": imported, "failed": failed}
+        }
+
+    except Exception as ex:
+        logger.exception(f"OneDrive import error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
 # ============ Helper Functions ============
 
 async def _create_or_get_folder(

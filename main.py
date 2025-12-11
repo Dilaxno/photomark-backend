@@ -661,6 +661,13 @@ try:
 except Exception as _ex:
     logger.warning(f"cloud_picker router not available: {_ex}")
 
+# Notion integration (portfolio pages/galleries)
+try:
+    from routers import notion  # noqa: E402
+    app.include_router(notion.router)
+except Exception as _ex:
+    logger.warning(f"notion router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
