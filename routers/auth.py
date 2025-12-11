@@ -450,17 +450,15 @@ async def auth_password_reset_secondary_email(payload: dict = Body(...), db: Ses
         
         # Send email to secondary email
         try:
-            send_email_smtp(
-                to_email=secondary_email,
-                subject="Password Reset Code - Photomark",
-                html_body=f"""
-                <h2>Password Reset Code</h2>
-                <p>Your password reset code is:</p>
-                <h1 style="font-size: 32px; letter-spacing: 8px; font-family: monospace;">{code}</h1>
-                <p>This code expires in 15 minutes.</p>
-                <p>If you didn't request this, please ignore this email.</p>
-                """
-            )
+            html = f"""
+            <h2>Password Reset Code</h2>
+            <p>Your password reset code is:</p>
+            <h1 style="font-size: 32px; letter-spacing: 8px; font-family: monospace;">{code}</h1>
+            <p>This code expires in 15 minutes.</p>
+            <p>If you didn't request this, please ignore this email.</p>
+            """
+            text = f"Your password reset code is: {code}\n\nThis code expires in 15 minutes."
+            send_email_smtp(secondary_email, "Password Reset Code - Photomark", html, text)
         except Exception as ex:
             logger.warning(f"Failed to send secondary email: {ex}")
         
