@@ -56,6 +56,22 @@ from routers.vaults import (
     _vault_salt, _hash_password_bcrypt
 )
 
+# Import cloud storage auto-sync triggers
+try:
+    from routers.google_drive import trigger_auto_sync_if_enabled as gdrive_auto_sync
+except ImportError:
+    gdrive_auto_sync = None
+
+try:
+    from routers.dropbox import trigger_auto_sync_if_enabled as dropbox_auto_sync
+except ImportError:
+    dropbox_auto_sync = None
+
+try:
+    from routers.onedrive import trigger_auto_sync_if_enabled as onedrive_auto_sync
+except ImportError:
+    onedrive_auto_sync = None
+
 router = APIRouter(prefix="", tags=["upload"])  # no prefix to serve /upload
 
 
@@ -365,6 +381,31 @@ async def upload_external(
         except Exception as ex:
             logger.warning(f"external upload failed for {getattr(uf,'filename', '')}: {ex}")
             continue
+
+    # Trigger cloud storage auto-sync if enabled
+    if uploaded:
+        uploaded_keys = [u["key"] for u in uploaded]
+        
+        # Google Drive auto-sync
+        if gdrive_auto_sync is not None:
+            try:
+                await gdrive_auto_sync(uid, uploaded_keys)
+            except Exception as sync_ex:
+                logger.warning(f"Google Drive auto-sync trigger failed: {sync_ex}")
+        
+        # Dropbox auto-sync
+        if dropbox_auto_sync is not None:
+            try:
+                await dropbox_auto_sync(uid, uploaded_keys)
+            except Exception as sync_ex:
+                logger.warning(f"Dropbox auto-sync trigger failed: {sync_ex}")
+        
+        # OneDrive auto-sync
+        if onedrive_auto_sync is not None:
+            try:
+                await onedrive_auto_sync(uid, uploaded_keys)
+            except Exception as sync_ex:
+                logger.warning(f"OneDrive auto-sync trigger failed: {sync_ex}")
 
     return {"ok": True, "uploaded": uploaded}
 

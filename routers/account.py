@@ -130,7 +130,7 @@ async def get_entitlement(request: Request, db: Session = Depends(get_db)):
         if not user:
             return {"isPaid": False, "plan": "free"}
         
-        paid_plans = ["pro", "business", "enterprise", "agencies"]
+        paid_plans = ["individual", "studios", "golden", "golden_offer", "pro", "business", "enterprise", "agencies", "photographers", "team"]
         is_paid = user.plan in paid_plans
         
         return {"isPaid": is_paid, "plan": user.plan}
