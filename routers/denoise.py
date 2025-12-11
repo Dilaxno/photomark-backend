@@ -201,6 +201,71 @@ def _denoise_periodic_fourier(rgb: np.ndarray, noise_type: int, D0: float, order
     return out.astype(np.uint8)
 
 
+@router.post("/process/denoise-brush")
+async def denoise_brush(
+    image: UploadFile = File(...),
+    mask: UploadFile = File(...),
+    strength: float = Form(0.5),
+    jpeg_quality: int = Form(90),
+):
+    """
+    Apply denoising only to masked regions using OpenCV fastNlMeansDenoisingColored.
+    The mask should be a grayscale/binary image where white (255) indicates areas to denoise.
+    """
+    try:
+        # Read original image
+        img_data = await image.read()
+        rgb, alpha = _read_image_keep_alpha(img_data)
+        
+        # Read mask
+        mask_data = await mask.read()
+        mask_img = Image.open(BytesIO(mask_data)).convert("L")
+        mask_arr = np.array(mask_img)
+        
+        # Resize mask to match image if needed
+        if mask_arr.shape[:2] != rgb.shape[:2]:
+            mask_arr = cv2.resize(mask_arr, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+        
+        # Normalize mask to 0-1 range
+        mask_normalized = mask_arr.astype(np.float32) / 255.0
+        
+        # Apply denoising to the entire image
+        denoised_rgb = _denoise_cv2(
+            rgb,
+            float(max(0.0, min(1.0, strength))),
+            None,  # h_luma
+            None,  # h_color
+            7,     # template_size
+            21,    # search_size
+            False  # use_gray
+        )
+        
+        # Blend: use denoised where mask is white, original where mask is black
+        mask_3ch = np.stack([mask_normalized] * 3, axis=-1)
+        out_rgb = (rgb.astype(np.float32) * (1 - mask_3ch) + denoised_rgb.astype(np.float32) * mask_3ch)
+        out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
+        
+        out_img = _merge_alpha(out_rgb, alpha)
+        
+        buf = BytesIO()
+        name = image.filename or "image"
+        mime = "image/png" if out_img.mode == "RGBA" else "image/jpeg"
+        if mime == "image/png":
+            out_img.save(buf, format="PNG", optimize=True, compress_level=6)
+            fname = os.path.splitext(name)[0] + "_denoised.png"
+        else:
+            if out_img.mode != "RGB":
+                out_img = out_img.convert("RGB")
+            out_img.save(buf, format="JPEG", quality=int(max(1, min(95, jpeg_quality))), optimize=True, progressive=True)
+            fname = os.path.splitext(name)[0] + "_denoised.jpg"
+        buf.seek(0)
+        
+        return StreamingResponse(BytesIO(buf.getvalue()), media_type=mime, headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except Exception as e:
+        logger.error(f"Brush denoise failed: {e}")
+        return JSONResponse({"error": f"Failed to process: {e}"}, status_code=400)
+
+
 @router.post("/process/denoise-images")
 async def denoise_images(
     files: List[UploadFile] = File(...),
