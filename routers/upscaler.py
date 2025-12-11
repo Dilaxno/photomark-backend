@@ -21,8 +21,8 @@ def _get_upscaler():
     global _hf_upscaler
     if _hf_upscaler is None:
         try:
-            _hf_upscaler = hf_pipeline("image-to-image", model="caidas/swin2SR-classical-sr-x4-64", device=-1)
-            logger.info("Swin2SR classical upscaler pipeline loaded")
+            _hf_upscaler = hf_pipeline("image-to-image", model="caidas/swin2SR-compressed-sr-x4-48", device=-1)
+            logger.info("Swin2SR upscaler pipeline loaded")
         except Exception as e:
             logger.error(f"Failed to load Swin2SR pipeline: {e}")
             _hf_upscaler = None
