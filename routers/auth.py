@@ -462,7 +462,8 @@ async def auth_password_reset_secondary_email(payload: dict = Body(...), db: Ses
         except Exception as ex:
             logger.warning(f"Failed to send secondary email: {ex}")
         
-        return {"ok": True}
+        # Return primary email so frontend can use it for verification
+        return {"ok": True, "email": found_primary_email}
         
     except Exception as ex:
         logger.exception(f"Secondary email reset failed: {ex}")
