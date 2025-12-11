@@ -15,19 +15,31 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from models.user import User
 
-# Paid plans that have access to Lightroom plugin
-PAID_PLANS = ["pro", "business", "enterprise", "agencies"]
+# Plans that have access to Adobe plugins (Lightroom, Photoshop, and future plugins)
+# Only Studios and Golden tier plans have plugin access
+PLUGIN_ALLOWED_PLANS = ["studios", "golden", "golden_offer"]
+
+# All paid plans (for basic integrations access)
+PAID_PLANS = ["individual", "studios", "golden", "golden_offer", "pro", "business", "enterprise", "agencies", "photographers", "team"]
 
 
-def _is_paid_user(db: Session, uid: str) -> bool:
-    """Check if user has a paid plan."""
+def _get_user_plan(db: Session, uid: str) -> str:
+    """Get user's current plan."""
     try:
         user = db.query(User).filter(User.uid == uid).first()
-        if not user:
-            return False
-        return user.plan in PAID_PLANS
+        return user.plan if user else "free"
     except Exception:
-        return False
+        return "free"
+
+
+def _is_free_user(db: Session, uid: str) -> bool:
+    """Check if user is on the free plan."""
+    return _get_user_plan(db, uid) not in PAID_PLANS
+
+
+def _is_plugin_allowed_user(db: Session, uid: str) -> bool:
+    """Check if user has a plan that allows plugin access (Studios or Golden)."""
+    return _get_user_plan(db, uid) in PLUGIN_ALLOWED_PLANS
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -48,14 +60,22 @@ def _hash_token(token: str) -> str:
 
 
 @router.get("/tokens")
-async def list_api_tokens(request: Request):
+async def list_api_tokens(request: Request, db: Session = Depends(get_db)):
     """
     List all API tokens for the current user.
     Returns token metadata (not the actual tokens).
+    NOTE: Integrations are not available for free users.
     """
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # Free users cannot access integrations
+    if _is_free_user(db, uid):
+        return JSONResponse(
+            {"error": "Integrations are a premium feature. Please upgrade to a paid plan."},
+            status_code=403
+        )
     
     try:
         data = read_json_key(_api_tokens_key(uid)) or {}
@@ -93,10 +113,10 @@ async def create_api_token(request: Request, payload: dict = Body(...), db: Sess
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    # Check if user has a paid plan
-    if not _is_paid_user(db, uid):
+    # Check if user has a plan that allows plugin access
+    if not _is_plugin_allowed_user(db, uid):
         return JSONResponse(
-            {"error": "Lightroom plugin is a premium feature. Please upgrade to a paid plan."},
+            {"error": "Adobe plugins are available on Studios and Golden plans only. Please upgrade to access this feature."},
             status_code=403
         )
     
@@ -167,13 +187,21 @@ async def create_api_token(request: Request, payload: dict = Body(...), db: Sess
 
 
 @router.delete("/tokens/{token_id}")
-async def revoke_api_token(request: Request, token_id: str):
+async def revoke_api_token(request: Request, token_id: str, db: Session = Depends(get_db)):
     """
     Revoke (delete) an API token.
+    NOTE: Integrations are not available for free users.
     """
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # Free users cannot access integrations
+    if _is_free_user(db, uid):
+        return JSONResponse(
+            {"error": "Integrations are a premium feature. Please upgrade to a paid plan."},
+            status_code=403
+        )
     
     try:
         data = read_json_key(_api_tokens_key(uid)) or {}

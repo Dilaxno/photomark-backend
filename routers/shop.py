@@ -22,11 +22,22 @@ router = APIRouter(prefix="/api/shop", tags=["shop"])
 
 # Allowed file types
 IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+# Extended logo types - includes SVG, ICO, BMP, TIFF, AVIF, HEIC for maximum compatibility
+LOGO_TYPES = [
+    'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
+    'image/svg+xml', 'image/x-icon', 'image/vnd.microsoft.icon',  # SVG and ICO
+    'image/bmp', 'image/x-ms-bmp',  # BMP
+    'image/tiff', 'image/tif',  # TIFF
+    'image/avif',  # AVIF
+    'image/heic', 'image/heif',  # HEIC/HEIF
+    'application/octet-stream',  # Fallback for some browsers
+]
 VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo']
 FONT_TYPES = ['font/ttf', 'font/otf', 'font/woff', 'font/woff2', 'application/font-ttf', 'application/font-otf', 'application/font-woff', 'application/font-woff2', 'application/octet-stream']
 
 # File size limits
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_LOGO_SIZE = 5 * 1024 * 1024    # 5MB for logos
 MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB
 MAX_FONT_SIZE = 20 * 1024 * 1024   # 20MB
 
@@ -131,7 +142,12 @@ async def upload_shop_asset(
         print(f"[SHOP UPLOAD] User authenticated: {uid}")
         
         # Validate upload type
-        if type in ['logo', 'pfp', 'banner', 'product_image']:
+        if type in ['logo', 'pfp']:
+            # Logo/PFP accepts extended formats including SVG, ICO, etc.
+            allowed_types = LOGO_TYPES
+            max_size = MAX_LOGO_SIZE
+            media_type = 'logo'
+        elif type in ['banner', 'product_image']:
             allowed_types = IMAGE_TYPES
             max_size = MAX_IMAGE_SIZE
             media_type = 'image'
@@ -211,11 +227,30 @@ async def upload_shop_asset(
 
 
 @router.get('/uid/{uid}', response_model=ShopDataSchema)
-async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
+async def get_shop_by_uid(uid: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Get shop data by UID - SECURED: Only the shop owner can access their own shop data via UID.
+    For public access, use the /slug/{slug} endpoint instead.
+    """
     try:
+        # Verify authentication - user must be logged in
+        requester_uid = None
+        try:
+            requester_uid = get_uid_from_request(request)
+        except:
+            pass
+        
+        if not requester_uid:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
         key = (uid or "").strip()
         if not key:
             raise HTTPException(status_code=400, detail="Invalid uid")
+        
+        # Security check: User can only access their own shop via UID
+        if requester_uid != key:
+            raise HTTPException(status_code=403, detail="Access denied. You can only access your own shop data.")
+        
         shop = db.query(Shop).filter(Shop.uid == key).first()
         if not shop:
             shop = db.query(Shop).filter(Shop.owner_uid == key).first()
@@ -225,6 +260,11 @@ async def get_shop_by_uid(uid: str, db: Session = Depends(get_db)):
                 shop = db.query(Shop).filter(Shop.uid == m.uid).first()
         if not shop:
             raise HTTPException(status_code=404, detail="Shop not found")
+        
+        # Double-check ownership
+        if shop.owner_uid != requester_uid and shop.uid != requester_uid:
+            raise HTTPException(status_code=403, detail="Access denied. You can only access your own shop data.")
+        
         data = shop.to_dict()
         try:
             s = data.get("settings") or {}
@@ -328,12 +368,30 @@ async def resolve_domain(hostname: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to resolve domain: {str(e)}")
 
 @router.get('/subscription/{sub_id}', response_model=ShopDataSchema)
-async def get_shop_by_subscription(sub_id: str, db: Session = Depends(get_db)):
+async def get_shop_by_subscription(sub_id: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Get shop data by subscription ID - SECURED: Only the shop owner can access.
+    """
     try:
+        # Verify authentication
+        requester_uid = None
+        try:
+            requester_uid = get_uid_from_request(request)
+        except:
+            pass
+        
+        if not requester_uid:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
         from models.user import User
         u = db.query(User).filter(User.subscription_id == sub_id).first()
         if not u:
             raise HTTPException(status_code=404, detail="Owner not found")
+        
+        # Security check: User can only access their own shop
+        if u.uid != requester_uid:
+            raise HTTPException(status_code=403, detail="Access denied. You can only access your own shop data.")
+        
         shop = db.query(Shop).filter(Shop.uid == u.uid).first()
         if not shop:
             shop = db.query(Shop).filter(Shop.owner_uid == u.uid).first()
