@@ -289,23 +289,23 @@ async def auth_password_reset_verify(payload: dict = Body(...)):
     otp = (payload or {}).get("otp", "").strip()
     
     if not email or not otp:
-        return JSONResponse({"error": "email and otp required"}, status_code=400)
+        return JSONResponse({"error": "Please enter the verification code"}, status_code=400)
     
     rec = read_json_key(_pw_reset_otp_key(email))
     if not rec:
-        return JSONResponse({"error": "No reset request found"}, status_code=404)
+        return JSONResponse({"error": "Verification code is incorrect or has expired"}, status_code=400)
     
     try:
         exp = datetime.fromisoformat(str(rec.get("expires_at", "")))
     except Exception:
-        return JSONResponse({"error": "Invalid reset data"}, status_code=400)
+        return JSONResponse({"error": "Verification code is incorrect or has expired"}, status_code=400)
     
     now = datetime.utcnow()
     if now > exp:
-        return JSONResponse({"error": "Code has expired"}, status_code=410)
+        return JSONResponse({"error": "Verification code has expired. Please request a new one."}, status_code=410)
     
     if rec.get("code") != otp:
-        return JSONResponse({"error": "Invalid code"}, status_code=400)
+        return JSONResponse({"error": "Verification code is incorrect"}, status_code=400)
     
     # Mark as verified
     rec["verified"] = True
@@ -326,32 +326,32 @@ async def auth_password_reset_confirm_otp(payload: dict = Body(...)):
     password = (payload or {}).get("password", "").strip()
     
     if not email or not otp or not password:
-        return JSONResponse({"error": "email, otp, and password required"}, status_code=400)
+        return JSONResponse({"error": "Please fill in all required fields"}, status_code=400)
     
     if len(password) < 8:
-        return JSONResponse({"error": "password must be at least 8 characters"}, status_code=400)
+        return JSONResponse({"error": "Password must be at least 8 characters"}, status_code=400)
     
     if not firebase_enabled or not fb_auth:
-        return JSONResponse({"error": "password reset unavailable"}, status_code=500)
+        return JSONResponse({"error": "Password reset is temporarily unavailable"}, status_code=500)
     
     rec = read_json_key(_pw_reset_otp_key(email))
     if not rec:
-        return JSONResponse({"error": "No reset request found"}, status_code=404)
+        return JSONResponse({"error": "Verification code is incorrect or has expired"}, status_code=400)
     
     if not rec.get("verified"):
-        return JSONResponse({"error": "Code not verified. Please verify the code first."}, status_code=400)
+        return JSONResponse({"error": "Please verify the code first"}, status_code=400)
     
     try:
         exp = datetime.fromisoformat(str(rec.get("expires_at", "")))
     except Exception:
-        return JSONResponse({"error": "Invalid reset data"}, status_code=400)
+        return JSONResponse({"error": "Verification code is incorrect or has expired"}, status_code=400)
     
     now = datetime.utcnow()
     if now > exp:
-        return JSONResponse({"error": "Code has expired"}, status_code=410)
+        return JSONResponse({"error": "Verification code has expired. Please request a new one."}, status_code=410)
     
     if rec.get("code") != otp:
-        return JSONResponse({"error": "Invalid code"}, status_code=400)
+        return JSONResponse({"error": "Verification code is incorrect"}, status_code=400)
     
     uid = rec.get("uid")
     if not uid:
