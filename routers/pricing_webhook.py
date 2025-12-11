@@ -20,7 +20,7 @@ from models.user import User
 from models.pricing import PricingEvent, Subscription, Invoice, PaymentMethod
 from models.affiliates import AffiliateProfile, AffiliateAttribution, AffiliateConversion
 from models.shop_sales import ShopSale
-from models.shop import ShopSlug
+from models.shop import ShopSlug, Shop
 from utils.emailing import send_email_smtp, render_email
 import uuid
 
@@ -1024,6 +1024,111 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                 except Exception as email_ex:
                     logger.warning(f"[pricing.webhook] Failed to send sale notification email: {email_ex}")
                     # Don't fail the webhook if email fails
+                
+                # Generate and send commercial license to buyer
+                try:
+                    if customer_email:
+                        from utils.license_generator import generate_license_pdf, generate_license_data, generate_license_number
+                        from utils.storage import upload_bytes
+                        from datetime import datetime as dt
+                        
+                        purchase_date = dt.utcnow()
+                        
+                        # Get shop details
+                        shop_obj = None
+                        seller_name_lic = ""
+                        shop_name_lic = shop_slug or "Shop"
+                        try:
+                            if shop_uid_ctx:
+                                shop_obj = db.query(Shop).filter(Shop.uid == shop_uid_ctx).first()
+                            if not shop_obj and owner_uid_ctx:
+                                shop_obj = db.query(Shop).filter(Shop.owner_uid == owner_uid_ctx).first()
+                            if shop_obj:
+                                shop_name_lic = shop_obj.name or shop_slug or "Shop"
+                                seller_name_lic = shop_obj.owner_name or ""
+                        except Exception:
+                            pass
+                        
+                        # Generate license number
+                        license_number = generate_license_number(payment_id or sale_id, "master", purchase_date)
+                        
+                        # Generate license PDF
+                        license_pdf = generate_license_pdf(
+                            license_number=license_number,
+                            buyer_name=cust_name or "",
+                            buyer_email=customer_email,
+                            seller_name=seller_name_lic,
+                            shop_name=shop_name_lic,
+                            items=items_payload,
+                            payment_id=payment_id or sale_id,
+                            purchase_date=purchase_date,
+                            total_amount=float(amount_cents or 0) / 100,
+                            currency=currency or "USD",
+                        )
+                        
+                        # Store license PDF in R2 for later download
+                        license_key = f"shops/{shop_uid_ctx or owner_uid_ctx}/licenses/{license_number}.pdf"
+                        license_url = upload_bytes(license_key, license_pdf, content_type="application/pdf")
+                        
+                        # Store license metadata
+                        license_data = generate_license_data(
+                            payment_id=payment_id or sale_id,
+                            buyer_name=cust_name or "",
+                            buyer_email=customer_email,
+                            seller_name=seller_name_lic,
+                            shop_name=shop_name_lic,
+                            items=items_payload,
+                            purchase_date=purchase_date,
+                            total_amount=float(amount_cents or 0) / 100,
+                            currency=currency or "USD",
+                        )
+                        license_data["license_pdf_url"] = license_url
+                        
+                        # Store license metadata JSON
+                        from utils.storage import write_json_key
+                        license_meta_key = f"shops/{shop_uid_ctx or owner_uid_ctx}/licenses/{license_number}.json"
+                        write_json_key(license_meta_key, license_data)
+                        
+                        # Format items for buyer email
+                        buyer_email_items = []
+                        for item in items_payload:
+                            item_title = item.get("title", "Digital Product")
+                            item_price = item.get("price", 0)
+                            item_price_display = f"${(item_price / 100):.2f}" if isinstance(item_price, (int, float)) else str(item_price)
+                            buyer_email_items.append({
+                                "title": item_title,
+                                "price": item_price_display
+                            })
+                        
+                        # Render buyer email
+                        buyer_html = render_email(
+                            "license_delivery.html",
+                            shop_name=shop_name_lic,
+                            seller_name=seller_name_lic or shop_name_lic,
+                            license_number=license_number,
+                            amount=amount_display,
+                            items=buyer_email_items if buyer_email_items else None,
+                            payment_id=payment_id or sale_id,
+                            download_url=license_url,
+                        )
+                        
+                        # Send license email to buyer with PDF attachment
+                        send_email_smtp(
+                            to_addr=customer_email,
+                            subject=f"Your Purchase & Commercial License from {shop_name_lic}",
+                            html=buyer_html,
+                            from_addr="licenses@photomark.cloud",
+                            from_name=f"{shop_name_lic} via Photomark",
+                            attachments=[{
+                                "filename": f"License-{license_number}.pdf",
+                                "content": license_pdf,
+                                "mime_type": "application/pdf",
+                            }]
+                        )
+                        logger.info(f"[pricing.webhook] Sent license email to buyer {customer_email}, license: {license_number}")
+                except Exception as lic_ex:
+                    logger.warning(f"[pricing.webhook] Failed to generate/send license: {lic_ex}")
+                    # Don't fail the webhook if license generation fails
                 
             except Exception as _ex:
                 try:

@@ -1838,3 +1838,325 @@ async def delete_discount(
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Dodo delete discount error: {e}")
+
+
+# -------------------------------
+# License Management Endpoints
+# -------------------------------
+
+@router.get('/license/{license_number}')
+async def get_license_info(
+    license_number: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Get license information by license number.
+    Public endpoint - anyone with the license number can view basic info.
+    """
+    from utils.storage import read_json_key
+    
+    lic_num = (license_number or "").strip().upper()
+    if not lic_num or not lic_num.startswith("LIC-"):
+        raise HTTPException(status_code=400, detail="Invalid license number")
+    
+    try:
+        # Search for license in all shops (license numbers are globally unique)
+        # Try to find by scanning known patterns
+        # License format: LIC-YYYYMMDD-XXXXXXXX
+        
+        # First try to find the sale that matches this license
+        # The license number is stored in the metadata or can be derived from payment_id
+        
+        # Search in R2 storage for the license metadata
+        # We need to find which shop owns this license
+        all_shops = db.query(Shop).all()
+        
+        for shop in all_shops:
+            shop_uid = shop.uid or shop.owner_uid
+            if not shop_uid:
+                continue
+            
+            license_meta_key = f"shops/{shop_uid}/licenses/{lic_num}.json"
+            license_data = read_json_key(license_meta_key)
+            
+            if license_data:
+                # Return public license info (hide sensitive details)
+                return {
+                    "valid": True,
+                    "license_number": license_data.get("master_license_number", lic_num),
+                    "license_type": license_data.get("license_type", "Standard Commercial License"),
+                    "validity": license_data.get("validity", "perpetual"),
+                    "issued_at": license_data.get("issued_at"),
+                    "shop_name": license_data.get("shop_name"),
+                    "items_count": len(license_data.get("items", [])),
+                }
+        
+        raise HTTPException(status_code=404, detail="License not found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to verify license: {str(e)}")
+
+
+@router.get('/license/{license_number}/download')
+async def download_license_pdf(
+    license_number: str,
+    email: str = "",
+    request: Request = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Download license PDF by license number.
+    Requires the buyer's email for verification.
+    """
+    from utils.storage import read_json_key, get_presigned_url
+    from fastapi.responses import RedirectResponse
+    
+    lic_num = (license_number or "").strip().upper()
+    buyer_email = (email or "").strip().lower()
+    
+    if not lic_num or not lic_num.startswith("LIC-"):
+        raise HTTPException(status_code=400, detail="Invalid license number")
+    
+    if not buyer_email:
+        raise HTTPException(status_code=400, detail="Email required for verification")
+    
+    try:
+        all_shops = db.query(Shop).all()
+        
+        for shop in all_shops:
+            shop_uid = shop.uid or shop.owner_uid
+            if not shop_uid:
+                continue
+            
+            license_meta_key = f"shops/{shop_uid}/licenses/{lic_num}.json"
+            license_data = read_json_key(license_meta_key)
+            
+            if license_data:
+                # Verify buyer email
+                stored_email = (license_data.get("buyer_email") or "").strip().lower()
+                if stored_email != buyer_email:
+                    raise HTTPException(status_code=403, detail="Email does not match license holder")
+                
+                # Get presigned URL for the PDF
+                license_pdf_key = f"shops/{shop_uid}/licenses/{lic_num}.pdf"
+                presigned_url = get_presigned_url(license_pdf_key, expires_in=3600)
+                
+                if presigned_url:
+                    return RedirectResponse(url=presigned_url, status_code=302)
+                
+                # Fallback to stored URL
+                pdf_url = license_data.get("license_pdf_url")
+                if pdf_url:
+                    return RedirectResponse(url=pdf_url, status_code=302)
+                
+                raise HTTPException(status_code=404, detail="License PDF not found")
+        
+        raise HTTPException(status_code=404, detail="License not found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download license: {str(e)}")
+
+
+@router.get('/sale/{sale_id}/license')
+async def get_sale_license(
+    sale_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Get or regenerate license for a specific sale.
+    Only the shop owner can access this.
+    """
+    from utils.storage import read_json_key
+    
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        # Find the sale
+        sale = db.query(ShopSale).filter(ShopSale.id == sale_id).first()
+        if not sale:
+            sale = db.query(ShopSale).filter(ShopSale.payment_id == sale_id).first()
+        
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found")
+        
+        # Verify ownership
+        if sale.owner_uid != eff_uid and sale.shop_uid != eff_uid:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Try to find existing license
+        shop_uid = sale.shop_uid or sale.owner_uid
+        
+        # Search for license by payment_id pattern
+        from utils.license_generator import generate_license_number
+        from datetime import datetime
+        
+        purchase_date = sale.created_at or datetime.utcnow()
+        license_number = generate_license_number(sale.payment_id or sale.id, "master", purchase_date)
+        
+        license_meta_key = f"shops/{shop_uid}/licenses/{license_number}.json"
+        license_data = read_json_key(license_meta_key)
+        
+        if license_data:
+            return {
+                "license_number": license_data.get("master_license_number"),
+                "license_pdf_url": license_data.get("license_pdf_url"),
+                "buyer_email": license_data.get("buyer_email"),
+                "issued_at": license_data.get("issued_at"),
+            }
+        
+        # License doesn't exist - offer to regenerate
+        return {
+            "license_number": None,
+            "message": "License not found. Use POST to regenerate.",
+            "sale_id": sale.id,
+            "customer_email": sale.customer_email,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get license: {str(e)}")
+
+
+@router.post('/sale/{sale_id}/license/regenerate')
+async def regenerate_sale_license(
+    sale_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Regenerate and resend license for a specific sale.
+    Only the shop owner can do this.
+    """
+    from utils.license_generator import generate_license_pdf, generate_license_data, generate_license_number
+    from utils.storage import upload_bytes, write_json_key
+    from utils.emailing import send_email_smtp, render_email
+    from datetime import datetime
+    
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        # Find the sale
+        sale = db.query(ShopSale).filter(ShopSale.id == sale_id).first()
+        if not sale:
+            sale = db.query(ShopSale).filter(ShopSale.payment_id == sale_id).first()
+        
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found")
+        
+        # Verify ownership
+        if sale.owner_uid != eff_uid and sale.shop_uid != eff_uid:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        if not sale.customer_email:
+            raise HTTPException(status_code=400, detail="No customer email on record")
+        
+        # Get shop details
+        shop_uid = sale.shop_uid or sale.owner_uid
+        shop = db.query(Shop).filter(Shop.uid == shop_uid).first()
+        if not shop:
+            shop = db.query(Shop).filter(Shop.owner_uid == shop_uid).first()
+        
+        shop_name = shop.name if shop else (sale.slug or "Shop")
+        seller_name = shop.owner_name if shop else ""
+        
+        purchase_date = sale.created_at or datetime.utcnow()
+        payment_id = sale.payment_id or sale.id
+        items = sale.items or []
+        amount_cents = sale.amount_cents or 0
+        currency = sale.currency or "USD"
+        customer_email = sale.customer_email
+        customer_name = getattr(sale, "customer_name", "") or ""
+        
+        # Generate license
+        license_number = generate_license_number(payment_id, "master", purchase_date)
+        
+        license_pdf = generate_license_pdf(
+            license_number=license_number,
+            buyer_name=customer_name,
+            buyer_email=customer_email,
+            seller_name=seller_name,
+            shop_name=shop_name,
+            items=items,
+            payment_id=payment_id,
+            purchase_date=purchase_date,
+            total_amount=float(amount_cents) / 100,
+            currency=currency,
+        )
+        
+        # Store license PDF
+        license_key = f"shops/{shop_uid}/licenses/{license_number}.pdf"
+        license_url = upload_bytes(license_key, license_pdf, content_type="application/pdf")
+        
+        # Store license metadata
+        license_data = generate_license_data(
+            payment_id=payment_id,
+            buyer_name=customer_name,
+            buyer_email=customer_email,
+            seller_name=seller_name,
+            shop_name=shop_name,
+            items=items,
+            purchase_date=purchase_date,
+            total_amount=float(amount_cents) / 100,
+            currency=currency,
+        )
+        license_data["license_pdf_url"] = license_url
+        
+        license_meta_key = f"shops/{shop_uid}/licenses/{license_number}.json"
+        write_json_key(license_meta_key, license_data)
+        
+        # Format items for email
+        amount_display = f"${(amount_cents / 100):.2f} {currency.upper()}"
+        email_items = []
+        for item in items:
+            item_title = item.get("title", "Digital Product")
+            item_price = item.get("price", 0)
+            item_price_display = f"${(item_price / 100):.2f}" if isinstance(item_price, (int, float)) else str(item_price)
+            email_items.append({"title": item_title, "price": item_price_display})
+        
+        # Send email
+        buyer_html = render_email(
+            "license_delivery.html",
+            shop_name=shop_name,
+            seller_name=seller_name or shop_name,
+            license_number=license_number,
+            amount=amount_display,
+            items=email_items if email_items else None,
+            payment_id=payment_id,
+            download_url=license_url,
+        )
+        
+        send_email_smtp(
+            to_addr=customer_email,
+            subject=f"Your Commercial License from {shop_name} (Resent)",
+            html=buyer_html,
+            from_addr="licenses@photomark.cloud",
+            from_name=f"{shop_name} via Photomark",
+            attachments=[{
+                "filename": f"License-{license_number}.pdf",
+                "content": license_pdf,
+                "mime_type": "application/pdf",
+            }]
+        )
+        
+        return {
+            "success": True,
+            "license_number": license_number,
+            "license_pdf_url": license_url,
+            "sent_to": customer_email,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate license: {str(e)}")

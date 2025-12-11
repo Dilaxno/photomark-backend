@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Your Purchase & License - {{ app_name }}</title>
+    <style>
+      .btn {
+        display: inline-block;
+        background: {{ button_bg }};
+        color: {{ button_text }} !important;
+        padding: 12px 18px;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .btn-secondary {
+        background: #1a1f26;
+        color: #f5f5f5 !important;
+        border: 1px solid #333;
+      }
+      .container { max-width: 640px; margin: 0 auto; }
+      .card { background: #111418; border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+      .muted { color: #c7c7c7; }
+      .highlight { background: #1a1f26; border-left: 3px solid {{ button_bg }}; padding: 16px; border-radius: 6px; margin: 16px 0; }
+      .license-box { background: #0d1117; border: 2px solid {{ button_bg }}; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0; }
+      .license-number { font-family: monospace; font-size: 18px; color: {{ button_bg }}; letter-spacing: 1px; }
+    </style>
+  </head>
+  <body style="margin:0;padding:24px;background: {{ brand_bg }}; color: #f5f5f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;">
+    <div class="container">
+      <div style="text-align:center;margin-bottom:20px;">
+        {% if logo_url %}
+          <img src="{{ logo_url }}" alt="{{ app_name }}" style="max-width:140px; height:auto;" />
+        {% else %}
+          <h2 style="margin:0;color:#f5f5f5;">{{ app_name }}</h2>
+        {% endif %}
+      </div>
+      
+      <div class="card">
+        <h1 style="margin:0 0 8px 0; font-size:26px; line-height:1.2;">✅ Purchase Confirmed!</h1>
+        <p style="margin:0 0 24px 0; color:#c7c7c7; font-size:15px;">Thank you for your purchase from <strong style="color:#f5f5f5;">{{ shop_name }}</strong>.</p>
+        
+        <div class="license-box">
+          <p style="margin:0 0 8px 0; font-size:12px; color:#c7c7c7; text-transform:uppercase; letter-spacing:1px;">Commercial License Number</p>
+          <p class="license-number" style="margin:0;">{{ license_number }}</p>
+        </div>
+
+        <div class="highlight">
+          <p style="margin:0 0 8px 0; font-size:14px; color:#c7c7c7;">Order Total</p>
+          <p style="margin:0; font-size:24px; font-weight:700; color:#f5f5f5;">{{ amount }}</p>
+        </div>
+
+        {% if items %}
+        <div style="margin: 24px 0;">
+          <h3 style="margin: 0 0 12px 0; font-size: 16px; color: #c7c7c7;">Licensed Items:</h3>
+          <ul style="margin: 0; padding-left: 20px; color: #f5f5f5;">
+            {% for item in items %}
+            <li style="margin-bottom: 8px;">{{ item.title }} - {{ item.price }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid #333;">
+          <p style="margin: 0 0 16px 0; font-size: 14px; color: #c7c7c7;">
+            📎 Your commercial license certificate is attached to this email as a PDF.
+          </p>
+          {% if download_url %}
+          <p style="margin:0;">
+            <a class="btn" href="{{ download_url }}">Download Your Files</a>
+          </p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card" style="background: #0d1117; border: 1px solid #1a1f26;">
+        <h3 style="margin: 0 0 12px 0; font-size: 14px; color: #f5f5f5;">📜 What's Included in Your License:</h3>
+        <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #c7c7c7;">
+          <li style="margin-bottom: 6px;">Commercial use in projects, ads, and marketing</li>
+          <li style="margin-bottom: 6px;">Digital and print media, websites, social media</li>
+          <li style="margin-bottom: 6px;">Merchandise and products (up to 500,000 copies)</li>
+          <li style="margin-bottom: 6px;">Perpetual license - no expiration</li>
+        </ul>
+      </div>
+
+      <div class="card" style="background: #0d1117; border: 1px solid #1a1f26;">
+        <p style="margin: 0; font-size: 14px; color: #c7c7c7;">
+          <strong style="color: #f5f5f5;">Need help?</strong> Contact the seller at {{ seller_name }} or reply to this email.
+        </p>
+      </div>
+
+      <p class="muted" style="font-size:12px; text-align:center; margin-top:18px;">
+        © {{ app_name }} — Transaction ID: {{ payment_id }}
+      </p>
+    </div>
+  </body>
+</html>
