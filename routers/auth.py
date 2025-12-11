@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Request, Body, HTTPException
+from fastapi import APIRouter, Request, Body, HTTPException, Depends
 from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 import os
 import secrets
+import random
+import hashlib
 from datetime import datetime, timedelta
 
 from core.auth import get_uid_from_request, firebase_enabled, fb_auth  # type: ignore
@@ -10,8 +12,9 @@ from utils.emailing import render_email, send_email_smtp
 from utils.storage import write_json_key, read_json_key
 from utils.rate_limit import signup_throttle
 from sqlalchemy.orm import Session
-from core.database import SessionLocal
+from core.database import SessionLocal, get_db
 from models.user import User
+from models.user_security import UserSecurity, PasswordResetRequest, SMSVerificationCode
 from utils.validation import validate_signup_data, validate_email, validate_email_mx
 from utils.recaptcha import verify_recaptcha
 
@@ -365,6 +368,335 @@ async def auth_password_reset_confirm_otp(payload: dict = Body(...)):
     except Exception as ex:
         logger.exception(f"Password reset confirm failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+# ---- Alternative Password Recovery Methods (Database-backed) ----
+
+def _hash_backup_code(code: str) -> str:
+    """Hash a backup code for secure storage"""
+    return hashlib.sha256(code.upper().encode()).hexdigest()
+
+
+def _mask_phone(phone: str) -> str:
+    """Mask phone number for display"""
+    if not phone or len(phone) < 7:
+        return "****"
+    return phone[:3] + "****" + phone[-4:]
+
+
+@router.post("/auth/password/reset/secondary-email")
+async def auth_password_reset_secondary_email(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Request password reset via secondary email.
+    Body: { "secondary_email": str }
+    Returns: { ok: true }
+    """
+    secondary_email = (payload or {}).get("secondary_email", "").strip().lower()
+    
+    if not secondary_email:
+        return JSONResponse({"error": "secondary_email required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "password reset unavailable"}, status_code=500)
+    
+    try:
+        # Find user by secondary email in database
+        # First check UserSecurity table
+        security = db.query(UserSecurity).filter(
+            UserSecurity.secondary_email == secondary_email,
+            UserSecurity.secondary_email_verified == True
+        ).first()
+        
+        # Also check User table's secondary_email field
+        if not security:
+            user_record = db.query(User).filter(User.secondary_email == secondary_email).first()
+            if user_record:
+                found_uid = user_record.uid
+                found_primary_email = user_record.email
+            else:
+                return JSONResponse({"error": "Secondary email not found or not verified"}, status_code=404)
+        else:
+            found_uid = security.uid
+            # Get primary email
+            user_record = db.query(User).filter(User.uid == found_uid).first()
+            if not user_record:
+                return JSONResponse({"error": "User not found"}, status_code=404)
+            found_primary_email = user_record.email
+        
+        # Generate OTP
+        code = "".join([str(random.randint(0, 9)) for _ in range(6)])
+        expires_at = datetime.utcnow() + timedelta(minutes=15)
+        
+        # Store in database
+        reset_request = PasswordResetRequest(
+            uid=found_uid,
+            email=found_primary_email,
+            code=code,
+            verified=False,
+            method="secondary_email",
+            expires_at=expires_at
+        )
+        db.add(reset_request)
+        db.commit()
+        
+        # Also store in JSON for backward compatibility with existing confirm endpoint
+        write_json_key(_pw_reset_otp_key(found_primary_email), {
+            "code": code,
+            "uid": found_uid,
+            "expires_at": expires_at.isoformat(),
+            "verified": False,
+            "method": "secondary_email"
+        })
+        
+        # Send email to secondary email
+        try:
+            send_email_smtp(
+                to_email=secondary_email,
+                subject="Password Reset Code - Photomark",
+                html_body=f"""
+                <h2>Password Reset Code</h2>
+                <p>Your password reset code is:</p>
+                <h1 style="font-size: 32px; letter-spacing: 8px; font-family: monospace;">{code}</h1>
+                <p>This code expires in 15 minutes.</p>
+                <p>If you didn't request this, please ignore this email.</p>
+                """
+            )
+        except Exception as ex:
+            logger.warning(f"Failed to send secondary email: {ex}")
+        
+        return {"ok": True}
+        
+    except Exception as ex:
+        logger.exception(f"Secondary email reset failed: {ex}")
+        return JSONResponse({"error": "Failed to process request"}, status_code=500)
+
+
+@router.post("/auth/password/reset/backup-code")
+async def auth_password_reset_backup_code(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Verify identity using 2FA backup code.
+    Body: { "email": str, "backup_code": str }
+    Returns: { ok: true, reset_token: str }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    backup_code = (payload or {}).get("backup_code", "").strip().upper()
+    
+    if not email or not backup_code:
+        return JSONResponse({"error": "email and backup_code required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "password reset unavailable"}, status_code=500)
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = user.uid
+    except Exception:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    
+    # Check backup codes in database
+    security = db.query(UserSecurity).filter(UserSecurity.uid == uid).first()
+    
+    if not security or not security.backup_codes:
+        return JSONResponse({"error": "No backup codes configured for this account"}, status_code=400)
+    
+    # Hash the provided code and check against stored hashes
+    code_hash = _hash_backup_code(backup_code)
+    codes = security.backup_codes or []
+    
+    # Check if code matches (support both hashed and plain codes for migration)
+    code_found = False
+    if code_hash in codes:
+        codes.remove(code_hash)
+        code_found = True
+    elif backup_code in codes:
+        codes.remove(backup_code)
+        code_found = True
+    
+    if not code_found:
+        return JSONResponse({"error": "Invalid backup code"}, status_code=400)
+    
+    # Update backup codes in database
+    security.backup_codes = codes
+    security.updated_at = datetime.utcnow()
+    db.commit()
+    
+    # Generate reset token
+    reset_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+    
+    # Store reset request in database
+    reset_request = PasswordResetRequest(
+        uid=uid,
+        email=email,
+        code=reset_token,
+        verified=True,  # Already verified via backup code
+        method="backup_code",
+        expires_at=expires_at
+    )
+    db.add(reset_request)
+    db.commit()
+    
+    # Also store in JSON for backward compatibility
+    write_json_key(_pw_reset_otp_key(email), {
+        "code": reset_token,
+        "uid": uid,
+        "expires_at": expires_at.isoformat(),
+        "verified": True,
+        "method": "backup_code"
+    })
+    
+    return {"ok": True, "reset_token": reset_token}
+
+
+@router.post("/auth/password/reset/sms")
+async def auth_password_reset_sms_request(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Request SMS verification for password reset.
+    Body: { "email": str }
+    Returns: { ok: true, masked_phone: str }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "password reset unavailable"}, status_code=500)
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = user.uid
+    except Exception:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    
+    # Get 2FA phone number from database
+    security = db.query(UserSecurity).filter(UserSecurity.uid == uid).first()
+    
+    if not security or not security.phone_number or not security.phone_verified:
+        return JSONResponse({"error": "No verified phone number configured for 2FA"}, status_code=400)
+    
+    phone = security.phone_number
+    
+    # Generate SMS code
+    code = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    
+    # Store SMS code in database
+    # First, invalidate any existing codes for this user
+    db.query(SMSVerificationCode).filter(
+        SMSVerificationCode.uid == uid,
+        SMSVerificationCode.purpose == "password_reset",
+        SMSVerificationCode.used == False
+    ).update({"used": True})
+    
+    sms_code = SMSVerificationCode(
+        uid=uid,
+        code=code,
+        purpose="password_reset",
+        phone_number=phone,
+        expires_at=expires_at
+    )
+    db.add(sms_code)
+    db.commit()
+    
+    # Send SMS (integrate with your SMS provider - Twilio, etc.)
+    try:
+        # TODO: Integrate with SMS provider
+        # For now, log the code (remove in production!)
+        logger.info(f"SMS code for {email}: {code}")
+        
+        # Example Twilio integration:
+        # from twilio.rest import Client
+        # TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+        # TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+        # TWILIO_PHONE = os.getenv("TWILIO_PHONE_NUMBER")
+        # if TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE:
+        #     client = Client(TWILIO_SID, TWILIO_TOKEN)
+        #     client.messages.create(
+        #         body=f"Your Photomark reset code: {code}",
+        #         from_=TWILIO_PHONE,
+        #         to=phone
+        #     )
+    except Exception as ex:
+        logger.warning(f"Failed to send SMS: {ex}")
+    
+    return {"ok": True, "masked_phone": _mask_phone(phone)}
+
+
+@router.post("/auth/password/reset/sms/verify")
+async def auth_password_reset_sms_verify(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Verify SMS code for password reset.
+    Body: { "email": str, "code": str }
+    Returns: { ok: true, reset_token: str }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    code = (payload or {}).get("code", "").strip()
+    
+    if not email or not code:
+        return JSONResponse({"error": "email and code required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "password reset unavailable"}, status_code=500)
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = user.uid
+    except Exception:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    
+    # Verify SMS code from database
+    sms_record = db.query(SMSVerificationCode).filter(
+        SMSVerificationCode.uid == uid,
+        SMSVerificationCode.purpose == "password_reset",
+        SMSVerificationCode.used == False
+    ).order_by(SMSVerificationCode.created_at.desc()).first()
+    
+    if not sms_record:
+        return JSONResponse({"error": "No SMS code requested"}, status_code=400)
+    
+    if datetime.utcnow() > sms_record.expires_at.replace(tzinfo=None):
+        return JSONResponse({"error": "SMS code has expired"}, status_code=410)
+    
+    # Check attempts
+    if sms_record.attempts >= sms_record.max_attempts:
+        return JSONResponse({"error": "Too many attempts. Please request a new code."}, status_code=429)
+    
+    if sms_record.code != code:
+        sms_record.attempts += 1
+        db.commit()
+        return JSONResponse({"error": "Invalid SMS code"}, status_code=400)
+    
+    # Mark SMS code as used
+    sms_record.used = True
+    db.commit()
+    
+    # Generate reset token
+    reset_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+    
+    # Store reset request in database
+    reset_request = PasswordResetRequest(
+        uid=uid,
+        email=email,
+        code=reset_token,
+        verified=True,  # Already verified via SMS
+        method="sms",
+        expires_at=expires_at
+    )
+    db.add(reset_request)
+    db.commit()
+    
+    # Also store in JSON for backward compatibility
+    write_json_key(_pw_reset_otp_key(email), {
+        "code": reset_token,
+        "uid": uid,
+        "expires_at": expires_at.isoformat(),
+        "verified": True,
+        "method": "sms"
+    })
+    
+    return {"ok": True, "reset_token": reset_token}
 
 
 # ---- Password reset flow (Token-based, legacy) ----
