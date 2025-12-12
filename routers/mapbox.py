@@ -111,8 +111,12 @@ async def mapbox_update_settings(
 
 
 @router.get("/photos")
-async def mapbox_get_photos(request: Request):
-    """Get all photos with location data for map display."""
+async def mapbox_get_photos(request: Request, source: Optional[str] = None):
+    """Get all photos with location data for map display.
+    
+    Args:
+        source: Optional filter - 'uploads', 'gallery', or 'vaults'
+    """
     eff_uid, req_uid = resolve_workspace_uid(request)
     if not eff_uid or not req_uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -120,6 +124,20 @@ async def mapbox_get_photos(request: Request):
     try:
         locations = read_json_key(_photo_locations_key(eff_uid)) or {}
         photos = locations.get("photos", [])
+        
+        # Filter by source if specified
+        if source and source in ("uploads", "gallery", "vaults"):
+            filtered_photos = []
+            for photo in photos:
+                key = photo.get("key", "")
+                if source == "uploads" and "/external/" in key:
+                    filtered_photos.append(photo)
+                elif source == "gallery" and "/watermarked/" in key:
+                    filtered_photos.append(photo)
+                elif source == "vaults" and "/vaults/" in key and "/_" not in key:
+                    # Exclude meta files like /_meta/, /_approvals/, etc.
+                    filtered_photos.append(photo)
+            photos = filtered_photos
         
         return {
             "photos": photos,
