@@ -668,6 +668,13 @@ try:
 except Exception as _ex:
     logger.warning(f"notion router not available: {_ex}")
 
+# Mapbox integration (photo location maps)
+try:
+    from routers import mapbox  # noqa: E402
+    app.include_router(mapbox.router)
+except Exception as _ex:
+    logger.warning(f"mapbox router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
