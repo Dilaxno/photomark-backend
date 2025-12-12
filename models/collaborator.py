@@ -13,6 +13,7 @@ class Collaborator(Base):
     role = Column(String(64), nullable=False)
     password_hash = Column(String(255), nullable=False)
     active = Column('is_active', Boolean, default=True)
+    blocked = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
@@ -25,6 +26,7 @@ class Collaborator(Base):
             "name": self.name,
             "role": self.role,
             "active": bool(self.active),
+            "blocked": bool(self.blocked) if self.blocked is not None else False,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,

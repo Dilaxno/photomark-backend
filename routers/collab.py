@@ -136,6 +136,8 @@ async def collab_login(
             return JSONResponse({"error": "email_unavailable", "message": "This collaborator email is not available. Please contact the owner for the right email."}, status_code=404)
         if not bool(any_rec.active):
             return JSONResponse({"error": "inactive", "message": "Collaborator account is inactive. Please contact the owner."}, status_code=403)
+        if getattr(any_rec, "blocked", False):
+            return JSONResponse({"error": "blocked", "message": "Your collaboration access has been blocked by the owner. Please contact them to restore access."}, status_code=403)
         rec = any_rec
         if not getattr(rec, "password_hash", None) or len(str(rec.password_hash).strip()) < 20:
             return JSONResponse({"error": "password_unavailable", "message": "This collaborator password is not available. Please contact the owner for the right password."}, status_code=422)
@@ -223,6 +225,7 @@ async def collab_list(request: Request, db: Session = Depends(get_db)):
                     "name": r.name,
                     "role": r.role,
                     "active": bool(r.active),
+                    "blocked": bool(getattr(r, "blocked", False)),
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     "updated_at": r.updated_at.isoformat() if r.updated_at else None,
                     "last_login_at": r.last_login_at.isoformat() if r.last_login_at else None,
@@ -264,4 +267,68 @@ async def collab_role_update(
         return {"ok": True, "item": rec.to_dict()}
     except Exception as ex:
         logger.exception(f"collab_role_update failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/delete")
+async def collab_delete(
+    request: Request,
+    id: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    """Permanently delete a collaborator from the database."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        collab_id = (id or "").strip()
+        if not collab_id:
+            return JSONResponse({"error": "Missing collaborator id"}, status_code=400)
+        rec = db.query(Collaborator).filter(Collaborator.id == collab_id, Collaborator.owner_uid == uid).first()
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        
+        email = rec.email
+        db.delete(rec)
+        db.commit()
+        
+        logger.info(f"Collaborator {email} deleted by owner {uid}")
+        return {"ok": True, "deleted": True}
+    except Exception as ex:
+        logger.exception(f"collab_delete failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/block")
+async def collab_block(
+    request: Request,
+    id: str = Body(..., embed=True),
+    blocked: bool = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    """Block or unblock a collaborator. Blocked collaborators cannot sign in."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        collab_id = (id or "").strip()
+        if not collab_id:
+            return JSONResponse({"error": "Missing collaborator id"}, status_code=400)
+        rec = db.query(Collaborator).filter(Collaborator.id == collab_id, Collaborator.owner_uid == uid).first()
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        
+        rec.blocked = blocked
+        db.commit()
+        
+        try:
+            db.refresh(rec)
+        except Exception:
+            pass
+        
+        action = "blocked" if blocked else "unblocked"
+        logger.info(f"Collaborator {rec.email} {action} by owner {uid}")
+        return {"ok": True, "item": rec.to_dict()}
+    except Exception as ex:
+        logger.exception(f"collab_block failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
