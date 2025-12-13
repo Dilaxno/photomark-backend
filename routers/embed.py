@@ -38,19 +38,29 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     photos = payload.get("photos", [])
     num_photos = len(photos) if len(photos) > 0 else 1
     
-    # Calculate columns based on number of photos
+    # Calculate grid layout based on number of photos
     if num_photos == 1:
         cols = 1
+        rows = 1
+    elif num_photos == 2:
+        cols = 2
+        rows = 1
     elif num_photos <= 4:
         cols = 2
+        rows = 2
+    elif num_photos <= 6:
+        cols = 3
+        rows = 2
     elif num_photos <= 9:
         cols = 3
+        rows = 3
     else:
         cols = 4
+        rows = (num_photos + 3) // 4
     
     # Build photo cards as pure HTML
     photo_cards = ""
-    for p in photos:
+    for i, p in enumerate(photos):
         url = p.get("url", "")
         if url:
             photo_cards += f'<div class="card"><img src="{url}" alt="" loading="lazy" decoding="async"/></div>\n'
@@ -68,28 +78,39 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
         margin: 0; 
         padding: 0; 
         background: {bg_value}; 
-        color: {fg}; 
+        color: {fg};
+        height: 100%;
+        overflow: hidden;
     }}
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
     .grid {{ 
-        column-count: {cols};
-        column-gap: 4px;
+        display: grid;
+        grid-template-columns: repeat({cols}, 1fr);
+        grid-template-rows: repeat({rows}, 1fr);
+        gap: 4px;
         width: 100%;
+        height: 100%;
+        min-height: 100vh;
     }}
     .card {{ 
-        margin: 0;
-        margin-bottom: 4px;
-        break-inside: avoid;
         overflow: hidden; 
         background: {card_bg}; 
     }}
     .card img {{ 
         width: 100%; 
-        height: auto; 
-        display: block; 
+        height: 100%; 
+        display: block;
+        object-fit: cover;
     }}
     @media (max-width: 600px) {{
-        .grid {{ column-count: 2; }}
+        .grid {{ 
+            grid-template-columns: repeat(2, 1fr);
+            grid-template-rows: auto;
+        }}
+        .card img {{
+            height: auto;
+            object-fit: contain;
+        }}
     }}
 </style>
 </head>
