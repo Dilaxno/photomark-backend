@@ -33,8 +33,17 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
+    """Render photos as pure HTML without inline JavaScript (CSP-compliant)"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
-    data_json = json.dumps(payload, ensure_ascii=False)
+    photos = payload.get("photos", [])
+    
+    # Build photo cards as pure HTML
+    photo_cards = ""
+    for p in photos:
+        url = p.get("url", "")
+        if url:
+            photo_cards += f'<div class="card"><img src="{url}" alt="" loading="lazy" decoding="async"/></div>\n'
+    
     return f"""<!doctype html>
 <html>
 <head>
@@ -48,78 +57,11 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     .grid {{ column-count: 2; column-gap: 0; }}
     @media (min-width: 1024px) {{ .grid {{ column-count: 4; }} }}
     .card {{ display:inline-block; width:100%; margin:0; border:none; border-radius:0; overflow:hidden; background:{card_bg}; break-inside: avoid; }}
-    .card img {{width: 100%;
-    height: auto;         
-    display: block;
-    object-fit: contain;
-}}
+    .card img {{ width: 100%; height: auto; display: block; object-fit: contain; }}
 </style>
 </head>
 <body>
-<div class="grid" id="pm-grid"></div>
-<script type="application/json" id="pm-data">{data_json}</script>
-<script>
-(function() {{
-    var dataEl = document.getElementById('pm-data');
-    if(!dataEl) return;
-    var DATA = JSON.parse(dataEl.textContent);
-    var inIframe = (function() {{
-        try {{ return window.top !== window.self; }} catch (e) {{ return true; }}
-    }})();
-    if (inIframe) {{
-        document.documentElement.style.overflow = 'hidden';
-        if (document.body) document.body.style.overflow = 'hidden';
-    }} else {{
-        document.documentElement.style.overflow = 'auto';
-        if (document.body) document.body.style.overflow = 'auto';
-    }}
-    var grid = document.getElementById('pm-grid');
-    if(!grid || !DATA.photos) return;
-    var frag = document.createDocumentFragment();
-    DATA.photos.forEach(function(p) {{
-        var card = document.createElement('div');
-        card.className = 'card';
-        var img = document.createElement('img');
-        img.loading = 'lazy';   // ✅ now lazy loading
-        img.decoding = 'async';
-        img.src = p.url;
-        img.alt = '';
-        img.addEventListener('load', sendHeight);
-        img.addEventListener('error', sendHeight);
-        card.appendChild(img);
-        frag.appendChild(card);
-    }});
-    grid.appendChild(frag);
-    sendHeight();
-
-    // Auto-resize iframe height
-    function sendHeight() {{
-        if (!inIframe) return;
-        var h = Math.max(
-            document.documentElement.scrollHeight,
-            document.body ? document.body.scrollHeight : 0,
-    document.documentElement.offsetHeight,
-            document.documentElement.clientHeight
-        );
-        parent.postMessage({{ type: "pm-embed-height", height: h }}, "*");
-    }}
-    window.addEventListener("DOMContentLoaded", sendHeight);
-    window.addEventListener("load", sendHeight);
-    window.addEventListener("resize", sendHeight);
-    new MutationObserver(sendHeight).observe(grid, {{ childList: true, subtree: true }});
-    if (typeof ResizeObserver !== "undefined") {{
-        new ResizeObserver(sendHeight).observe(grid);
-        if (document.body) new ResizeObserver(sendHeight).observe(document.body);
-    }}
-    (function(){{
-        var t0 = Date.now();
-        var iv = setInterval(function() {{
-            sendHeight();
-            if (Date.now() - t0 > 5000) clearInterval(iv);
-        }}, 300);
-    }})();
-}})();
-</script>
+<div class="grid">{photo_cards}</div>
 </body>
 </html>"""
 
