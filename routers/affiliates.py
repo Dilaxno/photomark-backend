@@ -564,3 +564,240 @@ async def affiliates_stats_daily(request: Request, days: int = 30, db: Session =
     except Exception as ex:
         logger.exception(f"[affiliates.stats.daily] {ex}")
         return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.get("/referrals")
+async def affiliates_referrals(request: Request, db: Session = Depends(get_db)):
+    """Return list of referrals for the authenticated affiliate from PostgreSQL."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        # Get all attributions for this affiliate
+        attrs = (
+            db.query(AffiliateAttribution)
+            .filter(AffiliateAttribution.affiliate_uid == uid)
+            .order_by(AffiliateAttribution.attributed_at.desc())
+            .limit(500)
+            .all()
+        )
+        
+        referrals = []
+        for a in attrs:
+            # Try to get user info
+            user_info = db.query(User).filter(User.uid == a.user_uid).first()
+            name = "User"
+            plan = "free"
+            billing_cycle = "yearly"
+            
+            if user_info:
+                name = user_info.display_name or (user_info.email.split('@')[0] if user_info.email else "User")
+                plan = user_info.plan or "free"
+                billing_cycle = getattr(user_info, 'billing_cycle', 'yearly') or "yearly"
+            
+            # Check if there's a conversion for this user
+            conv = db.query(AffiliateConversion).filter(
+                AffiliateConversion.affiliate_uid == uid,
+                AffiliateConversion.user_uid == a.user_uid
+            ).first()
+            
+            status = "free"
+            commission_cents = 0
+            if conv:
+                status = "paid"
+                commission_cents = int(conv.payout_cents or 0)
+            elif a.verified:
+                status = "trial" if plan == "free" else "paid"
+            
+            referrals.append({
+                "user_uid": a.user_uid,
+                "name": name,
+                "signup_date": (a.verified_at or a.attributed_at).isoformat() if (a.verified_at or a.attributed_at) else None,
+                "status": status,
+                "plan": plan,
+                "billing_cycle": billing_cycle,
+                "commission_cents": commission_cents,
+                "verified": a.verified,
+            })
+        
+        return {"referrals": referrals}
+    except Exception as ex:
+        logger.exception(f"[affiliates.referrals] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.get("/payouts")
+async def affiliates_payouts(request: Request, db: Session = Depends(get_db)):
+    """Return payout summary and history for the authenticated affiliate from PostgreSQL."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
+        if not prof:
+            return {"pending_cents": 0, "paid_ytd_cents": 0, "history": []}
+        
+        # Calculate totals from conversions
+        from datetime import datetime
+        current_year = datetime.utcnow().year
+        year_start = datetime(current_year, 1, 1)
+        
+        # Get all conversions for this affiliate
+        all_convs = (
+            db.query(AffiliateConversion)
+            .filter(AffiliateConversion.affiliate_uid == uid)
+            .all()
+        )
+        
+        total_earned_cents = sum(int(c.payout_cents or 0) for c in all_convs)
+        ytd_earned_cents = sum(
+            int(c.payout_cents or 0) for c in all_convs 
+            if c.created_at and c.created_at >= year_start
+        )
+        
+        # For now, assume all earned is pending (no payout history table yet)
+        # In production, you'd have a separate payouts table
+        paid_out_cents = int(prof.payout_cents_total or 0) - total_earned_cents
+        if paid_out_cents < 0:
+            paid_out_cents = 0
+        
+        pending_cents = total_earned_cents - paid_out_cents
+        if pending_cents < 0:
+            pending_cents = 0
+        
+        # Build history from conversions (simplified - in production use a payouts table)
+        history = []
+        for c in sorted(all_convs, key=lambda x: x.created_at or datetime.min, reverse=True)[:50]:
+            history.append({
+                "date": (c.conversion_date or c.created_at).isoformat() if (c.conversion_date or c.created_at) else None,
+                "amount_cents": int(c.payout_cents or 0),
+                "status": "earned",
+                "type": "commission",
+            })
+        
+        return {
+            "pending_cents": pending_cents,
+            "paid_ytd_cents": ytd_earned_cents,
+            "total_earned_cents": total_earned_cents,
+            "currency": "usd",
+            "history": history,
+        }
+    except Exception as ex:
+        logger.exception(f"[affiliates.payouts] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.post("/track/conversion")
+async def affiliates_track_conversion(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Record a conversion for an affiliate. Called after successful payment.
+    This is a backup method - primary conversion tracking happens in pricing_webhook.py
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        amount_cents = int(payload.get("amount_cents") or 0)
+        plan = str(payload.get("plan") or "").lower()
+        billing_cycle = str(payload.get("billing_cycle") or "yearly").lower()
+        
+        # Look up attribution for this user
+        attrib = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
+        if not attrib:
+            return {"ok": True, "tracked": False, "reason": "no_attribution"}
+        
+        affiliate_uid = attrib.affiliate_uid
+        
+        # Check if conversion already exists for this user
+        existing_conv = db.query(AffiliateConversion).filter(
+            AffiliateConversion.affiliate_uid == affiliate_uid,
+            AffiliateConversion.user_uid == uid
+        ).first()
+        
+        if existing_conv:
+            return {"ok": True, "tracked": False, "reason": "already_tracked"}
+        
+        # Calculate commission (30% default)
+        commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
+        commission_cents = int(amount_cents * commission_rate)
+        
+        # Record conversion
+        db.add(AffiliateConversion(
+            affiliate_uid=affiliate_uid,
+            user_uid=uid,
+            amount_cents=amount_cents,
+            payout_cents=commission_cents,
+            currency="usd",
+            conversion_date=datetime.utcnow(),
+        ))
+        
+        # Update affiliate profile aggregates
+        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
+        if prof:
+            prof.conversions_total = int(prof.conversions_total or 0) + 1
+            prof.gross_cents_total = int(prof.gross_cents_total or 0) + amount_cents
+            prof.payout_cents_total = int(prof.payout_cents_total or 0) + commission_cents
+            prof.last_conversion_at = datetime.utcnow()
+        
+        db.commit()
+        
+        logger.info(f"[affiliates.track.conversion] recorded conversion for user={uid} affiliate={affiliate_uid} amount={amount_cents} commission={commission_cents}")
+        
+        return {"ok": True, "tracked": True, "affiliate_uid": affiliate_uid, "commission_cents": commission_cents}
+    except Exception as ex:
+        logger.exception(f"[affiliates.track.conversion] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
+
+
+@router.get("/debug/stats")
+async def affiliates_debug_stats(request: Request, db: Session = Depends(get_db)):
+    """Debug endpoint to verify affiliate stats are being tracked correctly."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
+        if not prof:
+            return {"error": "not_an_affiliate"}
+        
+        # Count from tables directly
+        attrs_count = db.query(AffiliateAttribution).filter(AffiliateAttribution.affiliate_uid == uid).count()
+        verified_attrs_count = db.query(AffiliateAttribution).filter(
+            AffiliateAttribution.affiliate_uid == uid,
+            AffiliateAttribution.verified == True
+        ).count()
+        convs_count = db.query(AffiliateConversion).filter(AffiliateConversion.affiliate_uid == uid).count()
+        
+        # Sum from conversions
+        convs = db.query(AffiliateConversion).filter(AffiliateConversion.affiliate_uid == uid).all()
+        total_gross = sum(int(c.amount_cents or 0) for c in convs)
+        total_payout = sum(int(c.payout_cents or 0) for c in convs)
+        
+        return {
+            "profile": {
+                "uid": prof.uid,
+                "clicks_total": prof.clicks_total,
+                "signups_total": prof.signups_total,
+                "conversions_total": prof.conversions_total,
+                "gross_cents_total": prof.gross_cents_total,
+                "payout_cents_total": prof.payout_cents_total,
+            },
+            "calculated": {
+                "attributions_count": attrs_count,
+                "verified_signups_count": verified_attrs_count,
+                "conversions_count": convs_count,
+                "gross_cents_sum": total_gross,
+                "payout_cents_sum": total_payout,
+            },
+            "match": {
+                "signups": prof.signups_total == verified_attrs_count,
+                "conversions": prof.conversions_total == convs_count,
+                "gross": prof.gross_cents_total == total_gross,
+                "payout": prof.payout_cents_total == total_payout,
+            }
+        }
+    except Exception as ex:
+        logger.exception(f"[affiliates.debug.stats] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
