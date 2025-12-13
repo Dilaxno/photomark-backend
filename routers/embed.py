@@ -290,3 +290,241 @@ def embed_vault(
         return _html_page(_render_html({"photos": photos}, theme, bg, f"Photomark - {vault}"))
     except Exception as ex:
         return HTMLResponse(content=f"<!doctype html><html><body><p>Error loading vault: {str(ex)}</p></body></html>", status_code=500)
+
+
+def _photo_locations_key(uid: str) -> str:
+    return f"users/{uid}/integrations/photo_locations.json"
+
+
+def _read_photo_locations(uid: str) -> list[dict]:
+    """Read photo locations from storage"""
+    from utils.storage import read_json_key
+    try:
+        data = read_json_key(_photo_locations_key(uid)) or {}
+        return data.get("photos", [])
+    except Exception:
+        return []
+
+
+@router.get("/photo-map")
+def embed_photo_map(
+    uid: str = Query(..., min_length=3, max_length=64),
+    style: str = Query("default"),
+):
+    """Embed an interactive photo map"""
+    MAPBOX_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN", "")
+    
+    if not MAPBOX_TOKEN:
+        return HTMLResponse(
+            content="<!doctype html><html><body><p>Mapbox not configured</p></body></html>",
+            status_code=500
+        )
+    
+    # Get photo locations
+    photos = _read_photo_locations(uid)
+    
+    # Map style mapping
+    style_map = {
+        "default": "streets-v12",
+        "dark": "dark-v11",
+        "light": "light-v11",
+        "satellite": "satellite-streets-v12",
+    }
+    map_style = style_map.get(style, "streets-v12")
+    
+    # Theme colors based on style
+    if style == "dark":
+        bg_color, text_color, card_bg, border_color = "#1a1a2e", "#ffffff", "#16213e", "#0f3460"
+    elif style == "light":
+        bg_color, text_color, card_bg, border_color = "#ffffff", "#1a1a2e", "#f8f9fa", "#e9ecef"
+    else:
+        bg_color, text_color, card_bg, border_color = "#f8f9fa", "#1a1a2e", "#ffffff", "#dee2e6"
+    
+    photos_json = json.dumps(photos, ensure_ascii=False)
+    
+    html = f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Photo Map</title>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.js"></script>
+<style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    html, body {{ width: 100%; height: 100%; overflow: hidden; }}
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: {bg_color}; color: {text_color}; }}
+    #map {{ width: 100%; height: 100%; }}
+    .photo-marker {{
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        border: 3px solid white;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        cursor: pointer;
+        background-size: cover;
+        background-position: center;
+        background-color: #3b82f6;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }}
+    .photo-marker:hover {{
+        transform: scale(1.15);
+        box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    }}
+    .mapboxgl-popup {{
+        max-width: 320px !important;
+    }}
+    .mapboxgl-popup-content {{
+        padding: 0 !important;
+        border-radius: 16px !important;
+        overflow: hidden;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.2) !important;
+        background: {card_bg} !important;
+    }}
+    .mapboxgl-popup-close-button {{
+        font-size: 20px;
+        padding: 8px 12px;
+        color: white;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+        z-index: 10;
+    }}
+    .mapboxgl-popup-close-button:hover {{
+        background: rgba(0,0,0,0.2);
+        border-radius: 0 16px 0 8px;
+    }}
+    .popup-content {{
+        background: {card_bg};
+    }}
+    .popup-image {{
+        width: 100%;
+        height: 180px;
+        object-fit: cover;
+    }}
+    .popup-info {{
+        padding: 16px;
+    }}
+    .popup-title {{
+        font-weight: 600;
+        font-size: 15px;
+        margin-bottom: 4px;
+        color: {text_color};
+    }}
+    .popup-coords {{
+        font-size: 12px;
+        color: {text_color};
+        opacity: 0.6;
+    }}
+    .popup-date {{
+        font-size: 11px;
+        color: {text_color};
+        opacity: 0.5;
+        margin-top: 4px;
+    }}
+    .branding {{
+        position: absolute;
+        bottom: 8px;
+        left: 8px;
+        background: {card_bg};
+        padding: 6px 12px;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 500;
+        color: {text_color};
+        opacity: 0.8;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        text-decoration: none;
+        transition: opacity 0.2s;
+    }}
+    .branding:hover {{
+        opacity: 1;
+    }}
+    .photo-count {{
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        background: {card_bg};
+        padding: 8px 14px;
+        border-radius: 24px;
+        font-size: 13px;
+        font-weight: 600;
+        color: {text_color};
+        box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }}
+    .photo-count svg {{
+        width: 16px;
+        height: 16px;
+        opacity: 0.7;
+    }}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="photo-count">
+    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+    <span id="count">0</span> locations
+</div>
+<a href="https://photomark.cloud" target="_blank" class="branding">📍 Powered by Photomark</a>
+
+<script>
+(function() {{
+    var PHOTOS = {photos_json};
+    document.getElementById('count').textContent = PHOTOS.length;
+    
+    mapboxgl.accessToken = '{MAPBOX_TOKEN}';
+    
+    var map = new mapboxgl.Map({{
+        container: 'map',
+        style: 'mapbox://styles/mapbox/{map_style}',
+        center: [0, 20],
+        zoom: 2
+    }});
+    
+    map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    
+    var markers = [];
+    
+    map.on('load', function() {{
+        PHOTOS.forEach(function(photo) {{
+            var el = document.createElement('div');
+            el.className = 'photo-marker';
+            if (photo.thumbnail_url) {{
+                el.style.backgroundImage = 'url(' + photo.thumbnail_url + ')';
+            }}
+            
+            var popup = new mapboxgl.Popup({{ offset: 25, closeButton: true }})
+                .setHTML(
+                    '<div class="popup-content">' +
+                    (photo.thumbnail_url ? '<img src="' + photo.thumbnail_url + '" class="popup-image" alt=""/>' : '') +
+                    '<div class="popup-info">' +
+                    '<div class="popup-title">' + (photo.name || 'Photo') + '</div>' +
+                    '<div class="popup-coords">' + photo.latitude.toFixed(4) + ', ' + photo.longitude.toFixed(4) + '</div>' +
+                    (photo.taken_at ? '<div class="popup-date">' + new Date(photo.taken_at).toLocaleDateString() + '</div>' : '') +
+                    '</div></div>'
+                );
+            
+            var marker = new mapboxgl.Marker(el)
+                .setLngLat([photo.longitude, photo.latitude])
+                .setPopup(popup)
+                .addTo(map);
+            
+            markers.push(marker);
+        }});
+        
+        // Fit bounds if we have photos
+        if (PHOTOS.length > 0) {{
+            var bounds = new mapboxgl.LngLatBounds();
+            PHOTOS.forEach(function(p) {{
+                bounds.extend([p.longitude, p.latitude]);
+            }});
+            map.fitBounds(bounds, {{ padding: 60, maxZoom: 14 }});
+        }}
+    }});
+}})();
+</script>
+</body>
+</html>"""
+    
+    return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
