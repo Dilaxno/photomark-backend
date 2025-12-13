@@ -331,13 +331,21 @@ async def affiliates_track_signup(payload: dict = Body(...), db: Session = Depen
 
 @router.post("/track/signup_verified")
 async def affiliates_track_signup_verified(request: Request, db: Session = Depends(get_db)):
-    """After email verification, increment signup for the authenticated user if attributed."""
+    """After email verification, increment signup for the authenticated user if attributed.
+    
+    IMPORTANT: This should only increment signups_total ONCE per user.
+    We do NOT increment the counter here anymore - instead we count verified attributions
+    directly in the stats endpoint. This prevents double-counting issues.
+    """
     uid = get_uid_from_request(request)
     logger.info(f"[affiliates.track.signup_verified] uid={uid}")
     if not uid:
         logger.warning("[affiliates.track.signup_verified] no uid from request")
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
+        # Expire cache to get fresh data
+        db.expire_all()
+        
         # Check DB attribution first
         attrib_db = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
         affiliate_uid = attrib_db.affiliate_uid if attrib_db else None
@@ -353,26 +361,23 @@ async def affiliates_track_signup_verified(request: Request, db: Session = Depen
             logger.info(f"[affiliates.track.signup_verified] no attribution found for user={uid}")
             return {"ok": True, "tracked": False, "reason": "no_attribution"}
         
-        # Prevent double counting - check DB first
+        # Prevent double counting - check if already verified in DB
         if attrib_db and attrib_db.verified:
             logger.info(f"[affiliates.track.signup_verified] already verified in DB for user={uid}")
             return {"ok": True, "tracked": False, "reason": "already_verified"}
-        if attrib.get('verified'):
-            logger.info(f"[affiliates.track.signup_verified] already verified in JSON for user={uid}")
-            return {"ok": True, "tracked": False, "reason": "already_verified"}
         
-        # Mark as verified in JSON
+        # Mark as verified in JSON (for backup)
         attrib['verified'] = True
         attrib['verified_at'] = datetime.utcnow().isoformat()
         write_json_key(_attrib_key(uid), attrib)
         
-        # Create or update DB attribution (user should exist now after sync)
+        # Create or update DB attribution
         if attrib_db:
             attrib_db.verified = True
             attrib_db.verified_at = datetime.utcnow()
             logger.info(f"[affiliates.track.signup_verified] marked verified in DB for user={uid}")
         else:
-            # Create DB record now (user should exist after sync)
+            # Create DB record now
             try:
                 ref = attrib.get('ref', '')
                 db.add(AffiliateAttribution(
@@ -388,30 +393,14 @@ async def affiliates_track_signup_verified(request: Request, db: Session = Depen
         
         try:
             db.commit()
+            logger.info(f"[affiliates.track.signup_verified] DB commit success for user={uid}")
         except Exception as commit_ex:
             db.rollback()
             logger.warning(f"[affiliates.track.signup_verified] DB commit failed: {commit_ex}")
         
-        # Increment signup for affiliate
-        # Update JSON stats mirror
-        stats = read_json_key(_stats_key(affiliate_uid)) or {}
-        stats['signups'] = int(stats.get('signups') or 0) + 1
-        stats['last_signup_at'] = datetime.utcnow().isoformat()
-        write_json_key(_stats_key(affiliate_uid), stats)
-
-        # Update PostgreSQL aggregates
-        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
-        if prof:
-            prof.signups_total = int(prof.signups_total or 0) + 1
-            prof.last_signup_at = datetime.utcnow()
-            try:
-                db.commit()
-                logger.info(f"[affiliates.track.signup_verified] incremented signups_total for affiliate={affiliate_uid} new_total={prof.signups_total}")
-            except Exception as commit_ex:
-                db.rollback()
-                logger.warning(f"[affiliates.track.signup_verified] failed to update profile: {commit_ex}")
-        else:
-            logger.warning(f"[affiliates.track.signup_verified] affiliate profile not found for uid={affiliate_uid}")
+        # DO NOT increment signups_total here - it causes double counting!
+        # The stats endpoint counts verified attributions directly from the DB
+        # This ensures accurate counts without race conditions
         
         return {"ok": True, "tracked": True, "affiliate_uid": affiliate_uid}
     except Exception as ex:
@@ -467,24 +456,28 @@ async def affiliates_profile(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/stats")
 async def affiliates_stats(request: Request, range: str = "all", db: Session = Depends(get_db)):
-    """Return aggregated stats for the authenticated affiliate.
+    """Return aggregated stats for the authenticated affiliate filtered by date range.
     
-    IMPORTANT: Always returns real-time data from PostgreSQL (Neon).
-    Uses the aggregate totals from affiliate_profiles table which are 
-    updated in real-time when events occur.
+    Ranges:
+    - 'today' or '1d': Last 24 hours
+    - '7d' or 'week': Last 7 days  
+    - '30d' or 'month': Last 30 days
+    - '90d': Last 90 days
+    - 'all': All-time totals from profile
     
-    Note: For simplicity and consistency, all ranges return the same totals
-    since we don't have granular per-day click tracking. The daily stats
-    endpoint provides date-filtered breakdowns for charts.
+    Data is fetched real-time from Neon PostgreSQL.
     """
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
+        from datetime import timedelta
+        from sqlalchemy import or_
+        
         # Always fetch fresh data from PostgreSQL - expire any cached state
         db.expire_all()
         
-        # Get the affiliate profile with real-time totals
+        # Get the affiliate profile
         prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
         if not prof:
             logger.warning(f"[affiliates.stats] no profile found for uid={uid}")
@@ -497,21 +490,110 @@ async def affiliates_stats(request: Request, range: str = "all", db: Session = D
                 "currency": "usd",
             }
         
-        # Log current values for debugging
-        logger.info(f"[affiliates.stats] uid={uid} range={range} clicks={prof.clicks_total} signups={prof.signups_total} conversions={prof.conversions_total}")
+        # Map range to days
+        range_to_days = {
+            'today': 1,
+            '1d': 1,
+            'week': 7,
+            '7d': 7,
+            'month': 30,
+            '30d': 30,
+            '90d': 90,
+            'all': None
+        }
         
-        # Always return real-time aggregates from profile
-        # This ensures dashboard always shows the correct totals from Neon
+        days = range_to_days.get(range, None)
+        
+        # For 'all' range, count directly from tables (source of truth)
+        if days is None:
+            # Count verified signups from attributions table
+            signups_count = db.query(AffiliateAttribution).filter(
+                AffiliateAttribution.affiliate_uid == uid,
+                AffiliateAttribution.verified == True
+            ).count()
+            
+            # Count conversions and sum amounts
+            convs = db.query(AffiliateConversion).filter(AffiliateConversion.affiliate_uid == uid).all()
+            conversions_count = len(convs)
+            gross_cents = sum(int(c.amount_cents or 0) for c in convs)
+            payout_cents = sum(int(c.payout_cents or 0) for c in convs)
+            
+            logger.info(f"[affiliates.stats] uid={uid} range=all clicks={prof.clicks_total} signups={signups_count} conversions={conversions_count}")
+            return {
+                "clicks": int(prof.clicks_total or 0),
+                "signups": signups_count,
+                "conversions": conversions_count,
+                "gross_cents": gross_cents,
+                "payout_cents": payout_cents,
+                "currency": "usd",
+                "last_click_at": prof.last_click_at.isoformat() if prof.last_click_at else None,
+                "last_signup_at": prof.last_signup_at.isoformat() if prof.last_signup_at else None,
+                "last_conversion_at": prof.last_conversion_at.isoformat() if prof.last_conversion_at else None,
+            }
+        
+        # Calculate cutoff date for filtered ranges
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        logger.info(f"[affiliates.stats] uid={uid} range={range} days={days} cutoff={cutoff.isoformat()}")
+        
+        # Count signups from affiliate_attributions in date range
+        signups_count = 0
+        last_signup_at = None
+        attrs = (
+            db.query(AffiliateAttribution)
+            .filter(AffiliateAttribution.affiliate_uid == uid)
+            .filter(AffiliateAttribution.verified == True)
+            .filter(
+                or_(
+                    AffiliateAttribution.verified_at >= cutoff,
+                    (AffiliateAttribution.verified_at == None) & (AffiliateAttribution.attributed_at >= cutoff)
+                )
+            )
+            .all()
+        )
+        for a in attrs:
+            signups_count += 1
+            ts = a.verified_at or a.attributed_at
+            if ts and (not last_signup_at or ts > last_signup_at):
+                last_signup_at = ts
+        
+        # Count conversions from affiliate_conversions in date range
+        conversions_count = 0
+        gross_cents = 0
+        payout_cents = 0
+        last_conversion_at = None
+        convs = (
+            db.query(AffiliateConversion)
+            .filter(AffiliateConversion.affiliate_uid == uid)
+            .filter(AffiliateConversion.created_at >= cutoff)
+            .all()
+        )
+        for c in convs:
+            conversions_count += 1
+            gross_cents += int(c.amount_cents or 0)
+            payout_cents += int(c.payout_cents or 0)
+            ts = c.conversion_date or c.created_at
+            if ts and (not last_conversion_at or ts > last_conversion_at):
+                last_conversion_at = ts
+        
+        # Clicks - check if last_click_at is within range, otherwise use all-time
+        # (we don't have per-click timestamps, only aggregate + last_click_at)
+        clicks_count = 0
+        if prof.last_click_at and prof.last_click_at >= cutoff:
+            # Some clicks happened in this period - estimate based on recency
+            # For now, show all-time clicks if any activity in period
+            clicks_count = int(prof.clicks_total or 0)
+        
+        logger.info(f"[affiliates.stats] uid={uid} range={range} clicks={clicks_count} signups={signups_count} conversions={conversions_count}")
+        
         return {
-            "clicks": int(prof.clicks_total or 0),
-            "signups": int(prof.signups_total or 0),
-            "conversions": int(prof.conversions_total or 0),
-            "gross_cents": int(prof.gross_cents_total or 0),
-            "payout_cents": int(prof.payout_cents_total or 0),
+            "clicks": clicks_count,
+            "signups": signups_count,
+            "conversions": conversions_count,
+            "gross_cents": gross_cents,
+            "payout_cents": payout_cents,
             "currency": "usd",
-            "last_click_at": prof.last_click_at.isoformat() if prof.last_click_at else None,
-            "last_signup_at": prof.last_signup_at.isoformat() if prof.last_signup_at else None,
-            "last_conversion_at": prof.last_conversion_at.isoformat() if prof.last_conversion_at else None,
+            "last_signup_at": last_signup_at.isoformat() if last_signup_at else None,
+            "last_conversion_at": last_conversion_at.isoformat() if last_conversion_at else None,
         }
     except Exception as ex:
         logger.exception(f"[affiliates.stats] {ex}")
@@ -520,15 +602,19 @@ async def affiliates_stats(request: Request, range: str = "all", db: Session = D
 
 @router.get("/stats/daily")
 async def affiliates_stats_daily(request: Request, days: int = 30, db: Session = Depends(get_db)):
-    """Return daily breakdown of affiliate stats for the last N days."""
+    """Return daily breakdown of affiliate stats for the last N days from Neon PostgreSQL."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
+        # Expire cached data to get fresh results
+        db.expire_all()
+        
         days = max(1, min(days, 90))  # Limit between 1 and 90 days
         
         # Initialize daily buckets
-        from datetime import datetime, timedelta
+        from datetime import timedelta
+        from sqlalchemy import or_
         daily_stats = {}
         today = datetime.utcnow().date()
         
@@ -543,17 +629,18 @@ async def affiliates_stats_daily(request: Request, days: int = 30, db: Session =
                 'gross_cents': 0
             }
         
-        # Pull data from PostgreSQL
-        from datetime import timedelta
+        # Pull data from PostgreSQL (Neon)
         cutoff = datetime.utcnow() - timedelta(days=days)
+        logger.info(f"[affiliates.stats.daily] uid={uid} days={days} cutoff={cutoff.isoformat()}")
 
-        # Conversions
+        # Conversions from affiliate_conversions table
         convs = (
             db.query(AffiliateConversion)
             .filter(AffiliateConversion.affiliate_uid == uid)
             .filter(AffiliateConversion.created_at >= cutoff)
             .all()
         )
+        logger.info(f"[affiliates.stats.daily] found {len(convs)} conversions")
         for c in convs:
             dt = (c.conversion_date or c.created_at).date()
             date_str = dt.isoformat()
@@ -561,23 +648,36 @@ async def affiliates_stats_daily(request: Request, days: int = 30, db: Session =
                 daily_stats[date_str]['conversions'] += 1
                 daily_stats[date_str]['gross_cents'] += int(c.amount_cents or 0)
 
-        # Signups
+        # Signups from affiliate_attributions table
+        # Use verified_at for date filtering, fall back to attributed_at
         attrs = (
             db.query(AffiliateAttribution)
             .filter(AffiliateAttribution.affiliate_uid == uid)
             .filter(AffiliateAttribution.verified == True)
-            .filter(AffiliateAttribution.attributed_at >= cutoff)
+            .filter(
+                or_(
+                    AffiliateAttribution.verified_at >= cutoff,
+                    (AffiliateAttribution.verified_at == None) & (AffiliateAttribution.attributed_at >= cutoff)
+                )
+            )
             .all()
         )
+        logger.info(f"[affiliates.stats.daily] found {len(attrs)} verified signups")
         for a in attrs:
             dt = (a.verified_at or a.attributed_at).date()
             date_str = dt.isoformat()
             if date_str in daily_stats:
                 daily_stats[date_str]['signups'] += 1
         
-        # Note: Clicks are not tracked daily in Firestore, so we can't provide historical click data
+        # Note: Clicks are not tracked per-day, only aggregate total
         # Return sorted by date (oldest first)
         result = sorted(daily_stats.values(), key=lambda x: x['date'])
+        
+        # Log summary
+        total_signups = sum(d['signups'] for d in result)
+        total_convs = sum(d['conversions'] for d in result)
+        logger.info(f"[affiliates.stats.daily] returning {len(result)} days, total_signups={total_signups} total_conversions={total_convs}")
+        
         return {"daily_stats": result}
         
     except Exception as ex:
