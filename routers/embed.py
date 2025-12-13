@@ -36,7 +36,10 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     """Render photos as pure HTML without inline JavaScript (CSP-compliant)"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
-    num_photos = len(photos)
+    num_photos = len(photos) if len(photos) > 0 else 1
+    
+    # Calculate columns based on number of photos
+    cols = min(num_photos, 4)
     
     # Build photo cards as pure HTML
     photo_cards = ""
@@ -53,18 +56,15 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <title>{title}</title>
 <style>
     :root {{ color-scheme: {cs}; }}
-    html, body {{ margin:0; padding:0; background:{bg_value}; color:{fg}; overflow-x: hidden; }}
+    html, body {{ margin:0; padding:0; background:{bg_value}; color:{fg}; overflow: hidden; }}
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
     .grid {{ 
-        display: flex; 
-        flex-wrap: wrap; 
+        display: grid;
+        grid-template-columns: repeat({cols}, 1fr);
         gap: 0; 
         width: 100%;
     }}
     .card {{ 
-        flex: 1 1 calc(100% / {min(num_photos, 4)}); 
-        min-width: 150px;
-        max-width: 100%;
         margin: 0; 
         border: none; 
         overflow: hidden; 
@@ -72,12 +72,12 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     }}
     .card img {{ 
         width: 100%; 
-        height: auto; 
+        height: 100%; 
         display: block; 
         object-fit: cover; 
     }}
     @media (max-width: 600px) {{
-        .card {{ flex: 1 1 50%; min-width: 50%; }}
+        .grid {{ grid-template-columns: repeat(2, 1fr); }}
     }}
 </style>
 </head>
