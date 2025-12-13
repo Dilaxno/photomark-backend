@@ -38,8 +38,15 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     photos = payload.get("photos", [])
     num_photos = len(photos) if len(photos) > 0 else 1
     
-    # Calculate columns based on number of photos
-    cols = min(num_photos, 4)
+    # Calculate columns based on number of photos (masonry style)
+    if num_photos <= 2:
+        cols = num_photos
+    elif num_photos <= 4:
+        cols = 2
+    elif num_photos <= 9:
+        cols = 3
+    else:
+        cols = 4
     
     # Build photo cards as pure HTML
     photo_cards = ""
@@ -56,25 +63,41 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <title>{title}</title>
 <style>
     :root {{ color-scheme: {cs}; }}
-    html, body {{ margin:0; padding:0; background:{bg_value}; color:{fg}; overflow: hidden; }}
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    html, body {{ 
+        margin: 0; 
+        padding: 0; 
+        background: {bg_value}; 
+        color: {fg}; 
+        width: 100%; 
+        height: 100%;
+        overflow: hidden;
+    }}
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
     .grid {{ 
         display: grid;
         grid-template-columns: repeat({cols}, 1fr);
-        gap: 0; 
+        grid-auto-rows: 1fr;
+        gap: 4px; 
         width: 100%;
+        height: 100%;
+        min-height: 100vh;
     }}
     .card {{ 
         margin: 0; 
         border: none; 
         overflow: hidden; 
         background: {card_bg}; 
+        position: relative;
     }}
     .card img {{ 
         width: 100%; 
         height: 100%; 
         display: block; 
-        object-fit: cover; 
+        object-fit: cover;
+        position: absolute;
+        top: 0;
+        left: 0;
     }}
     @media (max-width: 600px) {{
         .grid {{ grid-template-columns: repeat(2, 1fr); }}
