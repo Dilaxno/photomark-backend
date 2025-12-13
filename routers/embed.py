@@ -37,16 +37,20 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
-    """Render photos as pure HTML - CSP compliant, no inline scripts"""
+    """Render photos as pure HTML - clean masonry grid like Bluxxy/Shopify style"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
     
-    # Build photo cards as pure HTML
+    # Build photo cards as pure HTML with hover effects
     photo_cards = ""
-    for p in photos:
+    for i, p in enumerate(photos):
         url = p.get("url", "")
         if url:
-            photo_cards += f'<div class="card"><img src="{url}" alt="" loading="lazy" decoding="async"/></div>\n'
+            photo_cards += f'''<div class="card">
+  <img src="{url}" alt="" loading="{'eager' if i < 6 else 'lazy'}" decoding="async"/>
+  <div class="overlay"></div>
+</div>
+'''
     
     return f"""<!doctype html>
 <html>
@@ -56,13 +60,78 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <title>{title}</title>
 <style>
     :root {{ color-scheme: {cs}; }}
-    html, body {{ margin:0; padding:0; background:{bg_value}; color:{fg}; }}
-    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
-    .grid {{ column-count: 2; column-gap: 4px; padding: 4px; }}
-    @media (min-width: 768px) {{ .grid {{ column-count: 3; }} }}
-    @media (min-width: 1024px) {{ .grid {{ column-count: 4; }} }}
-    .card {{ display: inline-block; width: 100%; margin: 0 0 4px 0; border: none; border-radius: 0; overflow: hidden; background: {card_bg}; break-inside: avoid; }}
-    .card img {{ width: 100%; height: auto; display: block; }}
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    html, body {{ background: {bg_value}; color: {fg}; min-height: 100%; }}
+    body {{ font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }}
+    
+    /* Masonry grid - clean gaps like Bluxxy */
+    .grid {{
+        column-count: 2;
+        column-gap: 8px;
+        padding: 8px;
+    }}
+    @media (min-width: 640px) {{ .grid {{ column-count: 3; column-gap: 10px; padding: 10px; }} }}
+    @media (min-width: 1024px) {{ .grid {{ column-count: 4; column-gap: 12px; padding: 12px; }} }}
+    @media (min-width: 1400px) {{ .grid {{ column-count: 5; column-gap: 14px; padding: 14px; }} }}
+    
+    /* Card styling - clean with subtle hover */
+    .card {{
+        display: inline-block;
+        width: 100%;
+        margin: 0 0 8px 0;
+        border-radius: 4px;
+        overflow: hidden;
+        background: {card_bg};
+        break-inside: avoid;
+        position: relative;
+        cursor: pointer;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }}
+    @media (min-width: 640px) {{ .card {{ margin-bottom: 10px; border-radius: 6px; }} }}
+    @media (min-width: 1024px) {{ .card {{ margin-bottom: 12px; border-radius: 8px; }} }}
+    
+    .card:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px {shadow};
+    }}
+    
+    .card img {{
+        width: 100%;
+        height: auto;
+        display: block;
+        transition: transform 0.3s ease;
+    }}
+    
+    .card:hover img {{
+        transform: scale(1.02);
+    }}
+    
+    /* Subtle overlay on hover */
+    .overlay {{
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(to top, rgba(0,0,0,0.15) 0%, transparent 40%);
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        pointer-events: none;
+    }}
+    
+    .card:hover .overlay {{
+        opacity: 1;
+    }}
+    
+    /* Loading shimmer animation */
+    @keyframes shimmer {{
+        0% {{ background-position: -200% 0; }}
+        100% {{ background-position: 200% 0; }}
+    }}
+    
+    .card img[loading="lazy"]:not([src]) {{
+        background: linear-gradient(90deg, {card_bg} 0%, {border} 50%, {card_bg} 100%);
+        background-size: 200% 100%;
+        animation: shimmer 1.5s infinite;
+        min-height: 150px;
+    }}
 </style>
 </head>
 <body>
@@ -82,7 +151,12 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     imgs.forEach(function(img){{
         img.addEventListener('load', postHeight);
     }});
-    setInterval(postHeight, 1000);
+    // Debounced height updates
+    var debounce;
+    new ResizeObserver(function(){{
+        clearTimeout(debounce);
+        debounce = setTimeout(postHeight, 100);
+    }}).observe(document.body);
 }})();
 </script>
 </body>
