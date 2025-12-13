@@ -278,11 +278,17 @@ async def affiliates_track_signup(payload: dict = Body(...), db: Session = Depen
     """Record attribution but DO NOT increment signup until verification."""
     ref = str(payload.get("ref") or "").strip()
     new_user_uid = str(payload.get("new_user_uid") or "").strip()
+    logger.info(f"[affiliates.track.signup] ref={ref} new_user_uid={new_user_uid}")
     if not ref or not new_user_uid:
+        logger.warning(f"[affiliates.track.signup] missing fields ref={ref} new_user_uid={new_user_uid}")
         return JSONResponse({"error": "missing fields"}, status_code=400)
     affiliate_uid = _extract_affiliate_uid(ref)
+    logger.info(f"[affiliates.track.signup] extracted affiliate_uid={affiliate_uid} from ref={ref}")
     if not affiliate_uid:
+        logger.warning(f"[affiliates.track.signup] invalid ref={ref}")
         return JSONResponse({"error": "invalid ref"}, status_code=400)
+    
+    # Always store in JSON first (no FK constraints)
     try:
         write_json_key(_attrib_key(new_user_uid), {
             "affiliate_uid": affiliate_uid,
@@ -290,15 +296,22 @@ async def affiliates_track_signup(payload: dict = Body(...), db: Session = Depen
             "ref": ref,
             "verified": False,
         })
-        # Persist in PostgreSQL (one attribution per user)
+        logger.info(f"[affiliates.track.signup] stored in JSON for user={new_user_uid}")
+    except Exception as ex:
+        logger.warning(f"[affiliates.track.signup] JSON write failed: {ex}")
+    
+    # Try to persist in PostgreSQL (may fail if user doesn't exist yet due to FK constraint)
+    try:
         existing = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == new_user_uid).first()
         if existing:
+            logger.info(f"[affiliates.track.signup] updating existing attribution for user={new_user_uid}")
             existing.affiliate_uid = affiliate_uid
             existing.ref = ref
             existing.verified = False
             existing.attributed_at = datetime.utcnow()
             existing.verified_at = None
         else:
+            logger.info(f"[affiliates.track.signup] creating new attribution for user={new_user_uid} affiliate={affiliate_uid}")
             db.add(AffiliateAttribution(
                 affiliate_uid=affiliate_uid,
                 user_uid=new_user_uid,
@@ -306,38 +319,79 @@ async def affiliates_track_signup(payload: dict = Body(...), db: Session = Depen
                 verified=False,
             ))
         db.commit()
-        return {"ok": True}
+        logger.info(f"[affiliates.track.signup] DB success user={new_user_uid} affiliate={affiliate_uid}")
     except Exception as ex:
-        logger.exception(f"[affiliates.track.signup] {ex}")
-        return JSONResponse({"error": "server error"}, status_code=500)
+        db.rollback()
+        # FK constraint failure is expected if user doesn't exist yet
+        # The JSON storage will be used as fallback, and DB record will be created in signup_verified
+        logger.warning(f"[affiliates.track.signup] DB insert failed (expected if user not synced yet): {ex}")
+    
+    return {"ok": True}
 
 
 @router.post("/track/signup_verified")
 async def affiliates_track_signup_verified(request: Request, db: Session = Depends(get_db)):
     """After email verification, increment signup for the authenticated user if attributed."""
     uid = get_uid_from_request(request)
+    logger.info(f"[affiliates.track.signup_verified] uid={uid}")
     if not uid:
+        logger.warning("[affiliates.track.signup_verified] no uid from request")
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
-        # Prefer DB attribution
+        # Check DB attribution first
         attrib_db = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
         affiliate_uid = attrib_db.affiliate_uid if attrib_db else None
+        
+        # Fallback to JSON attribution
         attrib = read_json_key(_attrib_key(uid)) or {}
+        logger.info(f"[affiliates.track.signup_verified] attrib_db={attrib_db is not None} affiliate_uid={affiliate_uid} json_attrib={attrib}")
+        
         if not affiliate_uid:
             affiliate_uid = attrib.get('affiliate_uid')
+        
         if not affiliate_uid:
-            return {"ok": True}
-        # Prevent double counting
+            logger.info(f"[affiliates.track.signup_verified] no attribution found for user={uid}")
+            return {"ok": True, "tracked": False, "reason": "no_attribution"}
+        
+        # Prevent double counting - check DB first
+        if attrib_db and attrib_db.verified:
+            logger.info(f"[affiliates.track.signup_verified] already verified in DB for user={uid}")
+            return {"ok": True, "tracked": False, "reason": "already_verified"}
         if attrib.get('verified'):
-            return {"ok": True}
+            logger.info(f"[affiliates.track.signup_verified] already verified in JSON for user={uid}")
+            return {"ok": True, "tracked": False, "reason": "already_verified"}
+        
+        # Mark as verified in JSON
         attrib['verified'] = True
         attrib['verified_at'] = datetime.utcnow().isoformat()
         write_json_key(_attrib_key(uid), attrib)
-        # Update DB attribution
+        
+        # Create or update DB attribution (user should exist now after sync)
         if attrib_db:
             attrib_db.verified = True
             attrib_db.verified_at = datetime.utcnow()
+            logger.info(f"[affiliates.track.signup_verified] marked verified in DB for user={uid}")
+        else:
+            # Create DB record now (user should exist after sync)
+            try:
+                ref = attrib.get('ref', '')
+                db.add(AffiliateAttribution(
+                    affiliate_uid=affiliate_uid,
+                    user_uid=uid,
+                    ref=ref,
+                    verified=True,
+                    verified_at=datetime.utcnow(),
+                ))
+                logger.info(f"[affiliates.track.signup_verified] created DB attribution for user={uid} affiliate={affiliate_uid}")
+            except Exception as db_ex:
+                logger.warning(f"[affiliates.track.signup_verified] failed to create DB attribution: {db_ex}")
+        
+        try:
             db.commit()
+        except Exception as commit_ex:
+            db.rollback()
+            logger.warning(f"[affiliates.track.signup_verified] DB commit failed: {commit_ex}")
+        
         # Increment signup for affiliate
         # Update JSON stats mirror
         stats = read_json_key(_stats_key(affiliate_uid)) or {}
@@ -350,8 +404,16 @@ async def affiliates_track_signup_verified(request: Request, db: Session = Depen
         if prof:
             prof.signups_total = int(prof.signups_total or 0) + 1
             prof.last_signup_at = datetime.utcnow()
-            db.commit()
-        return {"ok": True}
+            try:
+                db.commit()
+                logger.info(f"[affiliates.track.signup_verified] incremented signups_total for affiliate={affiliate_uid} new_total={prof.signups_total}")
+            except Exception as commit_ex:
+                db.rollback()
+                logger.warning(f"[affiliates.track.signup_verified] failed to update profile: {commit_ex}")
+        else:
+            logger.warning(f"[affiliates.track.signup_verified] affiliate profile not found for uid={affiliate_uid}")
+        
+        return {"ok": True, "tracked": True, "affiliate_uid": affiliate_uid}
     except Exception as ex:
         logger.exception(f"[affiliates.track.signup_verified] {ex}")
         return JSONResponse({"error": "server error"}, status_code=500)
@@ -694,7 +756,9 @@ async def affiliates_track_conversion(request: Request, payload: dict = Body(...
     This is a backup method - primary conversion tracking happens in pricing_webhook.py
     """
     uid = get_uid_from_request(request)
+    logger.info(f"[affiliates.track.conversion] uid={uid} payload={payload}")
     if not uid:
+        logger.warning("[affiliates.track.conversion] no uid from request")
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     try:
@@ -702,12 +766,20 @@ async def affiliates_track_conversion(request: Request, payload: dict = Body(...
         plan = str(payload.get("plan") or "").lower()
         billing_cycle = str(payload.get("billing_cycle") or "yearly").lower()
         
-        # Look up attribution for this user
-        attrib = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
-        if not attrib:
-            return {"ok": True, "tracked": False, "reason": "no_attribution"}
+        # Look up attribution for this user - check DB first, then JSON fallback
+        attrib_db = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
+        affiliate_uid = attrib_db.affiliate_uid if attrib_db else None
         
-        affiliate_uid = attrib.affiliate_uid
+        # Fallback to JSON attribution
+        attrib_json = read_json_key(_attrib_key(uid)) or {}
+        if not affiliate_uid:
+            affiliate_uid = attrib_json.get('affiliate_uid')
+        
+        logger.info(f"[affiliates.track.conversion] attrib_db={attrib_db is not None} affiliate_uid={affiliate_uid} json_attrib={attrib_json}")
+        
+        if not affiliate_uid:
+            logger.info(f"[affiliates.track.conversion] no attribution found for user={uid}")
+            return {"ok": True, "tracked": False, "reason": "no_attribution"}
         
         # Check if conversion already exists for this user
         existing_conv = db.query(AffiliateConversion).filter(
@@ -716,33 +788,68 @@ async def affiliates_track_conversion(request: Request, payload: dict = Body(...
         ).first()
         
         if existing_conv:
+            logger.info(f"[affiliates.track.conversion] conversion already exists for user={uid}")
             return {"ok": True, "tracked": False, "reason": "already_tracked"}
         
         # Calculate commission (30% default)
         commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
         commission_cents = int(amount_cents * commission_rate)
         
-        # Record conversion
-        db.add(AffiliateConversion(
-            affiliate_uid=affiliate_uid,
-            user_uid=uid,
-            amount_cents=amount_cents,
-            payout_cents=commission_cents,
-            currency="usd",
-            conversion_date=datetime.utcnow(),
-        ))
+        # Store conversion in JSON first (no FK constraints)
+        try:
+            conv_key = f"affiliates/conversions/{uid}.json"
+            write_json_key(conv_key, {
+                "affiliate_uid": affiliate_uid,
+                "user_uid": uid,
+                "amount_cents": amount_cents,
+                "payout_cents": commission_cents,
+                "plan": plan,
+                "billing_cycle": billing_cycle,
+                "converted_at": datetime.utcnow().isoformat(),
+            })
+            logger.info(f"[affiliates.track.conversion] stored in JSON for user={uid}")
+        except Exception as json_ex:
+            logger.warning(f"[affiliates.track.conversion] JSON write failed: {json_ex}")
         
-        # Update affiliate profile aggregates
-        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
-        if prof:
-            prof.conversions_total = int(prof.conversions_total or 0) + 1
-            prof.gross_cents_total = int(prof.gross_cents_total or 0) + amount_cents
-            prof.payout_cents_total = int(prof.payout_cents_total or 0) + commission_cents
-            prof.last_conversion_at = datetime.utcnow()
+        # Record conversion in DB
+        try:
+            db.add(AffiliateConversion(
+                affiliate_uid=affiliate_uid,
+                user_uid=uid,
+                amount_cents=amount_cents,
+                payout_cents=commission_cents,
+                currency="usd",
+                conversion_date=datetime.utcnow(),
+            ))
+            
+            # Update affiliate profile aggregates
+            prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
+            if prof:
+                prof.conversions_total = int(prof.conversions_total or 0) + 1
+                prof.gross_cents_total = int(prof.gross_cents_total or 0) + amount_cents
+                prof.payout_cents_total = int(prof.payout_cents_total or 0) + commission_cents
+                prof.last_conversion_at = datetime.utcnow()
+                logger.info(f"[affiliates.track.conversion] updated profile for affiliate={affiliate_uid}")
+            else:
+                logger.warning(f"[affiliates.track.conversion] affiliate profile not found for uid={affiliate_uid}")
+            
+            db.commit()
+            logger.info(f"[affiliates.track.conversion] DB success user={uid} affiliate={affiliate_uid} amount={amount_cents} commission={commission_cents}")
+        except Exception as db_ex:
+            db.rollback()
+            logger.warning(f"[affiliates.track.conversion] DB insert failed: {db_ex}")
+            # JSON storage is the fallback
         
-        db.commit()
-        
-        logger.info(f"[affiliates.track.conversion] recorded conversion for user={uid} affiliate={affiliate_uid} amount={amount_cents} commission={commission_cents}")
+        # Update JSON stats mirror
+        try:
+            stats = read_json_key(_stats_key(affiliate_uid)) or {}
+            stats['conversions'] = int(stats.get('conversions') or 0) + 1
+            stats['gross_cents'] = int(stats.get('gross_cents') or 0) + amount_cents
+            stats['payout_cents'] = int(stats.get('payout_cents') or 0) + commission_cents
+            stats['last_conversion_at'] = datetime.utcnow().isoformat()
+            write_json_key(_stats_key(affiliate_uid), stats)
+        except Exception as stats_ex:
+            logger.warning(f"[affiliates.track.conversion] stats update failed: {stats_ex}")
         
         return {"ok": True, "tracked": True, "affiliate_uid": affiliate_uid, "commission_cents": commission_cents}
     except Exception as ex:

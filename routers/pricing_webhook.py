@@ -1669,30 +1669,81 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         except Exception:
             pass
 
-        # Resolve affiliate uid via attribution table
+        # Resolve affiliate uid via attribution table - check DB first, then JSON fallback
         aff = db.query(AffiliateAttribution).filter(AffiliateAttribution.user_uid == uid).first()
         affiliate_uid = aff.affiliate_uid if aff else None
+        
+        # Fallback to JSON attribution if DB record doesn't exist
+        if not affiliate_uid:
+            try:
+                attrib_json = read_json_key(f"affiliates/attributions/{uid}.json") or {}
+                affiliate_uid = attrib_json.get('affiliate_uid')
+                if affiliate_uid:
+                    logger.info(f"[pricing.webhook] found affiliate attribution in JSON for user={uid} affiliate={affiliate_uid}")
+            except Exception:
+                pass
+        
         if affiliate_uid and amount_cents > 0:
-            commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
-            commission_cents = int(amount_cents * commission_rate)
+            # Check if conversion already exists
+            existing_conv = db.query(AffiliateConversion).filter(
+                AffiliateConversion.affiliate_uid == affiliate_uid,
+                AffiliateConversion.user_uid == uid
+            ).first()
+            
+            if existing_conv:
+                logger.info(f"[pricing.webhook] conversion already exists for user={uid} affiliate={affiliate_uid}")
+            else:
+                commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
+                commission_cents = int(amount_cents * commission_rate)
 
-            # Record conversion
-            db.add(AffiliateConversion(
-                affiliate_uid=affiliate_uid,
-                user_uid=uid,
-                amount_cents=amount_cents,
-                payout_cents=commission_cents,
-                currency=currency.lower(),
-            ))
+                # Store in JSON first (no FK constraints)
+                try:
+                    conv_key = f"affiliates/conversions/{uid}.json"
+                    write_json_key(conv_key, {
+                        "affiliate_uid": affiliate_uid,
+                        "user_uid": uid,
+                        "amount_cents": amount_cents,
+                        "payout_cents": commission_cents,
+                        "currency": currency.lower(),
+                        "plan": plan,
+                        "converted_at": datetime.utcnow().isoformat(),
+                    })
+                except Exception as json_ex:
+                    logger.warning(f"[pricing.webhook] JSON conversion write failed: {json_ex}")
 
-            # Update profile aggregates
-            prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
-            if prof:
-                prof.conversions_total = int(prof.conversions_total or 0) + 1
-                prof.gross_cents_total = int(prof.gross_cents_total or 0) + amount_cents
-                prof.payout_cents_total = int(prof.payout_cents_total or 0) + commission_cents
-                prof.last_conversion_at = datetime.utcnow()
-            db.commit()
+                # Record conversion in DB
+                try:
+                    db.add(AffiliateConversion(
+                        affiliate_uid=affiliate_uid,
+                        user_uid=uid,
+                        amount_cents=amount_cents,
+                        payout_cents=commission_cents,
+                        currency=currency.lower(),
+                    ))
+
+                    # Update profile aggregates
+                    prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == affiliate_uid).first()
+                    if prof:
+                        prof.conversions_total = int(prof.conversions_total or 0) + 1
+                        prof.gross_cents_total = int(prof.gross_cents_total or 0) + amount_cents
+                        prof.payout_cents_total = int(prof.payout_cents_total or 0) + commission_cents
+                        prof.last_conversion_at = datetime.utcnow()
+                    db.commit()
+                    logger.info(f"[pricing.webhook] recorded conversion for user={uid} affiliate={affiliate_uid} amount={amount_cents} commission={commission_cents}")
+                except Exception as db_ex:
+                    db.rollback()
+                    logger.warning(f"[pricing.webhook] DB conversion insert failed: {db_ex}")
+                
+                # Update JSON stats mirror
+                try:
+                    stats = read_json_key(f"affiliates/{affiliate_uid}/stats.json") or {}
+                    stats['conversions'] = int(stats.get('conversions') or 0) + 1
+                    stats['gross_cents'] = int(stats.get('gross_cents') or 0) + amount_cents
+                    stats['payout_cents'] = int(stats.get('payout_cents') or 0) + commission_cents
+                    stats['last_conversion_at'] = datetime.utcnow().isoformat()
+                    write_json_key(f"affiliates/{affiliate_uid}/stats.json", stats)
+                except Exception as stats_ex:
+                    logger.warning(f"[pricing.webhook] stats update failed: {stats_ex}")
     except Exception as e:
         logger.warning(f"[pricing.webhook] affiliate tracking failed: {e}")
 
