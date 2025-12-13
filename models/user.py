@@ -2,7 +2,7 @@
 User and account models for PostgreSQL
 Replaces Firestore 'users' collection
 """
-from sqlalchemy import Column, String, Text, JSON, DateTime, Integer, Boolean, Float
+from sqlalchemy import Column, String, Text, JSON, DateTime, Integer, BigInteger, Boolean, Float
 from sqlalchemy.sql import func
 from core.database import Base
 
@@ -33,8 +33,8 @@ class User(Base):
     subscription_end_date = Column(DateTime(timezone=True), nullable=True)
     
     # Usage and limits
-    storage_used_bytes = Column(Integer, default=0)
-    storage_limit_bytes = Column(Integer, default=5368709120)  # 5GB default for free plan
+    storage_used_bytes = Column(BigInteger, default=0)
+    storage_limit_bytes = Column(BigInteger, default=5368709120)  # 5GB default for free plan
     monthly_uploads = Column(Integer, default=0)
     monthly_upload_limit = Column(Integer, default=100)
     
