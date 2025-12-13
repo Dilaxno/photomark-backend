@@ -332,3 +332,45 @@ async def collab_block(
     except Exception as ex:
         logger.exception(f"collab_block failed: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+@router.post("/name/update")
+async def collab_name_update(
+    request: Request,
+    id: str = Body(..., embed=True),
+    name: str = Body(..., embed=True),
+    db: Session = Depends(get_db),
+):
+    """Update a collaborator's display name."""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        new_name = (name or "").strip()
+        if not new_name:
+            return JSONResponse({"error": "Name cannot be empty"}, status_code=400)
+        if len(new_name) > 100:
+            return JSONResponse({"error": "Name too long (max 100 characters)"}, status_code=400)
+        
+        collab_id = (id or "").strip()
+        if not collab_id:
+            return JSONResponse({"error": "Missing collaborator id"}, status_code=400)
+        
+        rec = db.query(Collaborator).filter(Collaborator.id == collab_id, Collaborator.owner_uid == uid).first()
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        
+        old_name = rec.name
+        rec.name = new_name
+        db.commit()
+        
+        try:
+            db.refresh(rec)
+        except Exception:
+            pass
+        
+        logger.info(f"Collaborator name updated from '{old_name}' to '{new_name}' by owner {uid}")
+        return {"ok": True, "item": rec.to_dict()}
+    except Exception as ex:
+        logger.exception(f"collab_name_update failed: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
