@@ -37,11 +37,11 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
-    """Render photos as pure HTML - full-width edge-to-edge masonry grid like Bluxxy"""
+    """Render photos as true masonry layout - Bluxxy/Pinterest style with varying heights"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
     
-    # Build photo cards as pure HTML
+    # Build photo cards
     photo_cards = ""
     for i, p in enumerate(photos):
         url = p.get("url", "")
@@ -57,56 +57,60 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <style>
 :root{{color-scheme:{cs}}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html,body{{background:{bg_value};color:{fg};min-height:100vh;overflow-x:hidden}}
+html,body{{background:{bg_value};color:{fg};min-height:100%}}
 body{{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}}
 
-/* Full-width edge-to-edge masonry grid - Bluxxy style */
+/* True masonry with CSS columns - images keep natural aspect ratio */
 .g{{
-    display:grid;
-    grid-template-columns:repeat(2,1fr);
-    gap:3px;
+    column-count:2;
+    column-gap:4px;
     width:100%;
+    line-height:0;
 }}
-@media(min-width:480px){{.g{{grid-template-columns:repeat(3,1fr);gap:4px}}}}
-@media(min-width:768px){{.g{{grid-template-columns:repeat(4,1fr);gap:4px}}}}
-@media(min-width:1200px){{.g{{grid-template-columns:repeat(4,1fr);gap:5px}}}}
+@media(min-width:480px){{.g{{column-count:3;column-gap:4px}}}}
+@media(min-width:768px){{.g{{column-count:4;column-gap:5px}}}}
+@media(min-width:1200px){{.g{{column-count:4;column-gap:5px}}}}
 
-/* Card - no border radius, edge to edge */
+/* Card - edge to edge, natural height */
 .c{{
-    position:relative;
+    display:inline-block;
+    width:100%;
+    margin:0 0 4px 0;
     overflow:hidden;
     background:#111;
     cursor:pointer;
+    break-inside:avoid;
+    position:relative;
 }}
+@media(min-width:768px){{.c{{margin-bottom:5px}}}}
 
 .c img{{
     width:100%;
     height:auto;
     display:block;
-    transition:transform .25s ease,opacity .2s;
-    opacity:1;
+    transition:transform .3s ease;
 }}
 
 .c:hover img{{
-    transform:scale(1.03);
+    transform:scale(1.02);
 }}
 
-/* Subtle vignette on hover */
+/* Subtle overlay on hover */
 .c::after{{
     content:'';
     position:absolute;
     inset:0;
-    background:linear-gradient(to top,rgba(0,0,0,.12) 0%,transparent 50%);
+    background:linear-gradient(to top,rgba(0,0,0,.15) 0%,transparent 40%);
     opacity:0;
     transition:opacity .2s;
     pointer-events:none;
 }}
 .c:hover::after{{opacity:1}}
 
-/* Loading state */
-.c img[loading="lazy"]{{
+/* Loading placeholder */
+.c img:not([src]),.c img[src=""]{{
     background:#1a1a1a;
-    min-height:120px;
+    min-height:200px;
 }}
 </style>
 </head>
