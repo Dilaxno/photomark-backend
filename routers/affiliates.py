@@ -467,94 +467,51 @@ async def affiliates_profile(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/stats")
 async def affiliates_stats(request: Request, range: str = "all", db: Session = Depends(get_db)):
-    """Return aggregated stats for the authenticated affiliate, optionally filtered by date range."""
+    """Return aggregated stats for the authenticated affiliate.
+    
+    IMPORTANT: Always returns real-time data from PostgreSQL (Neon).
+    Uses the aggregate totals from affiliate_profiles table which are 
+    updated in real-time when events occur.
+    
+    Note: For simplicity and consistency, all ranges return the same totals
+    since we don't have granular per-day click tracking. The daily stats
+    endpoint provides date-filtered breakdowns for charts.
+    """
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
-        from datetime import timedelta
+        # Always fetch fresh data from PostgreSQL - expire any cached state
+        db.expire_all()
         
-        # Map range values to days
-        range_to_days = {
-            '7d': 7,
-            '30d': 30,
-            '90d': 90,
-            'all': None
-        }
-        
-        days = range_to_days.get(range, None)
-        
-        # If 'all' or invalid range, return all-time aggregates from PostgreSQL + JSON mirror for clicks if needed
-        if days is None:
-            prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
-            stats_json = read_json_key(_stats_key(uid)) or {}
+        # Get the affiliate profile with real-time totals
+        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
+        if not prof:
+            logger.warning(f"[affiliates.stats] no profile found for uid={uid}")
             return {
-                "clicks": int((prof.clicks_total if prof else 0) or stats_json.get("clicks") or 0),
-                "signups": int((prof.signups_total if prof else 0) or 0),
-                "conversions": int((prof.conversions_total if prof else 0) or 0),
-                "gross_cents": int((prof.gross_cents_total if prof else 0) or 0),
-                "payout_cents": int((prof.payout_cents_total if prof else 0) or 0),
+                "clicks": 0,
+                "signups": 0,
+                "conversions": 0,
+                "gross_cents": 0,
+                "payout_cents": 0,
                 "currency": "usd",
-                "last_click_at": prof.last_click_at.isoformat() if prof and prof.last_click_at else stats_json.get("last_click_at"),
-                "last_signup_at": prof.last_signup_at.isoformat() if prof and prof.last_signup_at else None,
-                "last_conversion_at": prof.last_conversion_at.isoformat() if prof and prof.last_conversion_at else None,
             }
         
-        # For specific ranges, query PostgreSQL for date-filtered data
+        # Log current values for debugging
+        logger.info(f"[affiliates.stats] uid={uid} range={range} clicks={prof.clicks_total} signups={prof.signups_total} conversions={prof.conversions_total}")
         
-        # Calculate cutoff date
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        
-        # Initialize stats
-        signups_count = 0
-        conversions_count = 0
-        gross_cents = 0
-        payout_cents = 0
-        last_signup_at = None
-        last_conversion_at = None
-        
-        # Get verified signups from affiliate_attributions
-        attrs = (
-            db.query(AffiliateAttribution)
-            .filter(AffiliateAttribution.affiliate_uid == uid)
-            .filter(AffiliateAttribution.verified == True)
-            .filter(AffiliateAttribution.attributed_at >= cutoff)
-            .all()
-        )
-        for a in attrs:
-            signups_count += 1
-            ts = a.verified_at or a.attributed_at
-            if ts and (not last_signup_at or ts > last_signup_at):
-                last_signup_at = ts
-        
-        # Get conversions from affiliate_conversions
-        convs = (
-            db.query(AffiliateConversion)
-            .filter(AffiliateConversion.affiliate_uid == uid)
-            .filter(AffiliateConversion.created_at >= cutoff)
-            .all()
-        )
-        for c in convs:
-            conversions_count += 1
-            gross_cents += int(c.amount_cents or 0)
-            payout_cents += int(c.payout_cents or 0)
-            ts = c.conversion_date or c.created_at
-            if ts and (not last_conversion_at or ts > last_conversion_at):
-                last_conversion_at = ts
-        
-        # Clicks (no per-day timestamps stored) -> use all-time from profile/json
-        prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
-        clicks_count = int((prof.clicks_total if prof else 0) or 0)
-        
+        # Always return real-time aggregates from profile
+        # This ensures dashboard always shows the correct totals from Neon
         return {
-            "clicks": clicks_count,  # All-time clicks (no date filtering available)
-            "signups": signups_count,
-            "conversions": conversions_count,
-            "gross_cents": gross_cents,
-            "payout_cents": payout_cents,
+            "clicks": int(prof.clicks_total or 0),
+            "signups": int(prof.signups_total or 0),
+            "conversions": int(prof.conversions_total or 0),
+            "gross_cents": int(prof.gross_cents_total or 0),
+            "payout_cents": int(prof.payout_cents_total or 0),
             "currency": "usd",
-            "last_signup_at": last_signup_at.isoformat() if last_signup_at else None,
-            "last_conversion_at": last_conversion_at.isoformat() if last_conversion_at else None,
+            "last_click_at": prof.last_click_at.isoformat() if prof.last_click_at else None,
+            "last_signup_at": prof.last_signup_at.isoformat() if prof.last_signup_at else None,
+            "last_conversion_at": prof.last_conversion_at.isoformat() if prof.last_conversion_at else None,
         }
     except Exception as ex:
         logger.exception(f"[affiliates.stats] {ex}")
