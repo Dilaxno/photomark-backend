@@ -37,20 +37,16 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
-    """Render photos as pure HTML - clean masonry grid like Bluxxy/Shopify style"""
+    """Render photos as pure HTML - full-width edge-to-edge masonry grid like Bluxxy"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
     
-    # Build photo cards as pure HTML with hover effects
+    # Build photo cards as pure HTML
     photo_cards = ""
     for i, p in enumerate(photos):
         url = p.get("url", "")
         if url:
-            photo_cards += f'''<div class="card">
-  <img src="{url}" alt="" loading="{'eager' if i < 6 else 'lazy'}" decoding="async"/>
-  <div class="overlay"></div>
-</div>
-'''
+            photo_cards += f'<div class="c"><img src="{url}" alt="" loading="{"eager" if i < 8 else "lazy"}" decoding="async"/></div>\n'
     
     return f"""<!doctype html>
 <html>
@@ -59,104 +55,75 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>{title}</title>
 <style>
-    :root {{ color-scheme: {cs}; }}
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    html, body {{ background: {bg_value}; color: {fg}; min-height: 100%; }}
-    body {{ font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }}
-    
-    /* Masonry grid - clean gaps like Bluxxy */
-    .grid {{
-        column-count: 2;
-        column-gap: 8px;
-        padding: 8px;
-    }}
-    @media (min-width: 640px) {{ .grid {{ column-count: 3; column-gap: 10px; padding: 10px; }} }}
-    @media (min-width: 1024px) {{ .grid {{ column-count: 4; column-gap: 12px; padding: 12px; }} }}
-    @media (min-width: 1400px) {{ .grid {{ column-count: 5; column-gap: 14px; padding: 14px; }} }}
-    
-    /* Card styling - clean with subtle hover */
-    .card {{
-        display: inline-block;
-        width: 100%;
-        margin: 0 0 8px 0;
-        border-radius: 4px;
-        overflow: hidden;
-        background: {card_bg};
-        break-inside: avoid;
-        position: relative;
-        cursor: pointer;
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }}
-    @media (min-width: 640px) {{ .card {{ margin-bottom: 10px; border-radius: 6px; }} }}
-    @media (min-width: 1024px) {{ .card {{ margin-bottom: 12px; border-radius: 8px; }} }}
-    
-    .card:hover {{
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px {shadow};
-    }}
-    
-    .card img {{
-        width: 100%;
-        height: auto;
-        display: block;
-        transition: transform 0.3s ease;
-    }}
-    
-    .card:hover img {{
-        transform: scale(1.02);
-    }}
-    
-    /* Subtle overlay on hover */
-    .overlay {{
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(to top, rgba(0,0,0,0.15) 0%, transparent 40%);
-        opacity: 0;
-        transition: opacity 0.2s ease;
-        pointer-events: none;
-    }}
-    
-    .card:hover .overlay {{
-        opacity: 1;
-    }}
-    
-    /* Loading shimmer animation */
-    @keyframes shimmer {{
-        0% {{ background-position: -200% 0; }}
-        100% {{ background-position: 200% 0; }}
-    }}
-    
-    .card img[loading="lazy"]:not([src]) {{
-        background: linear-gradient(90deg, {card_bg} 0%, {border} 50%, {card_bg} 100%);
-        background-size: 200% 100%;
-        animation: shimmer 1.5s infinite;
-        min-height: 150px;
-    }}
+:root{{color-scheme:{cs}}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+html,body{{background:{bg_value};color:{fg};min-height:100vh;overflow-x:hidden}}
+body{{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}}
+
+/* Full-width edge-to-edge masonry grid - Bluxxy style */
+.g{{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:3px;
+    width:100%;
+}}
+@media(min-width:480px){{.g{{grid-template-columns:repeat(3,1fr);gap:4px}}}}
+@media(min-width:768px){{.g{{grid-template-columns:repeat(4,1fr);gap:4px}}}}
+@media(min-width:1200px){{.g{{grid-template-columns:repeat(4,1fr);gap:5px}}}}
+
+/* Card - no border radius, edge to edge */
+.c{{
+    position:relative;
+    overflow:hidden;
+    background:#111;
+    cursor:pointer;
+}}
+
+.c img{{
+    width:100%;
+    height:auto;
+    display:block;
+    transition:transform .25s ease,opacity .2s;
+    opacity:1;
+}}
+
+.c:hover img{{
+    transform:scale(1.03);
+}}
+
+/* Subtle vignette on hover */
+.c::after{{
+    content:'';
+    position:absolute;
+    inset:0;
+    background:linear-gradient(to top,rgba(0,0,0,.12) 0%,transparent 50%);
+    opacity:0;
+    transition:opacity .2s;
+    pointer-events:none;
+}}
+.c:hover::after{{opacity:1}}
+
+/* Loading state */
+.c img[loading="lazy"]{{
+    background:#1a1a1a;
+    min-height:120px;
+}}
 </style>
 </head>
 <body>
-<div class="grid">{photo_cards}</div>
+<div class="g">{photo_cards}</div>
 <script>
 (function(){{
-    function postHeight(){{
-        var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-        if(window.parent && window.parent !== window){{
-            window.parent.postMessage({{type:'pm-embed-height',height:h}},'*');
-        }}
-    }}
-    postHeight();
-    window.addEventListener('load', postHeight);
-    window.addEventListener('resize', postHeight);
-    var imgs = document.querySelectorAll('img');
-    imgs.forEach(function(img){{
-        img.addEventListener('load', postHeight);
-    }});
-    // Debounced height updates
-    var debounce;
-    new ResizeObserver(function(){{
-        clearTimeout(debounce);
-        debounce = setTimeout(postHeight, 100);
-    }}).observe(document.body);
+var h=0;
+function post(){{
+    var nh=Math.max(document.body.scrollHeight,document.documentElement.scrollHeight);
+    if(nh!==h){{h=nh;if(window.parent!==window)window.parent.postMessage({{type:'pm-embed-height',height:h}},'*');}}
+}}
+post();
+window.addEventListener('load',post);
+window.addEventListener('resize',post);
+document.querySelectorAll('img').forEach(function(i){{i.onload=post}});
+setInterval(post,500);
 }})();
 </script>
 </body>
