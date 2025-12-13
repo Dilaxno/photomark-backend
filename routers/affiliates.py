@@ -578,10 +578,14 @@ async def affiliates_stats(request: Request, range: str = "all", db: Session = D
         # Clicks - check if last_click_at is within range, otherwise use all-time
         # (we don't have per-click timestamps, only aggregate + last_click_at)
         clicks_count = 0
-        if prof.last_click_at and prof.last_click_at >= cutoff:
-            # Some clicks happened in this period - estimate based on recency
-            # For now, show all-time clicks if any activity in period
-            clicks_count = int(prof.clicks_total or 0)
+        if prof.last_click_at:
+            # Handle timezone-aware vs naive datetime comparison
+            last_click = prof.last_click_at
+            if last_click.tzinfo is not None:
+                last_click = last_click.replace(tzinfo=None)
+            if last_click >= cutoff:
+                # Some clicks happened in this period - show all-time clicks
+                clicks_count = int(prof.clicks_total or 0)
         
         logger.info(f"[affiliates.stats] uid={uid} range={range} clicks={clicks_count} signups={signups_count} conversions={conversions_count}")
         
