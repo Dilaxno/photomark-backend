@@ -426,3 +426,67 @@ async def mapbox_reverse_geocode(
     except Exception as ex:
         logger.exception(f"Reverse geocoding error: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=500)
+
+
+# ============ PUBLIC ENDPOINTS FOR EMBEDS ============
+
+@router.get("/public-token")
+async def mapbox_get_public_token():
+    """Get public Mapbox access token for embeds (no auth required)."""
+    if not MAPBOX_ACCESS_TOKEN:
+        return JSONResponse({"error": "Map service not configured"}, status_code=503)
+    return {"access_token": MAPBOX_ACCESS_TOKEN}
+
+
+@router.get("/public-photos")
+async def mapbox_get_public_photos(uid: str = ""):
+    """Get public photos with locations for a specific user (for embeds).
+    
+    This endpoint allows public access to photo locations for embed functionality.
+    Only returns basic photo info (no sensitive data).
+    """
+    if not uid:
+        return JSONResponse({"error": "User ID required"}, status_code=400)
+    
+    try:
+        locations = read_json_key(_photo_locations_key(uid)) or {}
+        photos = locations.get("photos", [])
+        
+        # Filter to only include public/safe data for embeds
+        public_photos = []
+        for photo in photos:
+            if not isinstance(photo, dict):
+                continue
+            
+            # Only include photos that have valid coordinates
+            lat = photo.get("latitude")
+            lng = photo.get("longitude")
+            if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+                continue
+            
+            public_photo = {
+                "key": str(photo.get("key", "")),
+                "latitude": float(lat),
+                "longitude": float(lng),
+                "name": str(photo.get("name", "Photo")),
+            }
+            
+            # Include thumbnail if available
+            if photo.get("thumbnail_url"):
+                public_photo["thumbnail_url"] = str(photo["thumbnail_url"])
+            
+            # Include taken_at if available
+            if photo.get("taken_at"):
+                public_photo["taken_at"] = str(photo["taken_at"])
+            
+            public_photos.append(public_photo)
+        
+        logger.info(f"[mapbox.public_photos] uid={uid} returning {len(public_photos)} public photos")
+        
+        return {
+            "photos": public_photos,
+            "count": len(public_photos)
+        }
+    except Exception as ex:
+        logger.exception(f"[mapbox.public_photos] {ex}")
+        return JSONResponse({"error": "server error"}, status_code=500)
