@@ -33,38 +33,8 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
-    """Render photos as pure HTML without inline JavaScript (CSP-compliant)"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
-    photos = payload.get("photos", [])
-    num_photos = len(photos) if len(photos) > 0 else 1
-    
-    # Calculate grid layout based on number of photos
-    if num_photos == 1:
-        cols = 1
-        rows = 1
-    elif num_photos == 2:
-        cols = 2
-        rows = 1
-    elif num_photos <= 4:
-        cols = 2
-        rows = 2
-    elif num_photos <= 6:
-        cols = 3
-        rows = 2
-    elif num_photos <= 9:
-        cols = 3
-        rows = 3
-    else:
-        cols = 4
-        rows = (num_photos + 3) // 4
-    
-    # Build photo cards as pure HTML
-    photo_cards = ""
-    for i, p in enumerate(photos):
-        url = p.get("url", "")
-        if url:
-            photo_cards += f'<div class="card"><img src="{url}" alt="" loading="lazy" decoding="async"/></div>\n'
-    
+    data_json = json.dumps(payload, ensure_ascii=False)
     return f"""<!doctype html>
 <html>
 <head>
@@ -73,49 +43,82 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <title>{title}</title>
 <style>
     :root {{ color-scheme: {cs}; }}
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    html, body {{ 
-        margin: 0; 
-        padding: 0; 
-        background: {bg_value}; 
-        color: {fg};
-        height: 100%;
-        overflow: hidden;
-    }}
+    html, body {{ margin:0; padding:0; background:{bg_value}; color:{fg}; }}
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
-    .grid {{ 
-        display: grid;
-        grid-template-columns: repeat({cols}, 1fr);
-        grid-template-rows: repeat({rows}, 1fr);
-        gap: 4px;
-        width: 100%;
-        height: 100%;
-        min-height: 100vh;
-    }}
-    .card {{ 
-        overflow: hidden; 
-        background: {card_bg}; 
-    }}
-    .card img {{ 
-        width: 100%; 
-        height: 100%; 
-        display: block;
-        object-fit: cover;
-    }}
-    @media (max-width: 600px) {{
-        .grid {{ 
-            grid-template-columns: repeat(2, 1fr);
-            grid-template-rows: auto;
-        }}
-        .card img {{
-            height: auto;
-            object-fit: contain;
-        }}
-    }}
+    .grid {{ column-count: 2; column-gap: 0; }}
+    @media (min-width: 1024px) {{ .grid {{ column-count: 4; }} }}
+    .card {{ display:inline-block; width:100%; margin:0; border:none; border-radius:0; overflow:hidden; background:{card_bg}; break-inside: avoid; }}
+    .card img {{width: 100%;
+    height: auto;         
+    display: block;
+    object-fit: contain;
+}}
 </style>
 </head>
 <body>
-<div class="grid">{photo_cards}</div>
+<div class="grid" id="pm-grid"></div>
+<script type="application/json" id="pm-data">{data_json}</script>
+<script>
+(function() {{
+    var dataEl = document.getElementById('pm-data');
+    if(!dataEl) return;
+    var DATA = JSON.parse(dataEl.textContent);
+    var inIframe = (function() {{
+        try {{ return window.top !== window.self; }} catch (e) {{ return true; }}
+    }})();
+    if (inIframe) {{
+        document.documentElement.style.overflow = 'hidden';
+        if (document.body) document.body.style.overflow = 'hidden';
+    }} else {{
+        document.documentElement.style.overflow = 'auto';
+        if (document.body) document.body.style.overflow = 'auto';
+    }}
+    var grid = document.getElementById('pm-grid');
+    if(!grid || !DATA.photos) return;
+    var frag = document.createDocumentFragment();
+    DATA.photos.forEach(function(p) {{
+        var card = document.createElement('div');
+        card.className = 'card';
+        var img = document.createElement('img');
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.src = p.url;
+        img.alt = '';
+        img.addEventListener('load', sendHeight);
+        img.addEventListener('error', sendHeight);
+        card.appendChild(img);
+        frag.appendChild(card);
+    }});
+    grid.appendChild(frag);
+    sendHeight();
+
+    function sendHeight() {{
+        if (!inIframe) return;
+        var h = Math.max(
+            document.documentElement.scrollHeight,
+            document.body ? document.body.scrollHeight : 0,
+            document.documentElement.offsetHeight,
+            document.documentElement.clientHeight
+        );
+        parent.postMessage({{ type: "pm-embed-height", height: h }}, "*");
+    }}
+    window.addEventListener("DOMContentLoaded", sendHeight);
+    window.addEventListener("load", sendHeight);
+    window.addEventListener("resize", sendHeight);
+    new MutationObserver(sendHeight).observe(grid, {{ childList: true, subtree: true }});
+    if (typeof ResizeObserver !== "undefined") {{
+        new ResizeObserver(sendHeight).observe(grid);
+        if (document.body) new ResizeObserver(sendHeight).observe(document.body);
+    }}
+    (function(){{
+        var t0 = Date.now();
+        var iv = setInterval(function() {{
+            sendHeight();
+            if (Date.now() - t0 > 5000) clearInterval(iv);
+        }}, 300);
+    }})();
+}})();
+</script>
 </body>
 </html>"""
 
