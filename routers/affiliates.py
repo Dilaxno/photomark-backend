@@ -767,7 +767,6 @@ async def affiliates_payouts(request: Request, db: Session = Depends(get_db)):
             return {"pending_cents": 0, "paid_ytd_cents": 0, "history": []}
         
         # Calculate totals from conversions
-        from datetime import datetime
         current_year = datetime.utcnow().year
         year_start = datetime(current_year, 1, 1)
         
@@ -779,10 +778,17 @@ async def affiliates_payouts(request: Request, db: Session = Depends(get_db)):
         )
         
         total_earned_cents = sum(int(c.payout_cents or 0) for c in all_convs)
-        ytd_earned_cents = sum(
-            int(c.payout_cents or 0) for c in all_convs 
-            if c.created_at and c.created_at >= year_start
-        )
+        
+        # Calculate YTD earnings - handle timezone-aware datetimes from Neon
+        ytd_earned_cents = 0
+        for c in all_convs:
+            if c.created_at:
+                created = c.created_at
+                # Strip timezone if present for comparison
+                if created.tzinfo is not None:
+                    created = created.replace(tzinfo=None)
+                if created >= year_start:
+                    ytd_earned_cents += int(c.payout_cents or 0)
         
         # For now, assume all earned is pending (no payout history table yet)
         # In production, you'd have a separate payouts table
