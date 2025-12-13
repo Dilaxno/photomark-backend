@@ -30,6 +30,10 @@ def _color_theme(theme: str | None, bg: str | None):
             if len(h) in (3, 4, 6, 8) and all(c in '0123456789abcdefABCDEF' for c in h):
                 bg_value = s
                 card_bg = s
+        elif s.startswith('rgba(') or s.startswith('rgb('):
+            # Support rgba/rgb colors from color picker
+            bg_value = s
+            card_bg = s
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
@@ -89,7 +93,7 @@ def embed_gallery(
     uid: str = Query(..., min_length=3, max_length=64),
     limit: str = Query("all"),
     theme: str = Query("dark"),
-    bg: str | None = Query(None, min_length=1, max_length=32),
+    bg: str | None = Query(None, min_length=1, max_length=64),
     keys: str | None = Query(None, min_length=1),
 ):
     data = _build_manifest(uid)
@@ -114,7 +118,7 @@ def embed_myuploads(
     uid: str = Query(..., min_length=3, max_length=64),
     limit: str = Query("all"),
     theme: str = Query("dark"),
-    bg: str | None = Query(None, min_length=1, max_length=32),
+    bg: str | None = Query(None, min_length=1, max_length=64),
     keys: str | None = Query(None, min_length=1),
 ):
     items: list[dict] = []
@@ -219,7 +223,7 @@ def embed_vault(
     vault: str = Query(..., min_length=1, max_length=128),
     limit: str = Query("all"),
     theme: str = Query("dark"),
-    bg: str | None = Query(None, min_length=1, max_length=32),
+    bg: str | None = Query(None, min_length=1, max_length=64),
     view: str = Query("grid"),
 ):
     """Embed a vault by name"""
