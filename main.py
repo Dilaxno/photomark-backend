@@ -252,7 +252,7 @@ async def custom_domain_routing(request: Request, call_next):
             path = ""
         
         # Skip paths that should not be intercepted
-        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/api/"):
+        if path.startswith("/.well-known/acme-challenge/") or path.startswith("/api/") or path.startswith("/embed/"):
             return await call_next(request)
         
         # Skip static assets - let them be proxied to frontend directly
