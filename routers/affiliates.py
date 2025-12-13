@@ -691,11 +691,14 @@ async def affiliates_stats_daily(request: Request, days: int = 30, db: Session =
 
 @router.get("/referrals")
 async def affiliates_referrals(request: Request, db: Session = Depends(get_db)):
-    """Return list of referrals for the authenticated affiliate from PostgreSQL."""
+    """Return list of referrals for the authenticated affiliate from PostgreSQL (Neon)."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
+        # Expire cache to get fresh data from Neon
+        db.expire_all()
+        
         # Get all attributions for this affiliate
         attrs = (
             db.query(AffiliateAttribution)
@@ -751,11 +754,14 @@ async def affiliates_referrals(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/payouts")
 async def affiliates_payouts(request: Request, db: Session = Depends(get_db)):
-    """Return payout summary and history for the authenticated affiliate from PostgreSQL."""
+    """Return payout summary and history for the authenticated affiliate from PostgreSQL (Neon)."""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
+        # Expire cache to get fresh data from Neon
+        db.expire_all()
+        
         prof = db.query(AffiliateProfile).filter(AffiliateProfile.uid == uid).first()
         if not prof:
             return {"pending_cents": 0, "paid_ytd_cents": 0, "history": []}
