@@ -124,6 +124,7 @@ async def mapbox_get_photos(request: Request, source: Optional[str] = None):
     try:
         locations = read_json_key(_photo_locations_key(eff_uid)) or {}
         photos = locations.get("photos", [])
+        logger.info(f"[mapbox.photos] uid={eff_uid} total_photos={len(photos)} source_filter={source}")
         
         # Filter by source if specified
         if source and source in ("uploads", "gallery", "vaults"):
