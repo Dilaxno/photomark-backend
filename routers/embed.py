@@ -63,6 +63,24 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 </head>
 <body>
 <div class="grid">{photo_cards}</div>
+<script>
+(function(){{
+    function postHeight(){{
+        var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+        if(window.parent && window.parent !== window){{
+            window.parent.postMessage({{type:'pm-embed-height',height:h}},'*');
+        }}
+    }}
+    postHeight();
+    window.addEventListener('load', postHeight);
+    window.addEventListener('resize', postHeight);
+    var imgs = document.querySelectorAll('img');
+    imgs.forEach(function(img){{
+        img.addEventListener('load', postHeight);
+    }});
+    setInterval(postHeight, 1000);
+}})();
+</script>
 </body>
 </html>"""
 
