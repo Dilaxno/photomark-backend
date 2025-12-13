@@ -37,7 +37,7 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
-    """Render photos as true masonry layout - Bluxxy/Pinterest style with varying heights"""
+    """Render photos as scrollable masonry gallery - works in fixed-size iframes like Wix"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
     
@@ -46,7 +46,7 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     for i, p in enumerate(photos):
         url = p.get("url", "")
         if url:
-            photo_cards += f'<div class="c"><img src="{url}" alt="" loading="{"eager" if i < 8 else "lazy"}" decoding="async"/></div>\n'
+            photo_cards += f'<div class="c"><img src="{url}" alt="" loading="{"eager" if i < 12 else "lazy"}" decoding="async"/></div>\n'
     
     return f"""<!doctype html>
 <html>
@@ -57,77 +57,90 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <style>
 :root{{color-scheme:{cs}}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html,body{{background:{bg_value};color:{fg};min-height:100%}}
-body{{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}}
+html{{height:100%;background:{bg_value}}}
+body{{
+    min-height:100%;
+    background:{bg_value};
+    color:{fg};
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    overflow-x:hidden;
+    overflow-y:auto;
+}}
 
-/* True masonry with CSS columns - images keep natural aspect ratio */
+/* Masonry grid using CSS columns */
 .g{{
     column-count:2;
     column-gap:4px;
     width:100%;
-    line-height:0;
+    padding:0;
 }}
-@media(min-width:480px){{.g{{column-count:3;column-gap:4px}}}}
-@media(min-width:768px){{.g{{column-count:4;column-gap:5px}}}}
-@media(min-width:1200px){{.g{{column-count:4;column-gap:5px}}}}
+@media(min-width:400px){{.g{{column-count:3;column-gap:4px}}}}
+@media(min-width:700px){{.g{{column-count:4;column-gap:5px}}}}
+@media(min-width:1000px){{.g{{column-count:5;column-gap:5px}}}}
 
-/* Card - edge to edge, natural height */
+/* Photo card */
 .c{{
-    display:inline-block;
+    display:block;
     width:100%;
     margin:0 0 4px 0;
     overflow:hidden;
-    background:#111;
-    cursor:pointer;
+    background:#0a0a0a;
     break-inside:avoid;
     position:relative;
+    line-height:0;
 }}
-@media(min-width:768px){{.c{{margin-bottom:5px}}}}
+@media(min-width:700px){{.c{{margin-bottom:5px}}}}
 
 .c img{{
     width:100%;
     height:auto;
     display:block;
-    transition:transform .3s ease;
+    transition:transform .3s ease,filter .3s ease;
+    backface-visibility:hidden;
 }}
 
 .c:hover img{{
-    transform:scale(1.02);
+    transform:scale(1.03);
+    filter:brightness(1.05);
 }}
 
-/* Subtle overlay on hover */
+/* Hover overlay */
 .c::after{{
     content:'';
     position:absolute;
     inset:0;
-    background:linear-gradient(to top,rgba(0,0,0,.15) 0%,transparent 40%);
+    background:linear-gradient(180deg,transparent 60%,rgba(0,0,0,.2) 100%);
     opacity:0;
-    transition:opacity .2s;
+    transition:opacity .25s;
     pointer-events:none;
 }}
 .c:hover::after{{opacity:1}}
-
-/* Loading placeholder */
-.c img:not([src]),.c img[src=""]{{
-    background:#1a1a1a;
-    min-height:200px;
-}}
 </style>
 </head>
 <body>
 <div class="g">{photo_cards}</div>
 <script>
 (function(){{
-var h=0;
-function post(){{
-    var nh=Math.max(document.body.scrollHeight,document.documentElement.scrollHeight);
-    if(nh!==h){{h=nh;if(window.parent!==window)window.parent.postMessage({{type:'pm-embed-height',height:h}},'*');}}
-}}
-post();
-window.addEventListener('load',post);
-window.addEventListener('resize',post);
-document.querySelectorAll('img').forEach(function(i){{i.onload=post}});
-setInterval(post,500);
+    // Post height to parent for auto-resize iframes
+    var lastH=0;
+    function postHeight(){{
+        var h=document.documentElement.scrollHeight||document.body.scrollHeight;
+        if(h!==lastH){{
+            lastH=h;
+            try{{window.parent.postMessage({{type:'pm-embed-height',height:h}},'*')}}catch(e){{}}
+        }}
+    }}
+    // Initial + on load
+    postHeight();
+    window.addEventListener('load',postHeight);
+    window.addEventListener('resize',postHeight);
+    // After each image loads
+    document.querySelectorAll('img').forEach(function(img){{
+        if(img.complete)postHeight();
+        else img.onload=postHeight;
+    }});
+    // Periodic check for dynamic content
+    setInterval(postHeight,1000);
 }})();
 </script>
 </body>
