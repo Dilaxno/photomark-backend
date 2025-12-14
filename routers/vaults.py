@@ -1416,6 +1416,20 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         rec['licensed'] = True
         rec['payment_id'] = None
         rec['payment_completed_at'] = None
+    
+    # Download limit (1-50, 0 = unlimited)
+    try:
+        download_limit = int((payload or {}).get('download_limit') or 0)
+        if download_limit < 0:
+            download_limit = 0
+        elif download_limit > 50:
+            download_limit = 50
+        rec['download_limit'] = download_limit
+        rec['download_count'] = 0
+    except Exception:
+        rec['download_limit'] = 0
+        rec['download_count'] = 0
+    
     # Optional: password to unlock removal of invisible watermark (unmarked originals access)
     try:
         remove_pw = str((payload or {}).get('remove_password') or '').strip()
@@ -1752,6 +1766,19 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
         rec['payment_id'] = None
         rec['payment_completed_at'] = None
     
+    # Download limit (1-50, 0 = unlimited)
+    try:
+        download_limit = int((payload or {}).get('download_limit') or 0)
+        if download_limit < 0:
+            download_limit = 0
+        elif download_limit > 50:
+            download_limit = 50
+        rec['download_limit'] = download_limit
+        rec['download_count'] = 0
+    except Exception:
+        rec['download_limit'] = 0
+        rec['download_count'] = 0
+    
     _write_json_key(_share_key(token), rec)
     
     try:
@@ -2003,6 +2030,20 @@ async def vaults_share_link(request: Request, payload: dict = Body(...), db: Ses
         rec['client_role'] = role_raw
     except Exception:
         rec['client_role'] = 'viewer'
+    
+    # Download limit (1-50, 0 = unlimited)
+    try:
+        download_limit = int((payload or {}).get('download_limit') or 0)
+        if download_limit < 0:
+            download_limit = 0
+        elif download_limit > 50:
+            download_limit = 50
+        rec['download_limit'] = download_limit
+        rec['download_count'] = 0
+    except Exception:
+        rec['download_limit'] = 0
+        rec['download_count'] = 0
+    
     _write_json_key(_share_key(token), rec)
 
     front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
@@ -2558,7 +2599,11 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
         # Keep the vault meta price for legacy shares
         final_price_cents = price_cents
     
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": final_price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit}
+    # Include download limit info
+    download_limit = int((rec or {}).get('download_limit') or 0)
+    download_count = int((rec or {}).get('download_count') or 0)
+    
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": final_price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit, "download_limit": download_limit, "download_count": download_count}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
@@ -3677,6 +3722,12 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
         if download_type == 'paid' and download_price_cents > 0:
             return JSONResponse({"error": "Payment required. Please purchase usage rights to download."}, status_code=402)
         return JSONResponse({"error": "not licensed"}, status_code=403)
+    
+    # Check download limit
+    download_limit = int(rec.get('download_limit') or 0)
+    download_count = int(rec.get('download_count') or 0)
+    if download_limit > 0 and download_count >= download_limit:
+        return JSONResponse({"error": "Download limit reached. This share link has exceeded its maximum number of downloads."}, status_code=403)
 
     uid = rec.get('uid') or ''
     vault = rec.get('vault') or ''
@@ -3759,6 +3810,13 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
     if not original_items:
         return JSONResponse({"error": "no originals available"}, status_code=404)
 
+    # Increment download count
+    try:
+        rec['download_count'] = int(rec.get('download_count') or 0) + 1
+        _write_json_key(_share_key(token), rec)
+    except Exception:
+        pass
+
     # Build zip in-memory
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -3791,6 +3849,12 @@ async def vaults_shared_lowres_zip(token: str, password: Optional[str] = None, k
     perm = str((rec.get('download_permission') or '')).strip().lower()
     if perm not in ('low', 'high'):
         return JSONResponse({"error": "permission_denied"}, status_code=403)
+    
+    # Check download limit
+    download_limit = int(rec.get('download_limit') or 0)
+    download_count = int(rec.get('download_count') or 0)
+    if download_limit > 0 and download_count >= download_limit:
+        return JSONResponse({"error": "Download limit reached. This share link has exceeded its maximum number of downloads."}, status_code=403)
 
     uid = rec.get('uid') or ''
     vault = rec.get('vault') or ''
@@ -3902,6 +3966,13 @@ async def vaults_shared_lowres_zip(token: str, password: Optional[str] = None, k
 
     if not low_items:
         return JSONResponse({"error": "no_images"}, status_code=404)
+
+    # Increment download count
+    try:
+        rec['download_count'] = int(rec.get('download_count') or 0) + 1
+        _write_json_key(_share_key(token), rec)
+    except Exception:
+        pass
 
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:

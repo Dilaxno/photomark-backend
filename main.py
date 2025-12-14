@@ -626,12 +626,12 @@ try:
 except Exception as _ex:
     logger.warning(f"webflow router not available: {_ex}")
 
-# Cleanenroll OAuth integration (Booking CRM)
+# Booking CRM system (native, replaces Cleanenroll)
 try:
-    from routers import cleanenroll  # noqa: E402
-    app.include_router(cleanenroll.router)
+    from routers import booking  # noqa: E402
+    app.include_router(booking.router)
 except Exception as _ex:
-    logger.warning(f"cleanenroll router not available: {_ex}")
+    logger.warning(f"booking router not available: {_ex}")
 
 # Google Drive backup/sync endpoints
 try:
