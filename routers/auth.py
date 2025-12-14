@@ -972,3 +972,277 @@ async def auth_email_verification_confirm(token: str, request: Request):
         body += f"<p><a href=\"{fe}\">Continue to app</a></p>"
     html_page = f"<!doctype html><html><head><meta charset='utf-8'><title>Verified</title></head><body>{body}</body></html>"
     return HTMLResponse(content=html_page, status_code=200)
+
+
+# ---- Two-Factor Authentication Login Verification ----
+
+def _2fa_key(uid: str) -> str:
+    """Key for 2FA settings storage"""
+    return f"auth/2fa/{uid}.json"
+
+
+def _2fa_backup_codes_key(uid: str) -> str:
+    """Key for 2FA backup codes storage"""
+    return f"auth/2fa_backup_codes/{uid}.json"
+
+
+@router.post("/auth/2fa/check")
+async def auth_2fa_check(payload: dict = Body(...)):
+    """
+    Check if a user has 2FA enabled (by email).
+    Called before login to determine if 2FA step is needed.
+    Body: { "email": str }
+    Returns: { "required": bool, "method": "totp" | "sms" | null }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    if not email:
+        return {"required": False, "method": None}
+    
+    if not firebase_enabled or not fb_auth:
+        return {"required": False, "method": None}
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = getattr(user, "uid", None)
+        if not uid:
+            return {"required": False, "method": None}
+        
+        # Check 2FA status
+        data = read_json_key(_2fa_key(uid)) or {}
+        if data.get("enabled"):
+            return {"required": True, "method": data.get("method")}
+        return {"required": False, "method": None}
+    except Exception as ex:
+        logger.debug(f"2FA check failed for {email}: {ex}")
+        return {"required": False, "method": None}
+
+
+@router.post("/auth/2fa/verify")
+async def auth_2fa_verify(payload: dict = Body(...)):
+    """
+    Verify 2FA code during login.
+    Body: { "email": str, "code": str }
+    Returns: { "ok": true } or error
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    code = (payload or {}).get("code", "").strip()
+    
+    if not email or not code:
+        return JSONResponse({"error": "Email and code required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "2FA verification unavailable"}, status_code=500)
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = getattr(user, "uid", None)
+        if not uid:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        # Get 2FA settings
+        data = read_json_key(_2fa_key(uid)) or {}
+        if not data.get("enabled"):
+            return JSONResponse({"error": "2FA not enabled"}, status_code=400)
+        
+        method = data.get("method")
+        
+        if method == "totp":
+            # Verify TOTP code
+            import pyotp
+            secret = data.get("secret")
+            if not secret:
+                return JSONResponse({"error": "2FA configuration error"}, status_code=500)
+            
+            totp = pyotp.TOTP(secret)
+            if totp.verify(code, valid_window=1):
+                return {"ok": True}
+            
+            # Check if it's a backup code
+            backup_result = _verify_backup_code(uid, code)
+            if backup_result:
+                return {"ok": True, "used_backup": True, "remaining": backup_result}
+            
+            return JSONResponse({"error": "Invalid code"}, status_code=400)
+        
+        elif method == "sms":
+            # For SMS, we need to verify against a pending code
+            # This is handled separately via /auth/2fa/sms/send and verify
+            return JSONResponse({"error": "Use SMS verification endpoint"}, status_code=400)
+        
+        return JSONResponse({"error": "Unknown 2FA method"}, status_code=400)
+        
+    except Exception as ex:
+        logger.exception(f"2FA verify failed for {email}: {ex}")
+        return JSONResponse({"error": "Verification failed"}, status_code=500)
+
+
+def _verify_backup_code(uid: str, code: str) -> int | None:
+    """
+    Verify and consume a backup code.
+    Returns remaining codes count if valid, None if invalid.
+    """
+    import hashlib
+    
+    clean_code = code.upper().replace("-", "")
+    backup_data = read_json_key(_2fa_backup_codes_key(uid)) or {}
+    codes = backup_data.get("codes", [])
+    
+    if not codes:
+        return None
+    
+    provided_hash = hashlib.sha256(clean_code.encode()).hexdigest()
+    
+    for i, stored in enumerate(codes):
+        if stored.get("hash") == provided_hash and not stored.get("used", False):
+            codes[i]["used"] = True
+            codes[i]["used_at"] = datetime.utcnow().isoformat()
+            
+            remaining = sum(1 for c in codes if not c.get("used", False))
+            backup_data["codes"] = codes
+            backup_data["remaining"] = remaining
+            write_json_key(_2fa_backup_codes_key(uid), backup_data)
+            
+            return remaining
+    
+    return None
+
+
+@router.post("/auth/2fa/sms/send")
+async def auth_2fa_sms_send(payload: dict = Body(...)):
+    """
+    Send SMS code for 2FA login verification.
+    Body: { "email": str }
+    Returns: { "ok": true, "masked_phone": str }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    
+    if not email:
+        return JSONResponse({"error": "Email required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "SMS verification unavailable"}, status_code=500)
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = getattr(user, "uid", None)
+        if not uid:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        # Get 2FA settings
+        data = read_json_key(_2fa_key(uid)) or {}
+        if not data.get("enabled") or data.get("method") != "sms":
+            return JSONResponse({"error": "SMS 2FA not enabled"}, status_code=400)
+        
+        phone = data.get("phone")
+        if not phone:
+            return JSONResponse({"error": "No phone configured"}, status_code=400)
+        
+        # Generate and store code
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        now = datetime.utcnow()
+        
+        pending_key = f"auth/2fa_sms_login/{uid}.json"
+        pending = {
+            "code": code,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+            "attempts": 0
+        }
+        write_json_key(pending_key, pending)
+        
+        # Send SMS
+        twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+        twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+        twilio_from = os.environ.get("TWILIO_PHONE_NUMBER", "")
+        
+        if twilio_sid and twilio_token and twilio_from:
+            try:
+                from twilio.rest import Client
+                client = Client(twilio_sid, twilio_token)
+                client.messages.create(
+                    body=f"Your Photomark login code is: {code}",
+                    from_=twilio_from,
+                    to=phone
+                )
+            except Exception as sms_ex:
+                logger.warning(f"SMS send failed for {uid}: {sms_ex}")
+                return JSONResponse({"error": "Failed to send SMS"}, status_code=500)
+        else:
+            logger.info(f"2FA SMS login code for {uid}: {code} (Twilio not configured)")
+        
+        # Mask phone for response
+        masked = phone[:3] + "****" + phone[-4:] if len(phone) > 7 else "****"
+        return {"ok": True, "masked_phone": masked}
+        
+    except Exception as ex:
+        logger.exception(f"2FA SMS send failed for {email}: {ex}")
+        return JSONResponse({"error": "Failed to send SMS"}, status_code=500)
+
+
+@router.post("/auth/2fa/sms/verify-login")
+async def auth_2fa_sms_verify_login(payload: dict = Body(...)):
+    """
+    Verify SMS code for 2FA login.
+    Body: { "email": str, "code": str }
+    Returns: { "ok": true }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    code = (payload or {}).get("code", "").strip()
+    
+    if not email or not code:
+        return JSONResponse({"error": "Email and code required"}, status_code=400)
+    
+    if not firebase_enabled or not fb_auth:
+        return JSONResponse({"error": "SMS verification unavailable"}, status_code=500)
+    
+    try:
+        user = fb_auth.get_user_by_email(email)
+        uid = getattr(user, "uid", None)
+        if not uid:
+            return JSONResponse({"error": "User not found"}, status_code=404)
+        
+        # Get pending code
+        pending_key = f"auth/2fa_sms_login/{uid}.json"
+        pending = read_json_key(pending_key) or {}
+        
+        saved_code = pending.get("code")
+        exp_str = pending.get("expires_at")
+        attempts = int(pending.get("attempts") or 0)
+        
+        if not saved_code or not exp_str:
+            return JSONResponse({"error": "No pending SMS code"}, status_code=400)
+        
+        # Check expiry
+        try:
+            exp = datetime.fromisoformat(exp_str)
+        except Exception:
+            exp = datetime.utcnow() - timedelta(seconds=1)
+        
+        if datetime.utcnow() > exp:
+            write_json_key(pending_key, {})
+            return JSONResponse({"error": "Code expired"}, status_code=400)
+        
+        # Check attempts
+        if attempts >= 5:
+            write_json_key(pending_key, {})
+            return JSONResponse({"error": "Too many attempts"}, status_code=429)
+        
+        # Verify code
+        if code != saved_code:
+            # Check backup codes
+            backup_result = _verify_backup_code(uid, code)
+            if backup_result is not None:
+                write_json_key(pending_key, {})
+                return {"ok": True, "used_backup": True, "remaining": backup_result}
+            
+            pending["attempts"] = attempts + 1
+            write_json_key(pending_key, pending)
+            return JSONResponse({"error": "Invalid code"}, status_code=400)
+        
+        # Success - clear pending
+        write_json_key(pending_key, {})
+        return {"ok": True}
+        
+    except Exception as ex:
+        logger.exception(f"2FA SMS verify failed for {email}: {ex}")
+        return JSONResponse({"error": "Verification failed"}, status_code=500)
