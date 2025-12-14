@@ -57,14 +57,13 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <style>
 :root{{color-scheme:{cs}}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html{{height:100%;background:{bg_value}}}
+html{{background:{bg_value}}}
 body{{
-    min-height:100%;
     background:{bg_value};
     color:{fg};
     font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
     overflow-x:hidden;
-    overflow-y:auto;
+    overflow-y:visible;
 }}
 
 /* Masonry grid using CSS columns */
@@ -124,7 +123,11 @@ body{{
     // Post height to parent for auto-resize iframes
     var lastH=0;
     function postHeight(){{
-        var h=document.documentElement.scrollHeight||document.body.scrollHeight;
+        // Use scrollHeight of the grid container for accurate measurement
+        var grid=document.querySelector('.g');
+        var h=grid?grid.offsetHeight:document.body.scrollHeight;
+        // Add small buffer for padding
+        h=Math.ceil(h)+4;
         if(h!==lastH){{
             lastH=h;
             try{{window.parent.postMessage({{type:'pm-embed-height',height:h}},'*')}}catch(e){{}}
@@ -135,12 +138,17 @@ body{{
     window.addEventListener('load',postHeight);
     window.addEventListener('resize',postHeight);
     // After each image loads
-    document.querySelectorAll('img').forEach(function(img){{
-        if(img.complete)postHeight();
-        else img.onload=postHeight;
+    var imgs=document.querySelectorAll('img');
+    var loaded=0;
+    imgs.forEach(function(img){{
+        if(img.complete){{loaded++;postHeight();}}
+        else img.onload=function(){{loaded++;postHeight();}};
     }});
-    // Periodic check for dynamic content
-    setInterval(postHeight,1000);
+    // Periodic check until all images loaded
+    var check=setInterval(function(){{
+        postHeight();
+        if(loaded>=imgs.length)clearInterval(check);
+    }},200);
 }})();
 </script>
 </body>

@@ -1830,7 +1830,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                 plan_prices = {
                     "individual": {"monthly": 2500, "yearly": 24000},  # $25/mo or $240/yr
                     "studios": {"monthly": 4500, "yearly": 43200},     # $45/mo or $432/yr
-                    "golden": {"onetime": 64800},                       # $648 for 3 years (Golden Offer)
+                    "golden": {"onetime": 19900},                       # $199 lifetime (Golden Offer)
                 }
                 if plan in plan_prices:
                     if plan == "golden":

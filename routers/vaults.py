@@ -3243,6 +3243,145 @@ async def retouch_upload_final(request: Request, id: str = Form(...), file: Uplo
         return JSONResponse({"error": str(ex)}, status_code=500)
 
 
+@router.post("/vaults/retouch/upload-result")
+async def retouch_upload_result(request: Request, retouch_id: str = Form(...), file: UploadFile = File(...)):
+    """Alias endpoint for uploading retouched result. Accepts retouch_id instead of id.
+    Photographer uploads the final retouched version for a retouch request.
+    Overwrites the existing photo at the same key to preserve approvals/favorites and shared links.
+    Marks the retouch request as done and notifies the client.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    rid = (retouch_id or '').strip()
+    if not rid:
+        return JSONResponse({"error": "retouch_id required"}, status_code=400)
+    try:
+        items = _read_retouch_queue(uid)
+        found = None
+        for it in items:
+            if str(it.get("id") or "") == rid:
+                found = it
+                break
+        if not found:
+            return JSONResponse({"error": "Retouch request not found"}, status_code=404)
+        key = str(found.get("key") or "").strip()
+        vault = str(found.get("vault") or "").strip()
+        token = str(found.get("token") or "").strip()
+        if not key or not vault:
+            return JSONResponse({"error": "Invalid retouch request data"}, status_code=400)
+        # Validate membership in vault for safety
+        try:
+            keys = _read_vault(uid, vault)
+            if key not in keys:
+                return JSONResponse({"error": "Photo not in vault"}, status_code=400)
+        except Exception:
+            pass
+        # Read upload bytes
+        data = await file.read()
+        if not data:
+            return JSONResponse({"error": "Empty file"}, status_code=400)
+        # Infer content-type
+        name = file.filename or os.path.basename(key) or "image.jpg"
+        ext = os.path.splitext(name)[1].lower()
+        ct_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".heic": "image/heic",
+            ".tif": "image/tiff",
+            ".tiff": "image/tiff",
+        }
+        ct = ct_map.get(ext, "application/octet-stream")
+        
+        # Auto-embed IPTC/EXIF metadata if user has it enabled
+        try:
+            data = auto_embed_metadata_for_user(data, uid)
+        except Exception as meta_ex:
+            logger.debug(f"Metadata embed skipped: {meta_ex}")
+        
+        # Check file size (limit to 50MB for retouch uploads)
+        max_size = 50 * 1024 * 1024  # 50MB
+        if len(data) > max_size:
+            logger.warning(f"retouch upload-result file too large: {len(data)} bytes for {key}")
+            return JSONResponse({"error": f"File too large. Maximum size is 50MB, got {len(data) / (1024*1024):.1f}MB"}, status_code=400)
+        
+        # Overwrite object in-place so that existing keys/approvals remain intact
+        try:
+            upload_bytes(key, data, content_type=ct)
+        except Exception as ex:
+            logger.error(f"retouch upload-result failed for {key}: {ex}", exc_info=True)
+            return JSONResponse({"error": f"Upload failed: {str(ex)}"}, status_code=500)
+        # Update stored size for this asset (best-effort)
+        try:
+            db: Session = next(get_db())
+            try:
+                rec = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+                if rec:
+                    rec.size_bytes = len(data)
+                    db.commit()
+                else:
+                    rec2 = GalleryAsset(user_uid=uid, vault=vault, key=key, size_bytes=len(data))
+                    db.add(rec2)
+                    db.commit()
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Update queue status to done
+        try:
+            for it in items:
+                if str(it.get("id") or "") == rid:
+                    it["status"] = "done"
+                    it["updated_at"] = datetime.utcnow().isoformat()
+                    it["note"] = (it.get("note") or "")
+                    break
+            _write_retouch_queue(uid, items)
+            _touch_retouch_version(uid, vault)
+        except Exception:
+            pass
+        # Notify client (best-effort)
+        try:
+            client_email = (found.get("client_email") or "").strip()
+            if client_email:
+                photo_name = os.path.basename(key)
+                subject = f"Retouched photo ready — {photo_name}"
+                intro = (
+                    f"Your retouch request for <strong>{photo_name}</strong> in vault <strong>{vault}</strong> is now <strong>Done</strong>."
+                )
+                html = render_email(
+                    "email_basic.html",
+                    title="Retouched version uploaded",
+                    intro=intro,
+                    button_label="Open shared vault",
+                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + ("/#share?token=" + token if token else "/#share"),
+                )
+                text = f"Your retouched photo is ready: {photo_name} in vault {vault}."
+                try:
+                    send_email_smtp(client_email, subject, html, text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Respond with success
+        url = None
+        try:
+            if s3 and R2_BUCKET:
+                url = _get_url_for_key(key, expires_in=60 * 60 * 24 * 7)
+            else:
+                url = f"/static/{key}"
+        except Exception:
+            url = None
+        return {"ok": True, "key": key, "url": url, "status": "done"}
+    except Exception as ex:
+        logger.warning(f"retouch_upload_result error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
+
+
 @router.post("/vaults/shared/checkout")
 async def vaults_shared_checkout(payload: CheckoutPayload, request: Request):
     token = (payload.token or "").strip()
