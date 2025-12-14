@@ -383,6 +383,295 @@ async def relight_manual(
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+def _compute_normal_map(rgb: np.ndarray) -> np.ndarray:
+    """
+    Estimate surface normals from image using gradient-based approach.
+    This is a simplified normal estimation suitable for relighting.
+    
+    Returns:
+        Normal map (HxWx3, float32, normalized vectors)
+    """
+    # Convert to grayscale for gradient computation
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    
+    # Compute gradients using Sobel operators
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    
+    # Scale gradients for better normal estimation
+    scale = 2.0
+    grad_x = grad_x * scale
+    grad_y = grad_y * scale
+    
+    # Construct normal vectors: N = (-dI/dx, -dI/dy, 1) normalized
+    normals = np.zeros((rgb.shape[0], rgb.shape[1], 3), dtype=np.float32)
+    normals[:, :, 0] = -grad_x
+    normals[:, :, 1] = -grad_y
+    normals[:, :, 2] = 1.0
+    
+    # Normalize
+    norm = np.sqrt(np.sum(normals ** 2, axis=2, keepdims=True))
+    normals = normals / (norm + 1e-8)
+    
+    return normals
+
+
+def _apply_directional_light(
+    rgb: np.ndarray,
+    light_x: float,
+    light_y: float,
+    light_intensity: float = 1.5,
+    ambient: float = 0.3,
+    diffuse_strength: float = 0.7,
+    specular_strength: float = 0.2,
+    specular_power: float = 16.0,
+    light_color: tuple = (255, 255, 255),
+    falloff: float = 0.5
+) -> np.ndarray:
+    """
+    Apply directional lighting to an image based on light source position.
+    Uses Phong-like shading model with estimated normals.
+    
+    Args:
+        rgb: Input image (HxWx3, uint8)
+        light_x: Light X position (0-1, relative to image width)
+        light_y: Light Y position (0-1, relative to image height)
+        light_intensity: Overall light brightness multiplier
+        ambient: Ambient light level (0-1)
+        diffuse_strength: Diffuse lighting strength
+        specular_strength: Specular highlight strength
+        specular_power: Specular shininess
+        light_color: RGB color of the light
+        falloff: Distance falloff factor (0=no falloff, 1=strong falloff)
+    
+    Returns:
+        Relit image (HxWx3, uint8)
+    """
+    h, w = rgb.shape[:2]
+    
+    # Estimate normals from the image
+    normals = _compute_normal_map(rgb)
+    
+    # Create coordinate grids
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    x_coords = x_coords / w
+    y_coords = y_coords / h
+    
+    # Light position in normalized coordinates
+    # Light is positioned above the image plane (z > 0)
+    light_z = 0.5  # Height of light above image
+    
+    # Compute light direction vectors for each pixel
+    light_dir = np.zeros((h, w, 3), dtype=np.float32)
+    light_dir[:, :, 0] = light_x - x_coords
+    light_dir[:, :, 1] = light_y - y_coords
+    light_dir[:, :, 2] = light_z
+    
+    # Compute distance for falloff
+    dist = np.sqrt(np.sum(light_dir[:, :, :2] ** 2, axis=2))
+    
+    # Normalize light direction
+    light_norm = np.sqrt(np.sum(light_dir ** 2, axis=2, keepdims=True))
+    light_dir = light_dir / (light_norm + 1e-8)
+    
+    # Compute diffuse lighting (N dot L)
+    n_dot_l = np.sum(normals * light_dir, axis=2)
+    n_dot_l = np.clip(n_dot_l, 0, 1)
+    
+    # Compute view direction (assuming viewer is directly above)
+    view_dir = np.zeros((h, w, 3), dtype=np.float32)
+    view_dir[:, :, 2] = 1.0
+    
+    # Compute reflection direction for specular
+    reflect_dir = 2 * n_dot_l[:, :, np.newaxis] * normals - light_dir
+    
+    # Specular component (R dot V)^n
+    r_dot_v = np.sum(reflect_dir * view_dir, axis=2)
+    r_dot_v = np.clip(r_dot_v, 0, 1)
+    specular = np.power(r_dot_v, specular_power)
+    
+    # Apply distance falloff
+    attenuation = 1.0 / (1.0 + falloff * dist * dist * 4)
+    
+    # Combine lighting components
+    diffuse = n_dot_l * diffuse_strength * attenuation
+    specular = specular * specular_strength * attenuation
+    
+    # Total lighting
+    lighting = ambient + (diffuse + specular) * light_intensity
+    lighting = np.clip(lighting, 0, 2.0)
+    
+    # Apply lighting to image
+    img_f = rgb.astype(np.float32)
+    
+    # Apply light color
+    light_color_f = np.array(light_color, dtype=np.float32) / 255.0
+    
+    # Modulate by lighting
+    result = img_f * lighting[:, :, np.newaxis]
+    
+    # Add specular highlights with light color
+    specular_contrib = specular[:, :, np.newaxis] * light_color_f * 255.0 * light_intensity
+    result = result + specular_contrib
+    
+    result = np.clip(result, 0, 255).astype(np.uint8)
+    
+    return result
+
+
+def _apply_directional_light_advanced(
+    rgb: np.ndarray,
+    light_x: float,
+    light_y: float,
+    light_intensity: float = 1.5,
+    ambient: float = 0.3,
+    shadow_softness: float = 0.5,
+    light_color: tuple = (255, 255, 255),
+    preserve_colors: bool = True
+) -> np.ndarray:
+    """
+    Advanced directional relighting using intrinsic decomposition.
+    Preserves original colors better while changing lighting direction.
+    
+    Args:
+        rgb: Input image (HxWx3, uint8)
+        light_x: Light X position (0-1)
+        light_y: Light Y position (0-1)
+        light_intensity: Light brightness
+        ambient: Ambient light level
+        shadow_softness: How soft shadows should be
+        light_color: RGB color of light
+        preserve_colors: Whether to preserve original colors
+    
+    Returns:
+        Relit image (HxWx3, uint8)
+    """
+    h, w = rgb.shape[:2]
+    
+    # Decompose into albedo and shading
+    albedo, original_shading = _decompose_intrinsic(rgb)
+    
+    # Estimate normals
+    normals = _compute_normal_map(rgb)
+    
+    # Create coordinate grids
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    x_coords = x_coords / w
+    y_coords = y_coords / h
+    
+    # Light direction
+    light_z = 0.6
+    light_dir = np.zeros((h, w, 3), dtype=np.float32)
+    light_dir[:, :, 0] = light_x - x_coords
+    light_dir[:, :, 1] = light_y - y_coords
+    light_dir[:, :, 2] = light_z
+    
+    # Distance for falloff
+    dist = np.sqrt(light_dir[:, :, 0]**2 + light_dir[:, :, 1]**2)
+    
+    # Normalize
+    light_norm = np.sqrt(np.sum(light_dir ** 2, axis=2, keepdims=True))
+    light_dir = light_dir / (light_norm + 1e-8)
+    
+    # Diffuse lighting
+    n_dot_l = np.sum(normals * light_dir, axis=2)
+    n_dot_l = np.clip(n_dot_l, 0, 1)
+    
+    # Soft shadows using distance
+    shadow_factor = 1.0 / (1.0 + shadow_softness * dist * dist * 2)
+    
+    # New shading map
+    new_shading = ambient + n_dot_l * light_intensity * shadow_factor
+    
+    # Blend with original shading to preserve some original lighting
+    blend_factor = 0.6
+    final_shading = blend_factor * new_shading + (1 - blend_factor) * original_shading
+    final_shading = np.clip(final_shading, 0.05, 2.0)
+    
+    # Recompose
+    if preserve_colors:
+        # Use original albedo
+        result = _recompose_image(albedo, final_shading)
+    else:
+        # Apply light color tint
+        light_color_f = np.array(light_color, dtype=np.float32) / 255.0
+        tinted_albedo = albedo * light_color_f
+        result = _recompose_image(tinted_albedo, final_shading)
+    
+    return result
+
+
+@router.post("/process/relight-directional")
+async def relight_directional(
+    image: UploadFile = File(...),
+    light_x: float = Form(0.5),
+    light_y: float = Form(0.0),
+    light_intensity: float = Form(1.5),
+    ambient: float = Form(0.3),
+    shadow_softness: float = Form(0.5),
+    light_color_r: int = Form(255),
+    light_color_g: int = Form(255),
+    light_color_b: int = Form(255),
+    preserve_colors: bool = Form(True),
+    jpeg_quality: int = Form(92),
+):
+    """
+    Apply directional relighting with controllable light source position.
+    
+    Args:
+        image: Input image
+        light_x: Light X position (0=left, 0.5=center, 1=right)
+        light_y: Light Y position (0=top, 0.5=center, 1=bottom)
+        light_intensity: Light brightness (0.5-3.0)
+        ambient: Ambient light level (0-1)
+        shadow_softness: Shadow softness (0-1)
+        light_color_r/g/b: Light color RGB components
+        preserve_colors: Whether to preserve original colors
+    """
+    try:
+        data = await image.read()
+        img = Image.open(BytesIO(data)).convert("RGB")
+        rgb = np.array(img)
+        
+        # Clamp parameters
+        light_x = float(max(0.0, min(1.0, light_x)))
+        light_y = float(max(0.0, min(1.0, light_y)))
+        light_intensity = float(max(0.5, min(3.0, light_intensity)))
+        ambient = float(max(0.0, min(1.0, ambient)))
+        shadow_softness = float(max(0.0, min(1.0, shadow_softness)))
+        light_color = (
+            int(max(0, min(255, light_color_r))),
+            int(max(0, min(255, light_color_g))),
+            int(max(0, min(255, light_color_b)))
+        )
+        
+        # Apply directional relighting
+        result = _apply_directional_light_advanced(
+            rgb,
+            light_x=light_x,
+            light_y=light_y,
+            light_intensity=light_intensity,
+            ambient=ambient,
+            shadow_softness=shadow_softness,
+            light_color=light_color,
+            preserve_colors=preserve_colors
+        )
+        
+        # Save result
+        out_img = Image.fromarray(result, mode="RGB")
+        buf = BytesIO()
+        out_img.save(buf, format="JPEG", quality=int(max(1, min(95, jpeg_quality))), optimize=True, progressive=True)
+        buf.seek(0)
+        
+        name = image.filename or "image"
+        fname = os.path.splitext(name)[0] + "_relit.jpg"
+        
+        return StreamingResponse(BytesIO(buf.getvalue()), media_type="image/jpeg", headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except Exception as e:
+        logger.error(f"Directional relight failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 @router.post("/process/relight-images")
 async def relight_images(
   files: List[UploadFile] = File(...),
