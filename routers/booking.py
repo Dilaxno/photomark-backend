@@ -3,6 +3,7 @@ Booking System Router
 Full booking/CRM system for photographers
 """
 import os
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
@@ -898,5 +899,426 @@ async def get_calendar(
             })
         
         return {"events": events}
+    finally:
+        db.close()
+
+
+# ============ Form Builder ============
+
+from models.booking import BookingForm, FormSubmission
+
+class FormCreate(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    fields: Optional[List[dict]] = []
+    style: Optional[dict] = {}
+    submit_button_text: Optional[str] = "Submit"
+    success_message: Optional[str] = "Thank you for your submission!"
+    redirect_url: Optional[str] = None
+    notify_email: Optional[str] = None
+    send_confirmation: Optional[bool] = True
+
+
+class FormUpdate(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    fields: Optional[List[dict]] = None
+    style: Optional[dict] = None
+    submit_button_text: Optional[str] = None
+    success_message: Optional[str] = None
+    redirect_url: Optional[str] = None
+    notify_email: Optional[str] = None
+    send_confirmation: Optional[bool] = None
+    is_active: Optional[bool] = None
+    is_published: Optional[bool] = None
+
+
+@router.get("/forms")
+async def list_forms(request: Request):
+    """List all booking forms"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        forms = db.query(BookingForm).filter(BookingForm.uid == uid).order_by(BookingForm.created_at.desc()).all()
+        return {"forms": [f.to_dict() for f in forms]}
+    finally:
+        db.close()
+
+
+@router.post("/forms")
+async def create_form(request: Request, data: FormCreate):
+    """Create a new booking form"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        # Generate slug if not provided
+        slug = data.slug
+        if not slug:
+            import re
+            slug = re.sub(r'[^a-z0-9]+', '-', data.name.lower()).strip('-')
+        
+        # Ensure slug is unique for this user
+        existing = db.query(BookingForm).filter(BookingForm.uid == uid, BookingForm.slug == slug).first()
+        if existing:
+            slug = f"{slug}-{secrets.token_hex(4)}"
+        
+        form = BookingForm(
+            uid=uid,
+            name=data.name,
+            slug=slug,
+            description=data.description,
+            title=data.title or data.name,
+            subtitle=data.subtitle,
+            fields=data.fields or [],
+            style=data.style or {},
+            submit_button_text=data.submit_button_text or "Submit",
+            success_message=data.success_message or "Thank you for your submission!",
+            redirect_url=data.redirect_url,
+            notify_email=data.notify_email,
+            send_confirmation=data.send_confirmation if data.send_confirmation is not None else True
+        )
+        db.add(form)
+        db.commit()
+        db.refresh(form)
+        return form.to_dict()
+    finally:
+        db.close()
+
+
+@router.get("/forms/{form_id}")
+async def get_form(request: Request, form_id: str):
+    """Get a specific form"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(BookingForm.id == form_id, BookingForm.uid == uid).first()
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        return form.to_dict()
+    finally:
+        db.close()
+
+
+@router.put("/forms/{form_id}")
+async def update_form(request: Request, form_id: str, data: FormUpdate):
+    """Update a form"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(BookingForm.id == form_id, BookingForm.uid == uid).first()
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        update_data = data.dict(exclude_unset=True)
+        for key, value in update_data.items():
+            if value is not None:
+                setattr(form, key, value)
+        
+        form.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(form)
+        return form.to_dict()
+    finally:
+        db.close()
+
+
+@router.delete("/forms/{form_id}")
+async def delete_form(request: Request, form_id: str):
+    """Delete a form"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(BookingForm.id == form_id, BookingForm.uid == uid).first()
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        db.delete(form)
+        db.commit()
+        return {"ok": True, "message": "Form deleted"}
+    finally:
+        db.close()
+
+
+# ============ Public Form Endpoints (for embed) ============
+
+@router.get("/public/form/{slug}")
+async def get_public_form(slug: str):
+    """Get a published form by slug (public, no auth required)"""
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(
+            BookingForm.slug == slug,
+            BookingForm.is_published == True,
+            BookingForm.is_active == True
+        ).first()
+        
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        # Increment view count
+        form.views_count = (form.views_count or 0) + 1
+        db.commit()
+        
+        # Return only public-safe data
+        return {
+            "id": str(form.id),
+            "title": form.title,
+            "subtitle": form.subtitle,
+            "fields": form.fields or [],
+            "style": form.style or {},
+            "submit_button_text": form.submit_button_text,
+        }
+    finally:
+        db.close()
+
+
+@router.post("/public/form/{slug}/submit")
+async def submit_public_form(request: Request, slug: str, data: dict = Body(...)):
+    """Submit a form (public, no auth required)"""
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(
+            BookingForm.slug == slug,
+            BookingForm.is_published == True,
+            BookingForm.is_active == True
+        ).first()
+        
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        # Extract contact info from submission
+        contact_name = None
+        contact_email = None
+        contact_phone = None
+        scheduled_date = None
+        scheduled_end = None
+        
+        for field in form.fields or []:
+            field_id = field.get("id")
+            field_type = field.get("type")
+            value = data.get(field_id)
+            
+            if field_type in ["name", "full_name"] and value:
+                contact_name = str(value)
+            elif field_type == "email" and value:
+                contact_email = str(value)
+            elif field_type == "phone" and value:
+                contact_phone = str(value)
+            elif field_type == "calendar" and value:
+                scheduled_date = _parse_datetime(value.get("start") if isinstance(value, dict) else value)
+                if isinstance(value, dict) and value.get("end"):
+                    scheduled_end = _parse_datetime(value.get("end"))
+        
+        # Get request metadata
+        ip_address = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
+        user_agent = request.headers.get("user-agent")
+        referrer = request.headers.get("referer")
+        
+        submission = FormSubmission(
+            uid=form.uid,
+            form_id=form.id,
+            data=data,
+            contact_name=contact_name,
+            contact_email=contact_email,
+            contact_phone=contact_phone,
+            scheduled_date=scheduled_date,
+            scheduled_end=scheduled_end,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            referrer=referrer
+        )
+        db.add(submission)
+        
+        # Update form stats
+        form.submissions_count = (form.submissions_count or 0) + 1
+        
+        db.commit()
+        db.refresh(submission)
+        
+        return {
+            "ok": True,
+            "submission_id": str(submission.id),
+            "success_message": form.success_message,
+            "redirect_url": form.redirect_url
+        }
+    finally:
+        db.close()
+
+
+# ============ Form Submissions ============
+
+@router.get("/forms/{form_id}/submissions")
+async def list_form_submissions(
+    request: Request,
+    form_id: str,
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0)
+):
+    """List submissions for a form"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        # Verify form ownership
+        form = db.query(BookingForm).filter(BookingForm.id == form_id, BookingForm.uid == uid).first()
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        query = db.query(FormSubmission).filter(FormSubmission.form_id == form_id)
+        
+        if status:
+            query = query.filter(FormSubmission.status == status)
+        
+        total = query.count()
+        submissions = query.order_by(FormSubmission.created_at.desc()).offset(offset).limit(limit).all()
+        
+        return {
+            "submissions": [s.to_dict() for s in submissions],
+            "total": total,
+            "form": form.to_dict()
+        }
+    finally:
+        db.close()
+
+
+@router.put("/submissions/{submission_id}/status")
+async def update_submission_status(request: Request, submission_id: str, status: str = Body(..., embed=True)):
+    """Update submission status"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        submission = db.query(FormSubmission).filter(
+            FormSubmission.id == submission_id,
+            FormSubmission.uid == uid
+        ).first()
+        
+        if not submission:
+            return JSONResponse({"error": "Submission not found"}, status_code=404)
+        
+        submission.status = status
+        db.commit()
+        return {"ok": True, "status": status}
+    finally:
+        db.close()
+
+
+@router.post("/submissions/{submission_id}/convert")
+async def convert_submission_to_booking(request: Request, submission_id: str):
+    """Convert a form submission to a booking"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        submission = db.query(FormSubmission).filter(
+            FormSubmission.id == submission_id,
+            FormSubmission.uid == uid
+        ).first()
+        
+        if not submission:
+            return JSONResponse({"error": "Submission not found"}, status_code=404)
+        
+        # Create booking from submission
+        booking = Booking(
+            uid=uid,
+            client_name=submission.contact_name,
+            client_email=submission.contact_email,
+            client_phone=submission.contact_phone,
+            session_date=submission.scheduled_date,
+            session_end=submission.scheduled_end,
+            status=BookingStatus.INQUIRY,
+            questionnaire_data=submission.data
+        )
+        db.add(booking)
+        db.flush()
+        
+        # Link submission to booking
+        submission.booking_id = booking.id
+        submission.status = "converted"
+        
+        db.commit()
+        db.refresh(booking)
+        
+        return {"ok": True, "booking": booking.to_dict()}
+    finally:
+        db.close()
+
+
+# ============ Form Analytics ============
+
+@router.get("/forms/{form_id}/analytics")
+async def get_form_analytics(request: Request, form_id: str):
+    """Get analytics for a form"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(BookingForm.id == form_id, BookingForm.uid == uid).first()
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        # Get submission stats
+        total_submissions = db.query(func.count(FormSubmission.id)).filter(FormSubmission.form_id == form_id).scalar() or 0
+        
+        # Submissions by status
+        status_counts = {}
+        for status in ["new", "read", "contacted", "converted", "archived"]:
+            count = db.query(func.count(FormSubmission.id)).filter(
+                FormSubmission.form_id == form_id,
+                FormSubmission.status == status
+            ).scalar() or 0
+            status_counts[status] = count
+        
+        # Conversion rate
+        conversion_rate = (status_counts.get("converted", 0) / total_submissions * 100) if total_submissions > 0 else 0
+        
+        # Submissions over time (last 30 days)
+        from datetime import timedelta
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        daily_submissions = db.query(
+            func.date(FormSubmission.created_at).label('date'),
+            func.count(FormSubmission.id).label('count')
+        ).filter(
+            FormSubmission.form_id == form_id,
+            FormSubmission.created_at >= thirty_days_ago
+        ).group_by(func.date(FormSubmission.created_at)).all()
+        
+        return {
+            "views": form.views_count or 0,
+            "submissions": total_submissions,
+            "conversion_rate": round(conversion_rate, 1),
+            "status_counts": status_counts,
+            "daily_submissions": [{"date": str(d.date), "count": d.count} for d in daily_submissions]
+        }
     finally:
         db.close()

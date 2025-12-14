@@ -368,3 +368,122 @@ class BookingSettings(Base):
             "booking_page_description": self.booking_page_description,
             "timezone": self.timezone,
         }
+
+
+class BookingForm(Base):
+    """Custom booking forms with drag-and-drop fields"""
+    __tablename__ = "booking_forms"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid = Column(String(128), nullable=False, index=True)
+    
+    # Form basics
+    name = Column(String(255), nullable=False)
+    slug = Column(String(100), nullable=True, index=True)  # For embed URL
+    description = Column(Text, nullable=True)
+    
+    # Form content
+    title = Column(String(255), nullable=True)
+    subtitle = Column(Text, nullable=True)
+    fields = Column(JSON, default=list)  # Array of field definitions
+    
+    # Styling
+    style = Column(JSON, default=dict)  # {font_family, primary_color, bg_color, text_color, border_radius, etc.}
+    
+    # Settings
+    submit_button_text = Column(String(100), default="Submit")
+    success_message = Column(Text, default="Thank you for your submission!")
+    redirect_url = Column(Text, nullable=True)
+    
+    # Notifications
+    notify_email = Column(String(255), nullable=True)
+    send_confirmation = Column(Boolean, default=True)
+    
+    # Status
+    is_active = Column(Boolean, default=True)
+    is_published = Column(Boolean, default=False)
+    
+    # Stats
+    views_count = Column(Integer, default=0)
+    submissions_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    submissions = relationship("FormSubmission", back_populates="form", cascade="all, delete-orphan")
+    
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "name": self.name,
+            "slug": self.slug,
+            "description": self.description,
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "fields": self.fields or [],
+            "style": self.style or {},
+            "submit_button_text": self.submit_button_text,
+            "success_message": self.success_message,
+            "redirect_url": self.redirect_url,
+            "notify_email": self.notify_email,
+            "send_confirmation": self.send_confirmation,
+            "is_active": self.is_active,
+            "is_published": self.is_published,
+            "views_count": self.views_count,
+            "submissions_count": self.submissions_count,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class FormSubmission(Base):
+    """Submissions from booking forms"""
+    __tablename__ = "form_submissions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid = Column(String(128), nullable=False, index=True)  # Form owner's UID
+    form_id = Column(UUID(as_uuid=True), ForeignKey("booking_forms.id", ondelete="CASCADE"), nullable=False)
+    
+    # Submission data
+    data = Column(JSON, default=dict)  # {field_id: value, ...}
+    
+    # Contact info (extracted for quick access)
+    contact_name = Column(String(255), nullable=True)
+    contact_email = Column(String(255), nullable=True, index=True)
+    contact_phone = Column(String(50), nullable=True)
+    
+    # Calendar booking (if form has calendar field)
+    scheduled_date = Column(DateTime, nullable=True, index=True)
+    scheduled_end = Column(DateTime, nullable=True)
+    
+    # Status
+    status = Column(String(50), default="new")  # new, read, contacted, converted, archived
+    
+    # Metadata
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    referrer = Column(Text, nullable=True)
+    
+    # Linked booking (if converted)
+    booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    form = relationship("BookingForm", back_populates="submissions")
+    
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "form_id": str(self.form_id),
+            "data": self.data or {},
+            "contact_name": self.contact_name,
+            "contact_email": self.contact_email,
+            "contact_phone": self.contact_phone,
+            "scheduled_date": self.scheduled_date.isoformat() if self.scheduled_date else None,
+            "scheduled_end": self.scheduled_end.isoformat() if self.scheduled_end else None,
+            "status": self.status,
+            "booking_id": str(self.booking_id) if self.booking_id else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

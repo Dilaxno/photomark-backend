@@ -139,3 +139,56 @@ CREATE TABLE IF NOT EXISTS booking_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_booking_settings_uid ON booking_settings(uid);
+
+
+-- Booking Forms table (drag-and-drop form builder)
+CREATE TABLE IF NOT EXISTS booking_forms (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    uid VARCHAR(128) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(100),
+    description TEXT,
+    title VARCHAR(255),
+    subtitle TEXT,
+    fields JSONB DEFAULT '[]'::jsonb,
+    style JSONB DEFAULT '{}'::jsonb,
+    submit_button_text VARCHAR(100) DEFAULT 'Submit',
+    success_message TEXT DEFAULT 'Thank you for your submission!',
+    redirect_url TEXT,
+    notify_email VARCHAR(255),
+    send_confirmation BOOLEAN DEFAULT TRUE,
+    is_active BOOLEAN DEFAULT TRUE,
+    is_published BOOLEAN DEFAULT FALSE,
+    views_count INTEGER DEFAULT 0,
+    submissions_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_booking_forms_uid ON booking_forms(uid);
+CREATE INDEX IF NOT EXISTS idx_booking_forms_slug ON booking_forms(slug);
+
+-- Form Submissions table
+CREATE TABLE IF NOT EXISTS form_submissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    uid VARCHAR(128) NOT NULL,
+    form_id UUID NOT NULL REFERENCES booking_forms(id) ON DELETE CASCADE,
+    data JSONB DEFAULT '{}'::jsonb,
+    contact_name VARCHAR(255),
+    contact_email VARCHAR(255),
+    contact_phone VARCHAR(50),
+    scheduled_date TIMESTAMP,
+    scheduled_end TIMESTAMP,
+    status VARCHAR(50) DEFAULT 'new',
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    referrer TEXT,
+    booking_id UUID REFERENCES bookings(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_form_submissions_uid ON form_submissions(uid);
+CREATE INDEX IF NOT EXISTS idx_form_submissions_form_id ON form_submissions(form_id);
+CREATE INDEX IF NOT EXISTS idx_form_submissions_contact_email ON form_submissions(contact_email);
+CREATE INDEX IF NOT EXISTS idx_form_submissions_scheduled_date ON form_submissions(scheduled_date);
+CREATE INDEX IF NOT EXISTS idx_form_submissions_created_at ON form_submissions(created_at);
