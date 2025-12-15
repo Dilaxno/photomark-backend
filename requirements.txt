@@ -53,6 +53,9 @@ redis==5.0.1
 # DNS verification for email validation
 dnspython==2.6.1
 
+# User agent parsing for analytics
+user-agents==2.2.0
+
 # PDF generation for licenses
 reportlab==4.2.5
 

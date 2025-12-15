@@ -11,7 +11,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_, cast, Date
-from user_agents import parse as parse_ua
+
+# Optional user_agents import
+try:
+    from user_agents import parse as parse_ua
+    HAS_USER_AGENTS = True
+except ImportError:
+    HAS_USER_AGENTS = False
+    parse_ua = None
 
 from core.config import logger
 from core.auth import get_uid_from_request
@@ -62,6 +69,17 @@ def _get_visitor_hash(request: Request) -> str:
 
 def _parse_user_agent(ua_string: str) -> dict:
     """Parse user agent to extract device info"""
+    if not HAS_USER_AGENTS or not parse_ua:
+        # Fallback: simple detection without user_agents library
+        ua_lower = (ua_string or "").lower()
+        if "mobile" in ua_lower or "android" in ua_lower or "iphone" in ua_lower:
+            device_type = "mobile"
+        elif "tablet" in ua_lower or "ipad" in ua_lower:
+            device_type = "tablet"
+        else:
+            device_type = "desktop"
+        return {"device_type": device_type, "browser": "unknown", "os": "unknown"}
+    
     try:
         ua = parse_ua(ua_string)
         device_type = "mobile" if ua.is_mobile else "tablet" if ua.is_tablet else "desktop"
