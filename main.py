@@ -697,6 +697,13 @@ try:
 except Exception as _ex:
     logger.warning(f"abandoned_cart router not available: {_ex}")
 
+# Analytics (photo views, client behavior, engagement)
+try:
+    from routers import analytics  # noqa: E402
+    app.include_router(analytics.router)
+except Exception as _ex:
+    logger.warning(f"analytics router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
