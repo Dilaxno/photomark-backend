@@ -109,8 +109,8 @@ async def restore_from_trash(
         else:
             # Restore vault with original keys
             _write_vault(eff_uid, trash_item.vault_name, trash_item.original_keys or [])
-            if trash_item.metadata:
-                _write_vault_meta(eff_uid, trash_item.vault_name, trash_item.metadata)
+            if trash_item.vault_metadata:
+                _write_vault_meta(eff_uid, trash_item.vault_name, trash_item.vault_metadata)
         
         # Mark as restored
         trash_item.restored_at = datetime.utcnow()
@@ -224,7 +224,7 @@ async def create_vault_snapshot(
             vault_name=safe_vault,
             version_number=max_ver + 1,
             snapshot_keys=keys,
-            metadata=meta or {},
+            vault_metadata=meta or {},
             photo_count=len(keys),
             total_size_bytes=total_size,
             description=description or f"Manual snapshot"
@@ -297,7 +297,7 @@ async def restore_vault_version(
                 vault_name=version.vault_name,
                 version_number=max_ver + 1,
                 snapshot_keys=current_keys,
-                metadata=current_meta,
+                vault_metadata=current_meta,
                 photo_count=len(current_keys),
                 description=f"Auto-backup before restoring to v{version.version_number}"
             )
@@ -305,8 +305,8 @@ async def restore_vault_version(
         
         # Restore the vault to the selected version
         _write_vault(eff_uid, version.vault_name, version.snapshot_keys or [])
-        if version.metadata:
-            _write_vault_meta(eff_uid, version.vault_name, version.metadata)
+        if version.vault_metadata:
+            _write_vault_meta(eff_uid, version.vault_name, version.vault_metadata)
         
         db.commit()
         

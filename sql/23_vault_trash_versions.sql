@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS public.vault_trash (
   vault_name TEXT NOT NULL,
   display_name TEXT,
   original_keys JSONB NOT NULL DEFAULT '[]',  -- Array of photo keys
-  metadata JSONB NOT NULL DEFAULT '{}',       -- Original vault metadata
+  vault_metadata JSONB NOT NULL DEFAULT '{}',       -- Original vault metadata (renamed from 'metadata' - reserved in SQLAlchemy)
   photo_count INTEGER NOT NULL DEFAULT 0,
   total_size_bytes BIGINT NOT NULL DEFAULT 0,
   deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS public.vault_versions (
   vault_name TEXT NOT NULL,
   version_number INTEGER NOT NULL DEFAULT 1,
   snapshot_keys JSONB NOT NULL DEFAULT '[]',  -- Array of photo keys at this version
-  metadata JSONB NOT NULL DEFAULT '{}',       -- Vault metadata at this version
+  vault_metadata JSONB NOT NULL DEFAULT '{}',       -- Vault metadata at this version (renamed from 'metadata' - reserved in SQLAlchemy)
   photo_count INTEGER NOT NULL DEFAULT 0,
   total_size_bytes BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

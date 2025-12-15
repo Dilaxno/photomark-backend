@@ -505,7 +505,7 @@ async def vaults_delete(request: Request, payload: dict = Body(...), db: Session
                     vault_name=safe_name,
                     display_name=meta.get("display_name") or name.replace("_", " "),
                     original_keys=keys,
-                    metadata=meta,
+                    vault_metadata=meta,
                     photo_count=len(keys),
                     total_size_bytes=total_size,
                     expires_at=datetime.utcnow() + timedelta(days=30)
@@ -830,7 +830,7 @@ async def vaults_remove(request: Request, vault: str = Body(..., embed=True), ke
                     vault_name=safe_vault,
                     version_number=max_ver + 1,
                     snapshot_keys=exist,
-                    metadata=meta,
+                    vault_metadata=meta,
                     photo_count=len(exist),
                     description=f"Auto-backup before removing {len(to_remove)} photos"
                 )
