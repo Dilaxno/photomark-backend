@@ -23,10 +23,11 @@ from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
 from utils.sendbird import create_vault_channel, ensure_sendbird_user, sendbird_api
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 from core.database import get_db
 from models.gallery import GalleryAsset
 from models.user import User
+from models.vault_trash import VaultTrash, VaultVersion
 
 router = APIRouter(prefix="/api", tags=["vaults"])
 
@@ -448,13 +449,14 @@ async def vaults_list(request: Request):
 
 
 @router.post("/vaults/delete")
-async def vaults_delete(request: Request, payload: dict = Body(...)):
+async def vaults_delete(request: Request, payload: dict = Body(...), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     vaults = payload.get("vaults", [])
     password = str(payload.get("password", "") or "").strip()
+    permanent = payload.get("permanent", False)  # If true, skip trash and delete permanently
     
     if not vaults or not isinstance(vaults, list):
         return JSONResponse({"error": "No vaults provided"}, status_code=400)
@@ -481,13 +483,49 @@ async def vaults_delete(request: Request, payload: dict = Body(...)):
         except Exception:
             pass
         
+        # Soft-delete: Move to trash instead of permanent deletion
+        if not permanent:
+            try:
+                from models.vault_trash import VaultTrash
+                from datetime import timedelta
+                
+                keys = _read_vault(uid, name)
+                meta = _read_vault_meta(uid, name) or {}
+                _, safe_name = _vault_key(uid, name)
+                
+                # Calculate total size from gallery assets
+                total_size = db.query(func.sum(GalleryAsset.size_bytes)).filter(
+                    GalleryAsset.user_uid == uid,
+                    GalleryAsset.key.in_(keys)
+                ).scalar() or 0
+                
+                # Create trash entry
+                trash_entry = VaultTrash(
+                    owner_uid=uid,
+                    vault_name=safe_name,
+                    display_name=meta.get("display_name") or name.replace("_", " "),
+                    original_keys=keys,
+                    metadata=meta,
+                    photo_count=len(keys),
+                    total_size_bytes=total_size,
+                    expires_at=datetime.utcnow() + timedelta(days=30)
+                )
+                db.add(trash_entry)
+                db.commit()
+            except Exception as ex:
+                logger.warning(f"Failed to create trash entry for {name}: {ex}")
+                try:
+                    db.rollback()
+                except:
+                    pass
+        
         ok = _delete_vault(uid, name)
         if ok:
             deleted.append(name)
         else:
             errors.append(name)
     
-    return {"deleted": deleted, "errors": errors}
+    return {"deleted": deleted, "errors": errors, "movedToTrash": not permanent}
 
 
 @router.get("/vaults/chat/token")
@@ -776,6 +814,35 @@ async def vaults_remove(request: Request, vault: str = Body(..., embed=True), ke
     try:
         exist = _read_vault(uid, vault)
         to_remove = set(keys)
+        
+        # Auto-create snapshot before bulk removal (if removing 5+ photos)
+        if len(to_remove) >= 5:
+            try:
+                _, safe_vault = _vault_key(uid, vault)
+                meta = _read_vault_meta(uid, vault) or {}
+                max_ver = db.query(func.max(VaultVersion.version_number)).filter(
+                    VaultVersion.owner_uid == uid,
+                    VaultVersion.vault_name == safe_vault
+                ).scalar() or 0
+                
+                snapshot = VaultVersion(
+                    owner_uid=uid,
+                    vault_name=safe_vault,
+                    version_number=max_ver + 1,
+                    snapshot_keys=exist,
+                    metadata=meta,
+                    photo_count=len(exist),
+                    description=f"Auto-backup before removing {len(to_remove)} photos"
+                )
+                db.add(snapshot)
+                db.commit()
+            except Exception as snap_ex:
+                logger.warning(f"Failed to create auto-snapshot: {snap_ex}")
+                try:
+                    db.rollback()
+                except:
+                    pass
+        
         remain = [k for k in exist if k not in to_remove]
         _write_vault(uid, vault, remain)
         try:

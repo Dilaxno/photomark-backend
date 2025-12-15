@@ -459,6 +459,14 @@ try:
     app.include_router(backup.router)
 except Exception as _ex:
     logger.warning(f"backup router not available: {_ex}")
+
+# vault recovery router (trash and version history)
+try:
+    from routers import vault_recovery  # noqa: E402
+    app.include_router(vault_recovery.router)
+except Exception as _ex:
+    logger.warning(f"vault_recovery router not available: {_ex}")
+
 # admin endpoints
 app.include_router(admin.router)
 # Removed: bookings, portfolio, and create_lut endpoints
