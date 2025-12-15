@@ -50,6 +50,9 @@ pyotp==2.9.0
 throttled-py==2.2.3
 redis==5.0.1
 
+# DNS verification for email validation
+dnspython==2.6.1
+
 # PDF generation for licenses
 reportlab==4.2.5
 

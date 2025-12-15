@@ -1060,6 +1060,40 @@ async def delete_form(request: Request, form_id: str):
         db.close()
 
 
+# ============ Email Verification Endpoint ============
+
+class EmailVerifyRequest(BaseModel):
+    email: str
+    verify_domain: bool = False
+    detect_gibberish: bool = False
+
+
+@router.post("/public/verify-email")
+async def verify_email(data: EmailVerifyRequest):
+    """Verify an email address (public endpoint for form validation)"""
+    import re
+    
+    email = data.email.strip().lower()
+    
+    # Basic format validation
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return {"valid": False, "error": "Please enter a valid email address"}
+    
+    # Gibberish detection
+    if data.detect_gibberish:
+        is_gibberish, gibberish_msg = _detect_gibberish_email(email)
+        if is_gibberish:
+            return {"valid": False, "error": gibberish_msg}
+    
+    # DNS/MX verification
+    if data.verify_domain:
+        is_valid, verify_msg = _verify_email_domain(email)
+        if not is_valid:
+            return {"valid": False, "error": verify_msg}
+    
+    return {"valid": True}
+
+
 # ============ Public Form Endpoints (for embed) ============
 
 @router.get("/public/form/{slug}")
@@ -1093,6 +1127,82 @@ async def get_public_form(slug: str):
         db.close()
 
 
+def _verify_email_domain(email: str) -> tuple[bool, str]:
+    """Verify email domain has valid MX records"""
+    import dns.resolver
+    try:
+        domain = email.split('@')[1]
+        # Check MX records
+        try:
+            mx_records = dns.resolver.resolve(domain, 'MX')
+            if mx_records:
+                return True, ""
+        except dns.resolver.NoAnswer:
+            pass
+        except dns.resolver.NXDOMAIN:
+            return False, f"The domain '{domain}' does not exist"
+        except Exception:
+            pass
+        
+        # Fallback: check A record
+        try:
+            a_records = dns.resolver.resolve(domain, 'A')
+            if a_records:
+                return True, ""
+        except:
+            pass
+        
+        return False, f"The domain '{domain}' cannot receive emails"
+    except Exception as e:
+        logger.warning(f"Email domain verification failed: {e}")
+        return True, ""  # Allow on error to not block legitimate users
+
+
+def _detect_gibberish_email(email: str) -> tuple[bool, str]:
+    """Detect gibberish/random email addresses"""
+    import re
+    
+    local_part = email.split('@')[0].lower()
+    
+    # Remove common separators for analysis
+    clean_local = re.sub(r'[._\-+]', '', local_part)
+    
+    if len(clean_local) < 2:
+        return True, "Email address is too short"
+    
+    # Check for excessive consonant clusters (more than 4 consonants in a row)
+    consonant_pattern = r'[bcdfghjklmnpqrstvwxyz]{5,}'
+    if re.search(consonant_pattern, clean_local):
+        return True, "Email address appears to contain random characters"
+    
+    # Check for keyboard patterns
+    keyboard_patterns = ['qwerty', 'asdf', 'zxcv', 'qazwsx', 'wasd', 'hjkl', 'uiop']
+    for pattern in keyboard_patterns:
+        if pattern in clean_local:
+            return True, "Email address appears to be a keyboard pattern"
+    
+    # Check for repeated characters (more than 3 of the same)
+    if re.search(r'(.)\1{3,}', clean_local):
+        return True, "Email address contains too many repeated characters"
+    
+    # Check for too many numbers in a row (more than 6)
+    if re.search(r'\d{7,}', clean_local):
+        return True, "Email address contains too many consecutive numbers"
+    
+    # Check vowel ratio - gibberish often has very few vowels
+    vowels = sum(1 for c in clean_local if c in 'aeiou')
+    if len(clean_local) > 5 and vowels / len(clean_local) < 0.1:
+        return True, "Email address appears to contain random characters"
+    
+    # Check for common test/fake patterns
+    fake_patterns = ['test123', 'fake', 'noreply', 'spam', 'trash', 'temp', 'disposable']
+    for pattern in fake_patterns:
+        if pattern in clean_local:
+            return True, "Please use a real email address"
+    
+    return False, ""
+
+
 @router.post("/public/form/{slug}/submit")
 async def submit_public_form(request: Request, slug: str, data: dict = Body(...)):
     """Submit a form (public, no auth required)"""
@@ -1106,6 +1216,33 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
         
         if not form:
             return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        # Validate email fields with verification settings
+        for field in form.fields or []:
+            field_id = field.get("id")
+            field_type = field.get("type")
+            field_settings = field.get("settings", {})
+            value = data.get(field_id)
+            
+            if field_type == "email" and value:
+                email = str(value).strip().lower()
+                
+                # Basic email format validation
+                import re
+                if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+                    return JSONResponse({"error": "Please enter a valid email address"}, status_code=400)
+                
+                # Gibberish detection
+                if field_settings.get("detectGibberish"):
+                    is_gibberish, gibberish_msg = _detect_gibberish_email(email)
+                    if is_gibberish:
+                        return JSONResponse({"error": gibberish_msg}, status_code=400)
+                
+                # DNS/MX verification
+                if field_settings.get("verifyEmail"):
+                    is_valid, verify_msg = _verify_email_domain(email)
+                    if not is_valid:
+                        return JSONResponse({"error": verify_msg}, status_code=400)
         
         # Extract contact info from submission
         contact_name = None
