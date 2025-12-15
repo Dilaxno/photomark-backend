@@ -336,6 +336,13 @@ class BookingSettings(Base):
     email_notifications = Column(Boolean, default=True)
     sms_notifications = Column(Boolean, default=False)
     
+    # Branding
+    brand_logo = Column(Text, nullable=True)  # Logo URL for forms
+    brand_primary_color = Column(String(7), default="#6366f1")  # Primary/accent color
+    brand_secondary_color = Column(String(7), default="#8b5cf6")  # Secondary color
+    brand_text_color = Column(String(7), default="#1f2937")  # Text color
+    brand_background_color = Column(String(7), default="#ffffff")  # Background color
+    
     # Booking page
     booking_page_enabled = Column(Boolean, default=False)
     booking_page_slug = Column(String(100), nullable=True, unique=True)
@@ -357,6 +364,12 @@ class BookingSettings(Base):
             "business_name": self.business_name,
             "business_email": self.business_email,
             "business_phone": self.business_phone,
+            "business_logo": self.business_logo,
+            "brand_logo": self.brand_logo,
+            "brand_primary_color": self.brand_primary_color,
+            "brand_secondary_color": self.brand_secondary_color,
+            "brand_text_color": self.brand_text_color,
+            "brand_background_color": self.brand_background_color,
             "availability": self.availability or {},
             "default_duration": self.default_duration,
             "buffer_before": self.buffer_before,

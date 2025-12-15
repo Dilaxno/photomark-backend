@@ -121,9 +121,9 @@ async def get_storage_usage(request: Request, db: Session = Depends(get_db)):
         if user:
             plan = (user.plan or 'free').lower()
             # Set storage limit based on plan
-            if plan in ('studios', 'golden', 'golden_offer'):
-                storage_limit = 10 * 1024 * 1024 * 1024 * 1024  # 10TB (effectively unlimited) for Studios
-            elif plan == 'individual':
+            if plan in ('studios', 'agencies', 'golden', 'golden_offer'):
+                storage_limit = 10 * 1024 * 1024 * 1024 * 1024  # 10TB (effectively unlimited) for Studios/Golden
+            elif plan in ('individual', 'photographers'):
                 storage_limit = 1024 * 1024 * 1024 * 1024  # 1TB for Individual
             else:
                 storage_limit = 5 * 1024 * 1024 * 1024  # 5GB for Free

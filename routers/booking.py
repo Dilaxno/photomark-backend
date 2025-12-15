@@ -1115,7 +1115,25 @@ async def get_public_form(slug: str):
         
         # Increment view count
         form.views_count = (form.views_count or 0) + 1
+        
+        # Get owner's brand settings
+        settings = db.query(BookingSettings).filter(BookingSettings.uid == form.uid).first()
+        
         db.commit()
+        
+        # Merge form style with brand settings (form style takes precedence)
+        form_style = form.style or {}
+        brand_style = {}
+        if settings:
+            brand_style = {
+                "primaryColor": settings.brand_primary_color or "#6366f1",
+                "secondaryColor": settings.brand_secondary_color or "#8b5cf6",
+                "textColor": settings.brand_text_color or "#1f2937",
+                "backgroundColor": settings.brand_background_color or "#ffffff",
+            }
+        
+        # Form style overrides brand style
+        merged_style = {**brand_style, **form_style}
         
         # Return only public-safe data
         return {
@@ -1123,8 +1141,12 @@ async def get_public_form(slug: str):
             "title": form.title,
             "subtitle": form.subtitle,
             "fields": form.fields or [],
-            "style": form.style or {},
+            "style": merged_style,
             "submit_button_text": form.submit_button_text,
+            "branding": {
+                "logo": settings.brand_logo if settings else None,
+                "business_name": settings.business_name if settings else None,
+            } if settings else None,
         }
     finally:
         db.close()
@@ -2324,3 +2346,94 @@ async def remove_from_waitlist(request: Request, entry_id: str):
         return {"ok": True}
     finally:
         db.close()
+
+
+# ============ Booking Settings ============
+
+from models.booking import BookingSettings
+
+class SettingsUpdate(BaseModel):
+    business_name: Optional[str] = None
+    business_email: Optional[str] = None
+    business_phone: Optional[str] = None
+    business_logo: Optional[str] = None
+    brand_logo: Optional[str] = None
+    brand_primary_color: Optional[str] = None
+    brand_secondary_color: Optional[str] = None
+    brand_text_color: Optional[str] = None
+    brand_background_color: Optional[str] = None
+    default_duration: Optional[int] = None
+    default_deposit_percentage: Optional[float] = None
+    default_currency: Optional[str] = None
+    timezone: Optional[str] = None
+    availability: Optional[dict] = None
+
+
+@router.get("/settings")
+async def get_settings(request: Request):
+    """Get booking settings for the user"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        settings = db.query(BookingSettings).filter(BookingSettings.uid == uid).first()
+        
+        if not settings:
+            # Create default settings
+            settings = BookingSettings(uid=uid)
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
+        
+        return settings.to_dict()
+    finally:
+        db.close()
+
+
+@router.put("/settings")
+async def update_settings(request: Request, data: SettingsUpdate):
+    """Update booking settings"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        settings = db.query(BookingSettings).filter(BookingSettings.uid == uid).first()
+        
+        if not settings:
+            settings = BookingSettings(uid=uid)
+            db.add(settings)
+        
+        update_data = data.dict(exclude_unset=True)
+        for key, value in update_data.items():
+            if value is not None:
+                setattr(settings, key, value)
+        
+        settings.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(settings)
+        return settings.to_dict()
+    finally:
+        db.close()
+
+
+@router.post("/settings/upload-logo")
+async def upload_logo(request: Request):
+    """Upload brand logo - returns URL to store in settings"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # This endpoint expects the frontend to handle the actual file upload
+    # to a storage service (like S3 or Firebase Storage) and then call
+    # PUT /settings with the brand_logo URL
+    # 
+    # For now, we just return instructions
+    return {
+        "message": "Upload your logo to storage and then update settings with the URL",
+        "endpoint": "PUT /api/booking/settings",
+        "field": "brand_logo"
+    }

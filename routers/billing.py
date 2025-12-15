@@ -224,7 +224,7 @@ async def billing_usage(request: Request, db: Session = Depends(get_db)):
             limit_bytes = 5 * 1024 * 1024 * 1024
         elif plan in ("individual", "photographers"):
             limit_bytes = 1024 * 1024 * 1024 * 1024
-        elif plan in ("studios", "agencies"):
+        elif plan in ("studios", "agencies", "golden", "golden_offer"):
             unlimited = True
 
         return {
