@@ -19,7 +19,7 @@ from core.auth import get_uid_from_request
 from core.database import get_db
 from models.booking import (
     Client, Booking, BookingPayment, SessionPackage, BookingSettings,
-    BookingStatus, PaymentStatus, SessionType
+    BookingStatus, PaymentStatus, SessionType, FormView
 )
 
 router = APIRouter(prefix="/api/booking", tags=["booking"])
@@ -905,7 +905,7 @@ async def get_calendar(
 
 # ============ Form Builder ============
 
-from models.booking import BookingForm, FormSubmission
+from models.booking import BookingForm, FormSubmission, FormView
 
 class FormCreate(BaseModel):
     name: str
@@ -1100,8 +1100,10 @@ async def verify_email(data: EmailVerifyRequest):
 # ============ Public Form Endpoints (for embed) ============
 
 @router.get("/public/form/{slug}")
-async def get_public_form(slug: str):
+async def get_public_form(slug: str, request: Request):
     """Get a published form by slug (public, no auth required)"""
+    import hashlib
+    
     db: Session = next(get_db())
     try:
         form = db.query(BookingForm).filter(
@@ -1113,8 +1115,27 @@ async def get_public_form(slug: str):
         if not form:
             return JSONResponse({"error": "Form not found"}, status_code=404)
         
-        # Increment view count
-        form.views_count = (form.views_count or 0) + 1
+        # Track unique views using IP + User-Agent hash
+        client_ip = request.client.host if request.client else "unknown"
+        user_agent = request.headers.get("user-agent", "unknown")
+        visitor_hash = hashlib.sha256(f"{client_ip}:{user_agent}".encode()).hexdigest()
+        
+        # Check if this visitor viewed this form in the last 24 hours
+        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+        existing_view = db.query(FormView).filter(
+            FormView.form_id == form.id,
+            FormView.visitor_hash == visitor_hash,
+            FormView.created_at > twenty_four_hours_ago
+        ).first()
+        
+        if not existing_view:
+            # New unique view - increment count and record
+            form.views_count = (form.views_count or 0) + 1
+            new_view = FormView(
+                form_id=form.id,
+                visitor_hash=visitor_hash
+            )
+            db.add(new_view)
         
         # Get owner's brand settings
         settings = db.query(BookingSettings).filter(BookingSettings.uid == form.uid).first()

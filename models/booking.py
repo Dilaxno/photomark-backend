@@ -507,6 +507,21 @@ class FormSubmission(Base):
         }
 
 
+class FormView(Base):
+    """Track unique form views to prevent double counting"""
+    __tablename__ = "form_views"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    form_id = Column(UUID(as_uuid=True), ForeignKey("booking_forms.id", ondelete="CASCADE"), nullable=False, index=True)
+    visitor_hash = Column(String(64), nullable=False, index=True)  # Hash of IP + User-Agent
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        # Unique constraint to prevent duplicate views from same visitor on same form within tracking period
+        Index('ix_form_views_form_visitor', 'form_id', 'visitor_hash'),
+    )
+
+
 class MiniSession(Base):
     """
     Mini-session events (UseSession.com style)
