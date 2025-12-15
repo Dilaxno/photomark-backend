@@ -1131,6 +1131,22 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+def _get_thumbnail_url_fast(key: str, expires_in: int = 3600) -> Optional[str]:
+    """Get thumbnail URL for a key if it exists (fast check)."""
+    try:
+        from utils.thumbnails import get_thumbnail_key
+        thumb_key = get_thumbnail_key(key, 'small')
+        if s3 and R2_BUCKET:
+            try:
+                s3.Object(R2_BUCKET, thumb_key).load()
+                return _get_url_for_key(thumb_key, expires_in=expires_in)
+            except Exception:
+                return None
+        return None
+    except Exception:
+        return None
+
+
 def _make_item_fast(uid: str, key: str) -> dict:
     """Fast item creation without invisible watermark detection - for gallery view"""
     if not key.startswith(f"users/{uid}/"):
@@ -1138,9 +1154,11 @@ def _make_item_fast(uid: str, key: str) -> dict:
     name = os.path.basename(key)
     if s3 and R2_BUCKET:
         url = _get_url_for_key(key, expires_in=60 * 60)
+        thumb_url = _get_thumbnail_url_fast(key, expires_in=60 * 60)
     else:
         url = f"/static/{key}"
-    return {"key": key, "url": url, "name": name}
+        thumb_url = None
+    return {"key": key, "url": url, "thumb_url": thumb_url, "name": name}
 
 
 @router.get("/vaults/photos")

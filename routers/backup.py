@@ -8,8 +8,23 @@ from core.config import logger  # type: ignore
 from core.config import s3_backup, BACKUP_BUCKET  # type: ignore
 from core.auth import resolve_workspace_uid, has_role_access  # type: ignore
 from utils.storage import backup_read_bytes_key, backup_delete_key, upload_bytes  # type: ignore
+from utils.thumbnails import get_thumbnail_key  # type: ignore
 
 router = APIRouter(prefix="/api", tags=["backups"])
+
+
+def _get_backup_thumbnail_url(client, key: str, expires_in: int = 3600) -> Optional[str]:
+    """Get thumbnail URL for a backup key if it exists."""
+    try:
+        thumb_key = get_thumbnail_key(key, 'small')
+        # Check if thumbnail exists in backup bucket
+        try:
+            client.head_object(Bucket=BACKUP_BUCKET, Key=thumb_key)
+            return client.generate_presigned_url('get_object', Params={'Bucket': BACKUP_BUCKET, 'Key': thumb_key}, ExpiresIn=expires_in)
+        except Exception:
+            return None
+    except Exception:
+        return None
 
 
 def _is_image_key(name: str) -> bool:
@@ -92,6 +107,9 @@ async def list_backup_photos(request: Request, limit: int = 100, cursor: Optiona
             key = obj.get('Key') or ''
             if not key or key.endswith('/'):
                 continue
+            # Skip thumbnail files from backup listing
+            if '_thumb_' in key:
+                continue
             name = os.path.basename(key)
             if not _is_image_key(name):
                 continue
@@ -104,9 +122,12 @@ async def list_backup_photos(request: Request, limit: int = 100, cursor: Optiona
                 url = client.generate_presigned_url('get_object', Params={'Bucket': BACKUP_BUCKET, 'Key': key}, ExpiresIn=3600)
             except Exception:
                 url = ''
+            # Get thumbnail URL for optimized grid loading
+            thumb_url = _get_backup_thumbnail_url(client, key, expires_in=3600)
             items.append({
                 'key': key,
                 'url': url,
+                'thumb_url': thumb_url,  # Small thumbnail for fast grid loading
                 'name': name,
                 'size': int(obj.get('Size') or 0),
                 'last_modified': when,

@@ -28,6 +28,23 @@ def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
     return get_presigned_url(key, expires_in=expires_in) or ""
 
 
+def _get_thumbnail_url(key: str, expires_in: int = 3600) -> Optional[str]:
+    """Get thumbnail URL for a key if it exists."""
+    try:
+        from utils.thumbnails import get_thumbnail_key
+        thumb_key = get_thumbnail_key(key, 'small')
+        # Check if thumbnail exists before generating URL
+        if s3 and R2_BUCKET:
+            try:
+                s3.Object(R2_BUCKET, thumb_key).load()
+                return get_presigned_url(thumb_key, expires_in=expires_in)
+            except Exception:
+                return None
+        return None
+    except Exception:
+        return None
+
+
 def _cache_key_for_invisible(uid: str, photo_key: str) -> str:
     h = hashlib.sha1(photo_key.encode('utf-8')).hexdigest()
     return f"users/{uid}/_cache/invisible/{h}.json"
@@ -291,11 +308,17 @@ async def api_photos(
                 key = entry.get("Key", "")
                 if not key or key.endswith("/") or key.endswith("/_history.txt"):
                     continue
+                # Skip thumbnail files from main listing
+                if '_thumb_' in key:
+                    continue
                 name = os.path.basename(key)
                 url = _get_url_for_key(key, expires_in=60 * 60)
+                # Get thumbnail URL if available (for optimized grid loading)
+                thumb_url = _get_thumbnail_url(key, expires_in=60 * 60)
                 item = {
                     "key": key,
                     "url": url,
+                    "thumb_url": thumb_url,  # Small thumbnail for grid views
                     "name": name,
                     "size": int(entry.get("Size", 0) or 0),
                     "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
@@ -736,13 +759,19 @@ async def get_external_photos(
                     key = obj.get('Key', '')
                     if not key or key.endswith('/') or key.endswith('/_history.txt'):
                         continue
+                    # Skip thumbnail files from main listing
+                    if '_thumb_' in key:
+                        continue
                     name = os.path.basename(key)
                     if '-fromfriend' in name.lower():
                         continue
                     url = _get_url_for_key(key, expires_in=3600)
+                    # Get thumbnail URL for optimized grid loading
+                    thumb_url = _get_thumbnail_url(key, expires_in=3600)
                     photos.append({
                         'key': key,
                         'url': url,
+                        'thumb_url': thumb_url,  # Small thumbnail for fast grid loading
                         'name': name,
                         'size': obj.get('Size', 0),
                         'last_modified': obj.get('LastModified', datetime.utcnow()).isoformat()

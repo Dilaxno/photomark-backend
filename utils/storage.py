@@ -63,6 +63,34 @@ def _should_backup_key(key: str) -> bool:
     return False
 
 
+def _should_generate_thumbnail(key: str) -> bool:
+    """Determine if a thumbnail should be generated for this key.
+    Only generates thumbnails for actual user photos, not for thumbnails themselves,
+    profile photos, logos, etc.
+    """
+    k = (key or "").lower()
+    
+    # Skip if already a thumbnail
+    if '_thumb_' in k:
+        return False
+    
+    # Skip non-image extensions
+    if not any(k.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff']):
+        return False
+    
+    # Skip excluded paths
+    for excl in _BACKUP_EXCLUDED_PREFIXES:
+        if excl in k:
+            return False
+    
+    # Generate for allowed photo folders
+    for allowed in _BACKUP_ALLOWED_PREFIXES:
+        if allowed in k:
+            return True
+    
+    return False
+
+
 def write_json_key(key: str, payload: dict):
     data = json.dumps(payload, ensure_ascii=False)
     if s3 and R2_BUCKET:
@@ -98,7 +126,7 @@ def read_json_key(key: str) -> Optional[dict]:
         return None
 
 
-def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str:
+def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg", generate_thumbs: bool = True) -> str:
     if not s3 or not R2_BUCKET:
         local_path = os.path.join(STATIC_DIR, key)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -117,6 +145,21 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
         bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private", CacheControl=cc)
     except Exception:
         bucket.put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
+    
+    # Generate thumbnails for images (non-blocking, best-effort)
+    if generate_thumbs and content_type.startswith('image/') and _should_generate_thumbnail(key):
+        try:
+            from utils.thumbnails import generate_thumbnail, get_thumbnail_key, THUMB_SMALL
+            thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=75)
+            if thumb_data:
+                thumb_key = get_thumbnail_key(key, 'small')
+                try:
+                    bucket.put_object(Key=thumb_key, Body=thumb_data, ContentType='image/jpeg', ACL="private", CacheControl="public, max-age=31536000")
+                    logger.info(f"Thumbnail generated: {thumb_key}")
+                except Exception as tex:
+                    logger.warning(f"Thumbnail upload failed: {tex}")
+        except Exception as tex:
+            logger.debug(f"Thumbnail generation skipped: {tex}")
 
     # Attempt backup mirror (best-effort; non-blocking on failure)
     # Only backup actual user photos, not profile/shop/branding assets
