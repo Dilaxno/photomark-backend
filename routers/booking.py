@@ -1287,6 +1287,75 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
         )
         db.add(submission)
         
+        # Create or find client record if we have contact info
+        client_id = None
+        if contact_name or contact_email:
+            # Check if client already exists by email
+            existing_client = None
+            if contact_email:
+                existing_client = db.query(Client).filter(
+                    Client.uid == form.uid,
+                    Client.email == contact_email
+                ).first()
+            
+            if existing_client:
+                client_id = existing_client.id
+                # Update client info if we have new data
+                if contact_name and not existing_client.name:
+                    existing_client.name = contact_name
+                if contact_phone and not existing_client.phone:
+                    existing_client.phone = contact_phone
+            else:
+                # Create new client
+                new_client = Client(
+                    uid=form.uid,
+                    name=contact_name or "Unknown",
+                    email=contact_email,
+                    phone=contact_phone,
+                    source="form",
+                    referral_source=form.name
+                )
+                db.add(new_client)
+                db.flush()
+                client_id = new_client.id
+        
+        # Create booking if there's a scheduled date
+        booking_id = None
+        if scheduled_date:
+            # Extract additional info from form data for booking
+            budget = None
+            notes_parts = []
+            
+            for field in form.fields or []:
+                field_id = field.get("id")
+                field_type = field.get("type")
+                field_label = field.get("label", "")
+                value = data.get(field_id)
+                
+                if value and field_type == "budget":
+                    budget = str(value)
+                elif value and field_type not in ["name", "email", "phone", "calendar", "datetime"]:
+                    # Add other field values to notes
+                    notes_parts.append(f"{field_label}: {value}")
+            
+            booking = Booking(
+                uid=form.uid,
+                client_id=client_id,
+                client_name=contact_name,
+                client_email=contact_email,
+                client_phone=contact_phone,
+                title=f"Inquiry from {form.name}",
+                session_date=scheduled_date,
+                session_end=scheduled_end,
+                status=BookingStatus.INQUIRY,
+                notes="\n".join(notes_parts) if notes_parts else None,
+                questionnaire_data=data
+            )
+            db.add(booking)
+            db.flush()
+            booking_id = booking.id
+            submission.booking_id = booking_id
+        
         # Update form stats
         form.submissions_count = (form.submissions_count or 0) + 1
         
@@ -1296,6 +1365,8 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
         return {
             "ok": True,
             "submission_id": str(submission.id),
+            "client_id": str(client_id) if client_id else None,
+            "booking_id": str(booking_id) if booking_id else None,
             "success_message": form.success_message,
             "redirect_url": form.redirect_url
         }
