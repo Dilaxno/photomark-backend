@@ -367,6 +367,12 @@ async def lut_apply(
     if not has_role_access(req_uid, eff_uid, 'convert'):
         return {"error": "Forbidden"}
 
+    # Rate limiting
+    from utils.rate_limit import check_processing_rate_limit, validate_file_size
+    allowed, rate_err = check_processing_rate_limit(eff_uid)
+    if not allowed:
+        return {"error": rate_err}
+
     # One-free-generation enforcement (counts against owner workspace)
     billing_uid = eff_uid or _billing_uid_from_request(request)
     if not _is_paid_customer(billing_uid):
@@ -374,6 +380,12 @@ async def lut_apply(
             return {"error": "free_limit_reached", "message": "You have used your free generation. Upgrade to continue."}
 
     raw = await file.read()
+    
+    # Validate file size
+    valid, err = validate_file_size(len(raw), file.filename or '')
+    if not valid:
+        return {"error": err}
+    
     lut_text = (await lut.read()).decode('utf-8', errors='ignore')
     if not raw:
         return {"error": "empty file"}
@@ -463,6 +475,14 @@ async def lut_preview(
       - settings: a JSON blob containing the settings (same schema as generate)
     Returns a PNG image.
     """
+    # Rate limiting
+    from utils.rate_limit import check_processing_rate_limit, validate_file_size
+    eff_uid, _ = resolve_workspace_uid(request)
+    rate_key = eff_uid if eff_uid else (request.client.host if request.client else "unknown")
+    allowed, rate_err = check_processing_rate_limit(rate_key)
+    if not allowed:
+        return {"error": rate_err}
+    
     try:
         raw_settings = await settings.read()
         try:
@@ -477,6 +497,11 @@ async def lut_preview(
         img_bytes = await img_part.read()
         if not img_bytes:
             return {"error": "empty_image"}
+        
+        # Validate file size
+        valid, err = validate_file_size(len(img_bytes), img_part.filename or '')
+        if not valid:
+            return {"error": err}
 
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
 

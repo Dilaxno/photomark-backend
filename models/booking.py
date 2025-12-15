@@ -315,6 +315,8 @@ class BookingSettings(Base):
     business_name = Column(String(255), nullable=True)
     business_email = Column(String(255), nullable=True)
     business_phone = Column(String(50), nullable=True)
+    business_logo = Column(Text, nullable=True)
+    business_website = Column(Text, nullable=True)
     
     # Availability (JSON: {"monday": {"enabled": true, "start": "09:00", "end": "17:00"}, ...})
     availability = Column(JSON, default=dict)
@@ -339,6 +341,9 @@ class BookingSettings(Base):
     booking_page_slug = Column(String(100), nullable=True, unique=True)
     booking_page_title = Column(String(255), nullable=True)
     booking_page_description = Column(Text, nullable=True)
+    booking_page_cover_image = Column(Text, nullable=True)
+    booking_page_theme = Column(String(50), default="light")  # light, dark, custom
+    booking_page_accent_color = Column(String(7), default="#6366f1")
     
     # Timezone
     timezone = Column(String(50), default="America/New_York")
@@ -485,5 +490,217 @@ class FormSubmission(Base):
             "scheduled_end": self.scheduled_end.isoformat() if self.scheduled_end else None,
             "status": self.status,
             "booking_id": str(self.booking_id) if self.booking_id else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class MiniSession(Base):
+    """
+    Mini-session events (UseSession.com style)
+    A mini-session is a scheduled event with multiple time slots that clients can book
+    """
+    __tablename__ = "mini_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid = Column(String(128), nullable=False, index=True)
+    
+    # Basic info
+    name = Column(String(255), nullable=False)  # "Fall Mini Sessions", "Holiday Portraits"
+    slug = Column(String(100), nullable=True, index=True)  # For public URL
+    description = Column(Text, nullable=True)
+    
+    # Session details
+    session_type = Column(SQLEnum(SessionType), default=SessionType.PORTRAIT)
+    duration_minutes = Column(Integer, default=20)  # Each slot duration
+    buffer_minutes = Column(Integer, default=10)  # Buffer between slots
+    
+    # Pricing
+    price = Column(Float, default=0.0)
+    deposit_amount = Column(Float, default=0.0)
+    currency = Column(String(3), default="USD")
+    
+    # What's included
+    included_photos = Column(Integer, nullable=True)
+    deliverables = Column(JSON, default=list)  # ["5 digital images", "Print release", etc.]
+    
+    # Location
+    location_name = Column(String(255), nullable=True)
+    location_address = Column(Text, nullable=True)
+    location_notes = Column(Text, nullable=True)
+    
+    # Cover image for booking page
+    cover_image = Column(Text, nullable=True)
+    gallery_images = Column(JSON, default=list)  # Sample images to show
+    
+    # Booking settings
+    max_bookings_per_slot = Column(Integer, default=1)  # Usually 1 for photography
+    allow_waitlist = Column(Boolean, default=True)
+    require_deposit = Column(Boolean, default=True)
+    auto_confirm = Column(Boolean, default=False)  # Auto-confirm or manual review
+    
+    # Visibility
+    is_active = Column(Boolean, default=True)
+    is_published = Column(Boolean, default=False)
+    
+    # Stats
+    views_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    dates = relationship("MiniSessionDate", back_populates="mini_session", cascade="all, delete-orphan")
+    
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "name": self.name,
+            "slug": self.slug,
+            "description": self.description,
+            "session_type": self.session_type.value if self.session_type else None,
+            "duration_minutes": self.duration_minutes,
+            "buffer_minutes": self.buffer_minutes,
+            "price": self.price,
+            "deposit_amount": self.deposit_amount,
+            "currency": self.currency,
+            "included_photos": self.included_photos,
+            "deliverables": self.deliverables or [],
+            "location_name": self.location_name,
+            "location_address": self.location_address,
+            "location_notes": self.location_notes,
+            "cover_image": self.cover_image,
+            "gallery_images": self.gallery_images or [],
+            "max_bookings_per_slot": self.max_bookings_per_slot,
+            "allow_waitlist": self.allow_waitlist,
+            "require_deposit": self.require_deposit,
+            "auto_confirm": self.auto_confirm,
+            "is_active": self.is_active,
+            "is_published": self.is_published,
+            "views_count": self.views_count,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class MiniSessionDate(Base):
+    """
+    Specific dates for a mini-session event
+    Each date can have multiple time slots
+    """
+    __tablename__ = "mini_session_dates"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid = Column(String(128), nullable=False, index=True)
+    mini_session_id = Column(UUID(as_uuid=True), ForeignKey("mini_sessions.id", ondelete="CASCADE"), nullable=False)
+    
+    # Date info
+    session_date = Column(DateTime, nullable=False, index=True)  # The date
+    
+    # Override settings for this specific date
+    location_name = Column(String(255), nullable=True)  # Override location
+    location_address = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    
+    # Status
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    mini_session = relationship("MiniSession", back_populates="dates")
+    slots = relationship("MiniSessionSlot", back_populates="session_date", cascade="all, delete-orphan")
+    
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "mini_session_id": str(self.mini_session_id),
+            "session_date": self.session_date.isoformat() if self.session_date else None,
+            "location_name": self.location_name,
+            "location_address": self.location_address,
+            "notes": self.notes,
+            "is_active": self.is_active,
+            "slots": [s.to_dict() for s in self.slots] if self.slots else [],
+        }
+
+
+class MiniSessionSlot(Base):
+    """
+    Individual time slots within a mini-session date
+    """
+    __tablename__ = "mini_session_slots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid = Column(String(128), nullable=False, index=True)
+    session_date_id = Column(UUID(as_uuid=True), ForeignKey("mini_session_dates.id", ondelete="CASCADE"), nullable=False)
+    
+    # Time slot
+    start_time = Column(DateTime, nullable=False, index=True)
+    end_time = Column(DateTime, nullable=False)
+    
+    # Status
+    status = Column(String(50), default="available")  # available, booked, held, blocked
+    
+    # Booking reference (if booked)
+    booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
+    
+    # Hold info (temporary hold during checkout)
+    held_until = Column(DateTime, nullable=True)
+    held_by_email = Column(String(255), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    session_date = relationship("MiniSessionDate", back_populates="slots")
+    
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "session_date_id": str(self.session_date_id),
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "status": self.status,
+            "booking_id": str(self.booking_id) if self.booking_id else None,
+            "is_available": self.status == "available" and (not self.held_until or self.held_until < datetime.utcnow()),
+        }
+
+
+class Waitlist(Base):
+    """Waitlist entries for fully booked sessions"""
+    __tablename__ = "booking_waitlist"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    uid = Column(String(128), nullable=False, index=True)  # Photographer's UID
+    
+    # What they're waiting for
+    mini_session_id = Column(UUID(as_uuid=True), ForeignKey("mini_sessions.id", ondelete="CASCADE"), nullable=True)
+    session_date_id = Column(UUID(as_uuid=True), ForeignKey("mini_session_dates.id", ondelete="CASCADE"), nullable=True)
+    
+    # Contact info
+    name = Column(String(255), nullable=False)
+    email = Column(String(255), nullable=False, index=True)
+    phone = Column(String(50), nullable=True)
+    
+    # Preferences
+    preferred_dates = Column(JSON, default=list)  # List of preferred date strings
+    preferred_times = Column(JSON, default=list)  # ["morning", "afternoon", "evening"]
+    notes = Column(Text, nullable=True)
+    
+    # Status
+    status = Column(String(50), default="waiting")  # waiting, notified, booked, expired
+    notified_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "mini_session_id": str(self.mini_session_id) if self.mini_session_id else None,
+            "session_date_id": str(self.session_date_id) if self.session_date_id else None,
+            "name": self.name,
+            "email": self.email,
+            "phone": self.phone,
+            "preferred_dates": self.preferred_dates or [],
+            "preferred_times": self.preferred_times or [],
+            "notes": self.notes,
+            "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

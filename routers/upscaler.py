@@ -1,10 +1,12 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from PIL import Image
 import io
 import os
 import gc
 from core.config import logger  # type: ignore
+from core.auth import get_uid_from_request
+from utils.rate_limit import check_processing_rate_limit, validate_file_size
 
 try:
     from transformers import pipeline as hf_pipeline  # type: ignore
@@ -43,9 +45,22 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
     return img.resize((new_w, new_h), Image.LANCZOS)
 
 @router.post("/preview")
-async def preview(image: UploadFile = File(...)):
+async def preview(request: Request, image: UploadFile = File(...)):
+    # Rate limiting
+    uid = get_uid_from_request(request)
+    rate_key = uid if uid else (request.client.host if request.client else "unknown")
+    allowed, rate_err = check_processing_rate_limit(rate_key)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=rate_err)
+    
     try:
         data = await image.read()
+        
+        # Validate file size
+        valid, err = validate_file_size(len(data), image.filename or '')
+        if not valid:
+            raise HTTPException(status_code=400, detail=err)
+        
         inp = Image.open(io.BytesIO(data)).convert("RGB")
         inp = _resize_if_needed(inp)
         pipe = _get_upscaler()
@@ -77,9 +92,22 @@ async def preview(image: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/download")
-async def download(image: UploadFile = File(...), output_format: str = Form("png")):
+async def download(request: Request, image: UploadFile = File(...), output_format: str = Form("png")):
+    # Rate limiting
+    uid = get_uid_from_request(request)
+    rate_key = uid if uid else (request.client.host if request.client else "unknown")
+    allowed, rate_err = check_processing_rate_limit(rate_key)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=rate_err)
+    
     try:
         data = await image.read()
+        
+        # Validate file size
+        valid, err = validate_file_size(len(data), image.filename or '')
+        if not valid:
+            raise HTTPException(status_code=400, detail=err)
+        
         inp = Image.open(io.BytesIO(data)).convert("RGB")
         inp = _resize_if_needed(inp)
         pipe = _get_upscaler()

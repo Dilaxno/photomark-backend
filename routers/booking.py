@@ -1322,3 +1322,794 @@ async def get_form_analytics(request: Request, form_id: str):
         }
     finally:
         db.close()
+
+
+# ============ Mini Sessions (UseSession.com style) ============
+
+from models.booking import MiniSession, MiniSessionDate, MiniSessionSlot, Waitlist
+
+
+class MiniSessionCreate(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    session_type: Optional[str] = "portrait"
+    duration_minutes: Optional[int] = 20
+    buffer_minutes: Optional[int] = 10
+    price: Optional[float] = 0.0
+    deposit_amount: Optional[float] = 0.0
+    currency: Optional[str] = "USD"
+    included_photos: Optional[int] = None
+    deliverables: Optional[List[str]] = []
+    location_name: Optional[str] = None
+    location_address: Optional[str] = None
+    location_notes: Optional[str] = None
+    cover_image: Optional[str] = None
+    gallery_images: Optional[List[str]] = []
+    max_bookings_per_slot: Optional[int] = 1
+    allow_waitlist: Optional[bool] = True
+    require_deposit: Optional[bool] = True
+    auto_confirm: Optional[bool] = False
+
+
+class MiniSessionDateCreate(BaseModel):
+    session_date: str  # ISO date string
+    location_name: Optional[str] = None
+    location_address: Optional[str] = None
+    notes: Optional[str] = None
+    time_slots: Optional[List[str]] = []  # List of start times like ["09:00", "09:30", "10:00"]
+
+
+class SlotBookingRequest(BaseModel):
+    slot_id: str
+    client_name: str
+    client_email: str
+    client_phone: Optional[str] = None
+    notes: Optional[str] = None
+    participants: Optional[int] = 1  # Number of people in session
+
+
+class WaitlistRequest(BaseModel):
+    mini_session_id: str
+    session_date_id: Optional[str] = None
+    name: str
+    email: str
+    phone: Optional[str] = None
+    preferred_dates: Optional[List[str]] = []
+    preferred_times: Optional[List[str]] = []
+    notes: Optional[str] = None
+
+
+@router.get("/mini-sessions")
+async def list_mini_sessions(request: Request, active_only: bool = Query(False)):
+    """List all mini-sessions for the photographer"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        query = db.query(MiniSession).filter(MiniSession.uid == uid)
+        if active_only:
+            query = query.filter(MiniSession.is_active == True)
+        
+        sessions = query.order_by(MiniSession.created_at.desc()).all()
+        
+        # Get booking counts for each session
+        result = []
+        for session in sessions:
+            data = session.to_dict()
+            # Count total slots and booked slots
+            total_slots = db.query(func.count(MiniSessionSlot.id)).join(MiniSessionDate).filter(
+                MiniSessionDate.mini_session_id == session.id
+            ).scalar() or 0
+            booked_slots = db.query(func.count(MiniSessionSlot.id)).join(MiniSessionDate).filter(
+                MiniSessionDate.mini_session_id == session.id,
+                MiniSessionSlot.status == "booked"
+            ).scalar() or 0
+            data["total_slots"] = total_slots
+            data["booked_slots"] = booked_slots
+            data["available_slots"] = total_slots - booked_slots
+            result.append(data)
+        
+        return {"mini_sessions": result}
+    finally:
+        db.close()
+
+
+@router.post("/mini-sessions")
+async def create_mini_session(request: Request, data: MiniSessionCreate):
+    """Create a new mini-session event"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        # Generate slug
+        slug = data.slug
+        if not slug:
+            import re
+            slug = re.sub(r'[^a-z0-9]+', '-', data.name.lower()).strip('-')
+        
+        # Ensure unique slug
+        existing = db.query(MiniSession).filter(MiniSession.uid == uid, MiniSession.slug == slug).first()
+        if existing:
+            slug = f"{slug}-{secrets.token_hex(4)}"
+        
+        session = MiniSession(
+            uid=uid,
+            name=data.name,
+            slug=slug,
+            description=data.description,
+            session_type=_parse_session_type(data.session_type) if data.session_type else SessionType.PORTRAIT,
+            duration_minutes=data.duration_minutes or 20,
+            buffer_minutes=data.buffer_minutes or 10,
+            price=data.price or 0.0,
+            deposit_amount=data.deposit_amount or 0.0,
+            currency=data.currency or "USD",
+            included_photos=data.included_photos,
+            deliverables=data.deliverables or [],
+            location_name=data.location_name,
+            location_address=data.location_address,
+            location_notes=data.location_notes,
+            cover_image=data.cover_image,
+            gallery_images=data.gallery_images or [],
+            max_bookings_per_slot=data.max_bookings_per_slot or 1,
+            allow_waitlist=data.allow_waitlist if data.allow_waitlist is not None else True,
+            require_deposit=data.require_deposit if data.require_deposit is not None else True,
+            auto_confirm=data.auto_confirm or False
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+        return session.to_dict()
+    finally:
+        db.close()
+
+
+@router.get("/mini-sessions/{session_id}")
+async def get_mini_session(request: Request, session_id: str):
+    """Get a mini-session with all dates and slots"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        result = session.to_dict()
+        result["dates"] = [d.to_dict() for d in session.dates]
+        
+        # Get waitlist count
+        waitlist_count = db.query(func.count(Waitlist.id)).filter(
+            Waitlist.mini_session_id == session.id,
+            Waitlist.status == "waiting"
+        ).scalar() or 0
+        result["waitlist_count"] = waitlist_count
+        
+        return result
+    finally:
+        db.close()
+
+
+@router.put("/mini-sessions/{session_id}")
+async def update_mini_session(request: Request, session_id: str, data: MiniSessionCreate):
+    """Update a mini-session"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        update_data = data.dict(exclude_unset=True)
+        for key, value in update_data.items():
+            if value is not None:
+                if key == "session_type":
+                    session.session_type = _parse_session_type(value)
+                else:
+                    setattr(session, key, value)
+        
+        session.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(session)
+        return session.to_dict()
+    finally:
+        db.close()
+
+
+@router.delete("/mini-sessions/{session_id}")
+async def delete_mini_session(request: Request, session_id: str):
+    """Delete a mini-session"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        db.delete(session)
+        db.commit()
+        return {"ok": True, "message": "Mini-session deleted"}
+    finally:
+        db.close()
+
+
+@router.post("/mini-sessions/{session_id}/publish")
+async def publish_mini_session(request: Request, session_id: str):
+    """Publish a mini-session to make it bookable"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        # Validate has at least one date with slots
+        has_slots = db.query(MiniSessionSlot).join(MiniSessionDate).filter(
+            MiniSessionDate.mini_session_id == session.id
+        ).first()
+        
+        if not has_slots:
+            return JSONResponse({"error": "Add at least one date with time slots before publishing"}, status_code=400)
+        
+        session.is_published = True
+        session.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "slug": session.slug}
+    finally:
+        db.close()
+
+
+# ============ Mini Session Dates & Slots ============
+
+@router.post("/mini-sessions/{session_id}/dates")
+async def add_mini_session_date(request: Request, session_id: str, data: MiniSessionDateCreate):
+    """Add a date with time slots to a mini-session"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        # Parse the date
+        session_date = _parse_datetime(data.session_date)
+        if not session_date:
+            return JSONResponse({"error": "Invalid date format"}, status_code=400)
+        
+        # Create the date record
+        date_record = MiniSessionDate(
+            uid=uid,
+            mini_session_id=session.id,
+            session_date=session_date,
+            location_name=data.location_name or session.location_name,
+            location_address=data.location_address or session.location_address,
+            notes=data.notes
+        )
+        db.add(date_record)
+        db.flush()
+        
+        # Create time slots
+        if data.time_slots:
+            for time_str in data.time_slots:
+                try:
+                    # Parse time like "09:00" or "14:30"
+                    hour, minute = map(int, time_str.split(':'))
+                    start_time = session_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    end_time = start_time + timedelta(minutes=session.duration_minutes)
+                    
+                    slot = MiniSessionSlot(
+                        uid=uid,
+                        session_date_id=date_record.id,
+                        start_time=start_time,
+                        end_time=end_time,
+                        status="available"
+                    )
+                    db.add(slot)
+                except:
+                    continue  # Skip invalid time formats
+        
+        db.commit()
+        db.refresh(date_record)
+        return date_record.to_dict()
+    finally:
+        db.close()
+
+
+@router.post("/mini-sessions/{session_id}/dates/{date_id}/generate-slots")
+async def generate_time_slots(
+    request: Request,
+    session_id: str,
+    date_id: str,
+    start_time: str = Query(...),  # "09:00"
+    end_time: str = Query(...)     # "17:00"
+):
+    """Auto-generate time slots for a date based on duration and buffer"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        date_record = db.query(MiniSessionDate).filter(
+            MiniSessionDate.id == date_id,
+            MiniSessionDate.mini_session_id == session.id
+        ).first()
+        
+        if not date_record:
+            return JSONResponse({"error": "Date not found"}, status_code=404)
+        
+        # Parse start and end times
+        try:
+            start_hour, start_min = map(int, start_time.split(':'))
+            end_hour, end_min = map(int, end_time.split(':'))
+        except:
+            return JSONResponse({"error": "Invalid time format. Use HH:MM"}, status_code=400)
+        
+        # Generate slots
+        slot_duration = session.duration_minutes + session.buffer_minutes
+        current_time = date_record.session_date.replace(hour=start_hour, minute=start_min, second=0, microsecond=0)
+        end_datetime = date_record.session_date.replace(hour=end_hour, minute=end_min, second=0, microsecond=0)
+        
+        slots_created = 0
+        while current_time + timedelta(minutes=session.duration_minutes) <= end_datetime:
+            slot = MiniSessionSlot(
+                uid=uid,
+                session_date_id=date_record.id,
+                start_time=current_time,
+                end_time=current_time + timedelta(minutes=session.duration_minutes),
+                status="available"
+            )
+            db.add(slot)
+            slots_created += 1
+            current_time += timedelta(minutes=slot_duration)
+        
+        db.commit()
+        return {"ok": True, "slots_created": slots_created}
+    finally:
+        db.close()
+
+
+@router.delete("/mini-sessions/dates/{date_id}")
+async def delete_mini_session_date(request: Request, date_id: str):
+    """Delete a mini-session date and all its slots"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        date_record = db.query(MiniSessionDate).filter(
+            MiniSessionDate.id == date_id,
+            MiniSessionDate.uid == uid
+        ).first()
+        
+        if not date_record:
+            return JSONResponse({"error": "Date not found"}, status_code=404)
+        
+        # Check for booked slots
+        booked = db.query(MiniSessionSlot).filter(
+            MiniSessionSlot.session_date_id == date_id,
+            MiniSessionSlot.status == "booked"
+        ).first()
+        
+        if booked:
+            return JSONResponse({"error": "Cannot delete date with booked slots"}, status_code=400)
+        
+        db.delete(date_record)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@router.delete("/mini-sessions/slots/{slot_id}")
+async def delete_slot(request: Request, slot_id: str):
+    """Delete a single time slot"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        slot = db.query(MiniSessionSlot).filter(
+            MiniSessionSlot.id == slot_id,
+            MiniSessionSlot.uid == uid
+        ).first()
+        
+        if not slot:
+            return JSONResponse({"error": "Slot not found"}, status_code=404)
+        
+        if slot.status == "booked":
+            return JSONResponse({"error": "Cannot delete booked slot"}, status_code=400)
+        
+        db.delete(slot)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@router.put("/mini-sessions/slots/{slot_id}/block")
+async def block_slot(request: Request, slot_id: str):
+    """Block a slot (make unavailable)"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        slot = db.query(MiniSessionSlot).filter(
+            MiniSessionSlot.id == slot_id,
+            MiniSessionSlot.uid == uid
+        ).first()
+        
+        if not slot:
+            return JSONResponse({"error": "Slot not found"}, status_code=404)
+        
+        if slot.status == "booked":
+            return JSONResponse({"error": "Cannot block booked slot"}, status_code=400)
+        
+        slot.status = "blocked"
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@router.put("/mini-sessions/slots/{slot_id}/unblock")
+async def unblock_slot(request: Request, slot_id: str):
+    """Unblock a slot"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        slot = db.query(MiniSessionSlot).filter(
+            MiniSessionSlot.id == slot_id,
+            MiniSessionSlot.uid == uid
+        ).first()
+        
+        if not slot:
+            return JSONResponse({"error": "Slot not found"}, status_code=404)
+        
+        slot.status = "available"
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+# ============ Public Mini Session Booking ============
+
+@router.get("/public/mini-session/{slug}")
+async def get_public_mini_session(slug: str):
+    """Get a published mini-session for public booking page"""
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.slug == slug,
+            MiniSession.is_published == True,
+            MiniSession.is_active == True
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        
+        # Increment view count
+        session.views_count = (session.views_count or 0) + 1
+        db.commit()
+        
+        # Get available dates with slots
+        dates = db.query(MiniSessionDate).filter(
+            MiniSessionDate.mini_session_id == session.id,
+            MiniSessionDate.is_active == True,
+            MiniSessionDate.session_date >= datetime.utcnow()
+        ).order_by(MiniSessionDate.session_date.asc()).all()
+        
+        dates_data = []
+        for date in dates:
+            available_slots = db.query(MiniSessionSlot).filter(
+                MiniSessionSlot.session_date_id == date.id,
+                MiniSessionSlot.status == "available",
+                or_(
+                    MiniSessionSlot.held_until == None,
+                    MiniSessionSlot.held_until < datetime.utcnow()
+                )
+            ).order_by(MiniSessionSlot.start_time.asc()).all()
+            
+            if available_slots:
+                dates_data.append({
+                    "id": str(date.id),
+                    "date": date.session_date.isoformat(),
+                    "location_name": date.location_name or session.location_name,
+                    "location_address": date.location_address or session.location_address,
+                    "slots": [s.to_dict() for s in available_slots]
+                })
+        
+        # Get photographer settings for branding
+        settings = db.query(BookingSettings).filter(BookingSettings.uid == session.uid).first()
+        
+        return {
+            "id": str(session.id),
+            "name": session.name,
+            "description": session.description,
+            "session_type": session.session_type.value if session.session_type else None,
+            "duration_minutes": session.duration_minutes,
+            "price": session.price,
+            "deposit_amount": session.deposit_amount,
+            "currency": session.currency,
+            "included_photos": session.included_photos,
+            "deliverables": session.deliverables or [],
+            "location_name": session.location_name,
+            "location_address": session.location_address,
+            "cover_image": session.cover_image,
+            "gallery_images": session.gallery_images or [],
+            "allow_waitlist": session.allow_waitlist,
+            "require_deposit": session.require_deposit,
+            "dates": dates_data,
+            "photographer": {
+                "name": settings.business_name if settings else None,
+                "logo": settings.business_logo if settings else None,
+                "accent_color": settings.booking_page_accent_color if settings else "#6366f1",
+            } if settings else None
+        }
+    finally:
+        db.close()
+
+
+@router.post("/public/mini-session/{slug}/hold")
+async def hold_slot(slug: str, slot_id: str = Body(..., embed=True), email: str = Body(..., embed=True)):
+    """Temporarily hold a slot during checkout (10 min hold)"""
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.slug == slug,
+            MiniSession.is_published == True
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        
+        slot = db.query(MiniSessionSlot).join(MiniSessionDate).filter(
+            MiniSessionSlot.id == slot_id,
+            MiniSessionDate.mini_session_id == session.id
+        ).first()
+        
+        if not slot:
+            return JSONResponse({"error": "Slot not found"}, status_code=404)
+        
+        # Check if available
+        if slot.status != "available":
+            return JSONResponse({"error": "Slot is no longer available"}, status_code=400)
+        
+        # Check if held by someone else
+        if slot.held_until and slot.held_until > datetime.utcnow() and slot.held_by_email != email:
+            return JSONResponse({"error": "Slot is being held by another customer"}, status_code=400)
+        
+        # Hold for 10 minutes
+        slot.status = "held"
+        slot.held_until = datetime.utcnow() + timedelta(minutes=10)
+        slot.held_by_email = email
+        db.commit()
+        
+        return {"ok": True, "held_until": slot.held_until.isoformat()}
+    finally:
+        db.close()
+
+
+@router.post("/public/mini-session/{slug}/book")
+async def book_mini_session_slot(slug: str, data: SlotBookingRequest):
+    """Book a mini-session slot"""
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.slug == slug,
+            MiniSession.is_published == True
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        
+        slot = db.query(MiniSessionSlot).join(MiniSessionDate).filter(
+            MiniSessionSlot.id == data.slot_id,
+            MiniSessionDate.mini_session_id == session.id
+        ).first()
+        
+        if not slot:
+            return JSONResponse({"error": "Slot not found"}, status_code=404)
+        
+        # Verify slot is available or held by this email
+        if slot.status == "booked":
+            return JSONResponse({"error": "Slot is already booked"}, status_code=400)
+        
+        if slot.status == "held" and slot.held_by_email != data.client_email:
+            if slot.held_until and slot.held_until > datetime.utcnow():
+                return JSONResponse({"error": "Slot is being held by another customer"}, status_code=400)
+        
+        # Get the date record
+        date_record = db.query(MiniSessionDate).filter(MiniSessionDate.id == slot.session_date_id).first()
+        
+        # Create booking
+        booking = Booking(
+            uid=session.uid,
+            client_name=data.client_name,
+            client_email=data.client_email,
+            client_phone=data.client_phone,
+            title=session.name,
+            session_type=session.session_type,
+            session_date=slot.start_time,
+            session_end=slot.end_time,
+            duration_minutes=session.duration_minutes,
+            location=date_record.location_name or session.location_name,
+            location_address=date_record.location_address or session.location_address,
+            status=BookingStatus.CONFIRMED if session.auto_confirm else BookingStatus.PENDING,
+            total_amount=session.price,
+            deposit_amount=session.deposit_amount,
+            currency=session.currency,
+            notes=data.notes,
+            questionnaire_data={"participants": data.participants}
+        )
+        db.add(booking)
+        db.flush()
+        
+        # Update slot
+        slot.status = "booked"
+        slot.booking_id = booking.id
+        slot.held_until = None
+        slot.held_by_email = None
+        
+        db.commit()
+        db.refresh(booking)
+        
+        return {
+            "ok": True,
+            "booking_id": str(booking.id),
+            "status": booking.status.value,
+            "confirmation_message": f"Your {session.name} session is {'confirmed' if session.auto_confirm else 'pending confirmation'}!",
+            "session_date": slot.start_time.isoformat(),
+            "location": date_record.location_name or session.location_name
+        }
+    finally:
+        db.close()
+
+
+# ============ Waitlist ============
+
+@router.post("/public/mini-session/{slug}/waitlist")
+async def join_waitlist(slug: str, data: WaitlistRequest):
+    """Join the waitlist for a mini-session"""
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.slug == slug,
+            MiniSession.is_published == True,
+            MiniSession.allow_waitlist == True
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Session not found or waitlist not available"}, status_code=404)
+        
+        # Check if already on waitlist
+        existing = db.query(Waitlist).filter(
+            Waitlist.mini_session_id == session.id,
+            Waitlist.email == data.email,
+            Waitlist.status == "waiting"
+        ).first()
+        
+        if existing:
+            return JSONResponse({"error": "You're already on the waitlist"}, status_code=400)
+        
+        waitlist_entry = Waitlist(
+            uid=session.uid,
+            mini_session_id=session.id,
+            session_date_id=data.session_date_id if data.session_date_id else None,
+            name=data.name,
+            email=data.email,
+            phone=data.phone,
+            preferred_dates=data.preferred_dates or [],
+            preferred_times=data.preferred_times or [],
+            notes=data.notes
+        )
+        db.add(waitlist_entry)
+        db.commit()
+        
+        return {"ok": True, "message": "You've been added to the waitlist. We'll notify you when a spot opens up!"}
+    finally:
+        db.close()
+
+
+@router.get("/mini-sessions/{session_id}/waitlist")
+async def get_waitlist(request: Request, session_id: str):
+    """Get waitlist for a mini-session"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        session = db.query(MiniSession).filter(
+            MiniSession.id == session_id,
+            MiniSession.uid == uid
+        ).first()
+        
+        if not session:
+            return JSONResponse({"error": "Mini-session not found"}, status_code=404)
+        
+        waitlist = db.query(Waitlist).filter(
+            Waitlist.mini_session_id == session_id
+        ).order_by(Waitlist.created_at.asc()).all()
+        
+        return {"waitlist": [w.to_dict() for w in waitlist]}
+    finally:
+        db.close()
+
+
+@router.delete("/waitlist/{entry_id}")
+async def remove_from_waitlist(request: Request, entry_id: str):
+    """Remove someone from waitlist"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        entry = db.query(Waitlist).filter(
+            Waitlist.id == entry_id,
+            Waitlist.uid == uid
+        ).first()
+        
+        if not entry:
+            return JSONResponse({"error": "Waitlist entry not found"}, status_code=404)
+        
+        db.delete(entry)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()

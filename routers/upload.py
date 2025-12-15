@@ -45,6 +45,13 @@ from utils.watermark import (
 from utils.storage import upload_bytes, read_json_key
 from utils.invisible_mark import embed_signature as embed_invisible, build_payload_for_uid
 from utils.metadata import auto_embed_metadata_for_user
+from utils.rate_limit import (
+    check_upload_rate_limit,
+    validate_upload_request,
+    validate_file_size,
+    MAX_FILE_SIZE_BYTES,
+    MAX_FILES_PER_BATCH,
+)
 from sqlalchemy.orm import Session
 from core.database import get_db
 from models.gallery import GalleryAsset
@@ -116,6 +123,16 @@ async def upload(
         return JSONResponse({"error": "no files"}, status_code=400)
     if len(files) > MAX_FILES:
         return JSONResponse({"error": f"too many files (max {MAX_FILES})"}, status_code=400)
+    
+    # Validate batch size limits
+    valid, err_msg = validate_upload_request(len(files), 0)
+    if not valid:
+        return JSONResponse({"error": err_msg}, status_code=400)
+    
+    # Check rate limits before processing
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=len(files))
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
 
     # Read logo/signature if provided (support both for backward compatibility)
     logo_file = logo or signature
@@ -129,11 +146,20 @@ async def upload(
     uploaded = []
 
     idx = 0
+    total_size = 0
     for uf in files:
         try:
             raw = await uf.read()
             if not raw:
                 continue
+            
+            # SECURITY: Validate individual file size
+            file_valid, file_err = validate_file_size(len(raw), uf.filename or '')
+            if not file_valid:
+                logger.warning(f"[upload] File too large: {uf.filename} ({len(raw)} bytes)")
+                continue
+            
+            total_size += len(raw)
             
             # SECURITY: Validate file content matches image magic bytes
             if not _validate_image_content(raw):
@@ -306,6 +332,17 @@ async def upload_external(
 
     if not files:
         return JSONResponse({"error": "no files"}, status_code=400)
+    
+    # Rate limiting and validation - check if batch contains videos for appropriate limits
+    from utils.rate_limit import is_video_file
+    has_videos = any(is_video_file(f.filename or '') for f in files)
+    valid, err_msg = validate_upload_request(len(files), 0, has_videos=has_videos)
+    if not valid:
+        return JSONResponse({"error": err_msg}, status_code=400)
+    
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=len(files))
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
 
     # Dynamic per-plan cap: individual/studios get higher limit if configured
     max_cap = MAX_FILES
@@ -332,6 +369,12 @@ async def upload_external(
         try:
             raw = await uf.read()
             if not raw:
+                continue
+            
+            # SECURITY: Validate file size
+            file_valid, file_err = validate_file_size(len(raw), uf.filename or '')
+            if not file_valid:
+                logger.warning(f"[upload.external] File too large: {uf.filename} ({len(raw)} bytes)")
                 continue
             
             # SECURITY: Validate file content matches image magic bytes
@@ -441,6 +484,15 @@ async def process_watermark_zip(
 
     if not files:
         return JSONResponse({"error": "no files"}, status_code=400)
+    
+    # Rate limiting and validation
+    valid, err_msg = validate_upload_request(len(files), 0)
+    if not valid:
+        return JSONResponse({"error": err_msg}, status_code=400)
+    
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=len(files))
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
 
     # Read logo/signature if provided
     logo_file = logo or signature
@@ -456,6 +508,12 @@ async def process_watermark_zip(
             raw = await uf.read()
             if not raw:
                 return None
+            
+            # Validate file size
+            file_valid, _ = validate_file_size(len(raw), uf.filename or '')
+            if not file_valid:
+                return None
+            
             img = Image.open(io.BytesIO(raw)).convert("RGB")
 
             layout = (wm_layout or 'single').strip().lower()

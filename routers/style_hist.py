@@ -332,6 +332,17 @@ async def hist_match(
   if not has_role_access(req_uid, eff_uid, 'convert'):
     return JSONResponse({"error": "Forbidden"}, status_code=403)
 
+  # Rate limiting
+  from utils.rate_limit import check_processing_rate_limit, validate_file_size, validate_upload_request
+  allowed, rate_err = check_processing_rate_limit(eff_uid)
+  if not allowed:
+    return JSONResponse({"error": rate_err}, status_code=429)
+  
+  # Validate batch size
+  valid, batch_err = validate_upload_request(len(files), 0)
+  if not valid:
+    return JSONResponse({"error": batch_err}, status_code=400)
+
   # One-free-generation enforcement (counts against owner workspace)
   billing_uid = eff_uid or _billing_uid_from_request(request)
   if not _is_paid_customer(billing_uid):
@@ -344,6 +355,11 @@ async def hist_match(
   try:
     # Load and prepare reference CDF (on downscaled image)
     ref_bytes = await reference.read()
+    
+    # Validate reference file size
+    ref_valid, ref_err = validate_file_size(len(ref_bytes), reference.filename or '')
+    if not ref_valid:
+      return JSONResponse({"error": ref_err}, status_code=400)
     if not ref_bytes:
       return JSONResponse({"error": "empty reference"}, status_code=400)
     # Cache reference CDF by content hash to speed repeated previews
@@ -362,6 +378,12 @@ async def hist_match(
     for f in files:
       data = await f.read()
       if not data:
+        idx += 1
+        continue
+      # Validate file size
+      file_valid, file_err = validate_file_size(len(data), f.filename or '')
+      if not file_valid:
+        logger.warning(f"[style_hist] File too large: {f.filename}")
         idx += 1
         continue
       inputs.append((idx, f.filename or f"image_{idx}.jpg", data))

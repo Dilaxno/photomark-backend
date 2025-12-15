@@ -653,6 +653,24 @@ async def vaults_upload(
     if not files:
         return JSONResponse({"error": "No files provided"}, status_code=400)
     
+    # Rate limiting and validation
+    from utils.rate_limit import check_upload_rate_limit, validate_upload_request, validate_file_size, is_video_file
+    
+    # Check if batch contains videos for appropriate limits
+    has_videos = any(is_video_file(f.filename or '') for f in files)
+    valid, err_msg = validate_upload_request(len(files), 0, has_videos=has_videos)
+    if not valid:
+        return JSONResponse({"error": err_msg}, status_code=400)
+    
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=len(files))
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
+    
+    # Allowed extensions for images and videos
+    IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.gif', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.sr2', '.srf', '.srw', '.orf', '.raf', '.rw2', '.rwl', '.pef', '.dng', '.3fr', '.erf', '.kdc', '.mrw', '.x3f', '.mef', '.iiq', '.fff'}
+    VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.3gp', '.mpeg', '.mpg', '.mts', '.m2ts'}
+    ALLOWED_EXTS = IMAGE_EXTS | VIDEO_EXTS
+    
     uploaded = []
     errors = []
     
@@ -662,10 +680,16 @@ async def vaults_upload(
             if not raw:
                 continue
             
+            # Validate file size (handles both image and video limits)
+            file_valid, file_err = validate_file_size(len(raw), uf.filename or '')
+            if not file_valid:
+                errors.append({"filename": uf.filename, "error": file_err})
+                continue
+            
             # Determine file extension
             orig_filename = uf.filename or 'image.jpg'
             ext = os.path.splitext(orig_filename)[1].lower()
-            if not ext or ext not in ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.gif', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.sr2', '.srf', '.srw', '.orf', '.raf', '.rw2', '.rwl', '.pef', '.dng', '.3fr', '.erf', '.kdc', '.mrw', '.x3f', '.mef', '.iiq', '.fff']:
+            if not ext or ext not in ALLOWED_EXTS:
                 ext = '.jpg'
             
             # Auto-embed IPTC/EXIF metadata if user has it enabled
@@ -2271,6 +2295,13 @@ async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True)
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not vault or not file:
         return JSONResponse({"error": "vault and file required"}, status_code=400)
+    
+    # Rate limiting
+    from utils.rate_limit import check_upload_rate_limit, validate_file_size
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=1)
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
+    
     try:
         safe_vault = _vault_key(uid, vault)[1]
         name = file.filename or "logo"
@@ -2285,6 +2316,10 @@ async def vaults_share_logo(request: Request, vault: str = Body(..., embed=True)
             ".svg": "image/svg+xml",
         }.get(ext, "application/octet-stream")
         data = await file.read()
+        
+        # Validate file size (logos should be small, max 5MB)
+        if len(data) > 5 * 1024 * 1024:
+            return JSONResponse({"error": "Logo file too large. Maximum size is 5MB."}, status_code=400)
         date_prefix = datetime.utcnow().strftime('%Y/%m/%d')
         key = f"users/{uid}/vaults/_meta/{safe_vault}/branding/{date_prefix}/logo{ext}"
         url = upload_bytes(key, data, content_type=ct)
@@ -3164,6 +3199,13 @@ async def retouch_upload_final(request: Request, id: str = Form(...), file: Uplo
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # Rate limiting
+    from utils.rate_limit import check_upload_rate_limit, validate_file_size
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=1)
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
+    
     rid = (id or '').strip()
     if not rid:
         return JSONResponse({"error": "id required"}, status_code=400)
@@ -3192,6 +3234,12 @@ async def retouch_upload_final(request: Request, id: str = Form(...), file: Uplo
         data = await file.read()
         if not data:
             return JSONResponse({"error": "empty file"}, status_code=400)
+        
+        # Validate file size
+        file_valid, file_err = validate_file_size(len(data), file.filename or '')
+        if not file_valid:
+            return JSONResponse({"error": file_err}, status_code=400)
+        
         # Infer content-type
         name = file.filename or os.path.basename(key) or "image.jpg"
         ext = os.path.splitext(name)[1].lower()
@@ -3298,6 +3346,13 @@ async def retouch_upload_result(request: Request, retouch_id: str = Form(...), f
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    # Rate limiting
+    from utils.rate_limit import check_upload_rate_limit, validate_file_size
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=1)
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
+    
     rid = (retouch_id or '').strip()
     if not rid:
         return JSONResponse({"error": "retouch_id required"}, status_code=400)
