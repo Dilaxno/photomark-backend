@@ -4,7 +4,7 @@ Full booking/CRM system for photographers - stores clients, bookings, sessions, 
 """
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import Column, String, Text, DateTime, Boolean, Integer, Float, ForeignKey, JSON, Enum as SQLEnum
+from sqlalchemy import Column, String, Text, DateTime, Boolean, Integer, Float, ForeignKey, JSON, Enum as SQLEnum, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
