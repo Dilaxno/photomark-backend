@@ -25,6 +25,8 @@ ALLOWED_ROLES = {
     "Editor/Retoucher",
     "General Admin",
     "gallery manager",
+    "Website Manager",
+    "Booking Manager",
 }
 
 COLLAB_JWT_SECRET = (os.getenv("COLLAB_JWT_SECRET", "") or os.getenv("SECRET_KEY", "")).strip()

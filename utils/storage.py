@@ -120,11 +120,41 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg") -> str
 
     # Attempt backup mirror (best-effort; non-blocking on failure)
     # Only backup actual user photos, not profile/shop/branding assets
+    # Prevents duplicate backups by checking if same filename already exists
     try:
         if s3_backup and BACKUP_BUCKET and _should_backup_key(key):
             try:
-                s3_backup.Bucket(BACKUP_BUCKET).put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
-                logger.info(f"Backup mirrored to B2: {BACKUP_BUCKET}/{key}")
+                # Extract user prefix and base filename for duplicate detection
+                # Key format: users/{uid}/path/to/filename.jpg
+                base_name = os.path.basename(key).lower()
+                parts = key.split("/")
+                user_prefix = "/".join(parts[:2]) + "/" if len(parts) >= 2 else ""
+                
+                # Check if a file with the same base name already exists in backup
+                should_backup = True
+                if user_prefix and base_name:
+                    try:
+                        client = s3_backup.meta.client
+                        # List objects with user prefix to find duplicates by filename
+                        paginator = client.get_paginator('list_objects_v2')
+                        for page in paginator.paginate(Bucket=BACKUP_BUCKET, Prefix=user_prefix, PaginationConfig={'MaxItems': 5000}):
+                            for obj in page.get('Contents', []):
+                                existing_key = obj.get('Key', '')
+                                existing_name = os.path.basename(existing_key).lower()
+                                if existing_name == base_name and existing_key != key:
+                                    # Same filename already exists in backup, skip to prevent duplicates
+                                    logger.info(f"Backup skipped (duplicate filename): {base_name} already exists as {existing_key}")
+                                    should_backup = False
+                                    break
+                            if not should_backup:
+                                break
+                    except Exception as check_ex:
+                        # If check fails, proceed with backup anyway
+                        logger.warning(f"Backup duplicate check failed: {check_ex}")
+                
+                if should_backup:
+                    s3_backup.Bucket(BACKUP_BUCKET).put_object(Key=key, Body=data, ContentType=content_type, ACL="private")
+                    logger.info(f"Backup mirrored to B2: {BACKUP_BUCKET}/{key}")
             except Exception as bx:
                 logger.warning(f"Backup mirror failed for {key}: {bx}")
     except Exception:
