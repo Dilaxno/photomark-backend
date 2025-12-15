@@ -683,6 +683,20 @@ try:
 except Exception as _ex:
     logger.warning(f"mapbox router not available: {_ex}")
 
+# Client Portal (client accounts for photographers' clients)
+try:
+    from routers import client_portal  # noqa: E402
+    app.include_router(client_portal.router)
+except Exception as _ex:
+    logger.warning(f"client_portal router not available: {_ex}")
+
+# Abandoned Cart Recovery
+try:
+    from routers import abandoned_cart  # noqa: E402
+    app.include_router(abandoned_cart.router)
+except Exception as _ex:
+    logger.warning(f"abandoned_cart router not available: {_ex}")
+
 
 @app.get("/api/allow-domain")
 async def allow_domain(request: Request):
