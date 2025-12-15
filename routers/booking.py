@@ -1029,7 +1029,10 @@ async def update_form(request: Request, form_id: str, data: FormUpdate):
         
         update_data = data.dict(exclude_unset=True)
         for key, value in update_data.items():
-            if value is not None:
+            # Allow empty strings for redirect_url (to clear it)
+            if key == 'redirect_url':
+                setattr(form, key, value if value else None)
+            elif value is not None:
                 setattr(form, key, value)
         
         form.updated_at = datetime.utcnow()
