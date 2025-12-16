@@ -391,6 +391,8 @@ app.include_router(smart_resize.router)
 app.include_router(shop.router)
 from routers import pexels  # noqa: E402
 app.include_router(pexels.router)
+from routers import pixabay  # noqa: E402
+app.include_router(pixabay.router)
 if image_compression is not None:
     app.include_router(image_compression.router)
 if denoise is not None:
