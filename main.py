@@ -656,6 +656,13 @@ try:
 except Exception as _ex:
     logger.warning(f"mapbox router not available: {_ex}")
 
+# Imagga integration (auto-tagging, categorization, color extraction)
+try:
+    from routers import imagga  # noqa: E402
+    app.include_router(imagga.router)
+except Exception as _ex:
+    logger.warning(f"imagga router not available: {_ex}")
+
 # Client Portal (client accounts for photographers' clients)
 try:
     from routers import client_portal  # noqa: E402
