@@ -1,6 +1,10 @@
 """
 Unsplash Export Router
-Allows users to publish their best photos to Unsplash's community.
+Allows users to export selected photos to their own Unsplash account.
+Photos are uploaded to the user's authenticated Unsplash profile, not directly
+to the public community. Users control their own submissions and can manage
+visibility through their Unsplash dashboard.
+
 Uses Unsplash API with OAuth 2.0.
 Free tier: 50 requests/hour (demo), unlimited for production apps.
 Docs: https://unsplash.com/developers
@@ -271,7 +275,10 @@ async def unsplash_upload(
     tags: Optional[str] = Body(None)
 ):
     """
-    Upload photos to Unsplash.
+    Export photos to user's own Unsplash account.
+    
+    Photos are uploaded to the authenticated user's Unsplash profile.
+    Users can manage their submissions through their Unsplash dashboard.
     
     Note: Unsplash has strict quality guidelines. Photos must be:
     - High resolution (minimum 5MP recommended)
