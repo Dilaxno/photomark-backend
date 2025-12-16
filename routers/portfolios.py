@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from core.config import logger
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.storage import write_json_key, read_json_key, upload_bytes, get_presigned_url
+from utils.thumbnails import get_thumbnail_key
 from utils.metadata import auto_embed_metadata_for_user
 from models.gallery import GalleryAsset
 from sqlalchemy.orm import Session
@@ -188,17 +189,22 @@ async def get_portfolio(request: Request, db: Session = Depends(get_db)):
   for it in arr:
     k = str(it.get("key") or "").strip()
     url = str(it.get("imageUrl") or "").strip()
+    thumb_url = None
     taken = it.get("takenAt") or it.get("taken_at") or None
     if k:
       try:
         fresher = get_presigned_url(k, expires_in=60 * 60)
         if fresher:
           url = fresher
+        # Try to get thumbnail URL
+        thumb_key = get_thumbnail_key(k, 'small')
+        thumb_url = get_presigned_url(thumb_key, expires_in=60 * 60)
       except Exception:
         pass
     out.append({
       "id": it.get("id"),
       "imageUrl": url,
+      "thumbUrl": thumb_url,
       "title": it.get("title") or "",
       "description": it.get("description") or "",
       "takenAt": taken,
@@ -355,17 +361,22 @@ async def public_portfolio(owner: str, db: Session = Depends(get_db)):
     for it in arr:
       k = str(it.get("key") or "").strip()
       url = str(it.get("imageUrl") or "").strip()
+      thumb_url = None
       taken = it.get("takenAt") or it.get("taken_at") or None
       if k:
         try:
           fresher = get_presigned_url(k, expires_in=60 * 60)
           if fresher:
             url = fresher
+          # Try to get thumbnail URL
+          thumb_key = get_thumbnail_key(k, 'small')
+          thumb_url = get_presigned_url(thumb_key, expires_in=60 * 60)
         except Exception:
           pass
       out.append({
         "id": it.get("id"),
         "imageUrl": url,
+        "thumbUrl": thumb_url,
         "title": it.get("title") or "",
         "description": it.get("description") or "",
         "takenAt": taken,
