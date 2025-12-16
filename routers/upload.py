@@ -650,3 +650,143 @@ async def process_watermark_zip(
         'Content-Disposition': f'attachment; filename="watermarked-{stamp}.zip"'
     }
     return StreamingResponse(mem, media_type='application/zip', headers=headers)
+
+
+@router.post("/api/uploads/zip")
+async def upload_zip_extract(
+    request: Request,
+    file: UploadFile = File(...),
+    extract: str = Form("true"),
+    max_files: int = Form(50),
+    db: Session = Depends(get_db),
+):
+    """Extract images from a ZIP file and upload them to users/{uid}/external/.
+    - Extracts image files from the uploaded ZIP
+    - Uploads each image to storage
+    - Returns list of uploaded items with keys and public URLs
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+
+    if not file:
+        return JSONResponse({"error": "no file"}, status_code=400)
+    
+    # Check rate limits
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=1)
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
+
+    try:
+        raw = await file.read()
+        if not raw:
+            return JSONResponse({"error": "empty file"}, status_code=400)
+        
+        # Validate it's a ZIP file
+        if not raw[:4] == b'PK\x03\x04' and not raw[:4] == b'PK\x05\x06':
+            return JSONResponse({"error": "Invalid ZIP file"}, status_code=400)
+        
+        uploaded = []
+        image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.tif', '.tiff'}
+        
+        with zipfile.ZipFile(io.BytesIO(raw), 'r') as zf:
+            # Get list of image files in the ZIP
+            image_files = []
+            for name in zf.namelist():
+                # Skip directories and hidden files
+                if name.endswith('/') or name.startswith('__MACOSX') or '/.' in name:
+                    continue
+                ext = os.path.splitext(name.lower())[1]
+                if ext in image_extensions:
+                    image_files.append(name)
+            
+            # Sort by name for consistent ordering
+            image_files.sort()
+            
+            # Limit number of files
+            files_to_process = image_files[:min(max_files, len(image_files))]
+            
+            for zip_name in files_to_process:
+                try:
+                    img_data = zf.read(zip_name)
+                    if not img_data:
+                        continue
+                    
+                    # Validate file size
+                    file_valid, _ = validate_file_size(len(img_data), zip_name)
+                    if not file_valid:
+                        logger.warning(f"[upload.zip] File too large: {zip_name}")
+                        continue
+                    
+                    # Validate image content
+                    if not _validate_image_content(img_data):
+                        logger.warning(f"[upload.zip] Invalid image content: {zip_name}")
+                        continue
+                    
+                    # Determine extension and content type
+                    orig_ext = os.path.splitext(zip_name.lower())[1]
+                    if orig_ext not in image_extensions:
+                        orig_ext = '.jpg'
+                    ct_map = {
+                        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                        '.webp': 'image/webp', '.heic': 'image/heic', '.tif': 'image/tiff',
+                        '.tiff': 'image/tiff', '.gif': 'image/gif'
+                    }
+                    orig_ct = ct_map.get(orig_ext, 'image/jpeg')
+                    
+                    # Auto-embed metadata if enabled
+                    try:
+                        img_data = auto_embed_metadata_for_user(img_data, uid)
+                    except Exception:
+                        pass
+                    
+                    # Generate storage key
+                    date_prefix = _dt.utcnow().strftime('%Y/%m/%d')
+                    base = os.path.splitext(os.path.basename(zip_name))[0] or 'image'
+                    # Clean up base name
+                    base = ''.join(c for c in base if c.isalnum() or c in '-_')[:50] or 'image'
+                    stamp = int(_dt.utcnow().timestamp() * 1000)  # ms for uniqueness
+                    key = f"users/{uid}/external/{date_prefix}/{base}-{stamp}{orig_ext}"
+                    
+                    url = upload_bytes(key, img_data, content_type=orig_ct)
+                    uploaded.append({
+                        "key": key,
+                        "url": url,
+                        "name": os.path.basename(zip_name),
+                        "thumbUrl": url  # Could generate thumbnail here if needed
+                    })
+                    
+                    # Track in database
+                    try:
+                        existing = db.query(GalleryAsset).filter(GalleryAsset.key == key).first()
+                        if existing:
+                            existing.user_uid = uid
+                            existing.size_bytes = len(img_data)
+                        else:
+                            db.add(GalleryAsset(user_uid=uid, vault=None, key=key, size_bytes=len(img_data)))
+                        db.commit()
+                    except Exception:
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                            
+                except Exception as ex:
+                    logger.warning(f"[upload.zip] Failed to process {zip_name}: {ex}")
+                    continue
+        
+        return {
+            "ok": True,
+            "files": uploaded,
+            "total_extracted": len(uploaded),
+            "total_in_zip": len(image_files) if 'image_files' in dir() else 0
+        }
+        
+    except zipfile.BadZipFile:
+        return JSONResponse({"error": "Invalid or corrupted ZIP file"}, status_code=400)
+    except Exception as ex:
+        logger.error(f"[upload.zip] Error: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=500)
