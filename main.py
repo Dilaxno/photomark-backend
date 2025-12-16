@@ -366,6 +366,13 @@ if os.path.isdir(static_dir):
 # ---- Include routers ----
 app.include_router(images.router)
 app.include_router(photos.router)
+
+# Thumbnails router (on-demand thumbnail generation)
+try:
+    from routers import thumbnails  # noqa: E402
+    app.include_router(thumbnails.router)
+except Exception as _ex:
+    logger.warning(f"thumbnails router not available: {_ex}")
 app.include_router(auth.router)
 app.include_router(convert.router)
 app.include_router(vaults.router)

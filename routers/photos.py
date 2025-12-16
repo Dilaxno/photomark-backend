@@ -481,11 +481,17 @@ async def api_photos_partners(
                 key = entry.get("Key", "")
                 if not key or key.endswith("/") or key.endswith("/_history.txt"):
                     continue
+                # Skip thumbnail files from main listing
+                if '_thumb_' in key:
+                    continue
                 name = os.path.basename(key)
                 url = _get_url_for_key(key, expires_in=60 * 60)
+                # Get thumbnail URL for optimized grid loading
+                thumb_url = _get_thumbnail_url(key, expires_in=60 * 60)
                 item = {
                     "key": key,
                     "url": url,
+                    "thumb_url": thumb_url,  # Small thumbnail for fast grid loading
                     "name": name,
                     "size": int(entry.get("Size", 0) or 0),
                     "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
