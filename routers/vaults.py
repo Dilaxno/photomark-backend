@@ -2443,6 +2443,34 @@ async def update_vault_welcome_message(request: Request, vault: str = Body(..., 
         logger.warning(f"welcome message update failed: {ex}")
         return JSONResponse({"error": "update failed"}, status_code=500)
 
+
+@router.post("/vaults/display-name")
+async def update_vault_display_name(request: Request, vault: str = Body(..., embed=True), display_name: str = Body(..., embed=True), db: Session = Depends(get_db)):
+    """Update vault display name"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    
+    name = str(display_name).strip()
+    if not name:
+        return JSONResponse({"error": "display_name required"}, status_code=400)
+    if len(name) > 100:
+        return JSONResponse({"error": "display_name too long (max 100 characters)"}, status_code=400)
+    
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        meta["display_name"] = name
+        _write_vault_meta(uid, safe_vault, meta)
+        _pg_upsert_vault_meta(db, uid, safe_vault, {"display_name": name})
+        return {"ok": True, "display_name": name}
+    except Exception as ex:
+        logger.warning(f"display name update failed: {ex}")
+        return JSONResponse({"error": "update failed"}, status_code=500)
+
+
 @router.get("/vaults/shared/photos")
 async def vaults_shared_photos(token: str, password: Optional[str] = None, db: Session = Depends(get_db)):
     if not token or len(token) < 10:
