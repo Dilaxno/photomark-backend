@@ -77,10 +77,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Custom CORS for public endpoints (uploads custom domains) ---
+# --- Custom CORS for public endpoints and custom shop domains ---
 @app.middleware("http")
 async def public_endpoints_cors(request: Request, call_next):
-    """Allow CORS from any origin for public endpoints like /api/uploads/public/*"""
+    """Allow CORS from any origin for public endpoints and custom shop domains"""
     path = request.url.path
     origin = request.headers.get("origin", "*")
     
@@ -88,7 +88,21 @@ async def public_endpoints_cors(request: Request, call_next):
     public_paths = ["/api/uploads/public/", "/api/vaults/shared/"]
     is_public = any(path.startswith(p) for p in public_paths)
     
-    if is_public:
+    # Shop API endpoints that custom domains need access to
+    shop_api_paths = ["/api/shop/slug/", "/api/shop/resolve-domain/", "/api/shop/checkout/", "/api/shop/traffic/"]
+    is_shop_api = any(path.startswith(p) for p in shop_api_paths)
+    
+    # Check if origin is a custom shop domain (not photomark.cloud or localhost)
+    is_custom_domain = False
+    if origin and origin != "*":
+        origin_host = origin.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0].lower()
+        known_hosts = ["photomark.cloud", "www.photomark.cloud", "localhost", "127.0.0.1"]
+        is_custom_domain = origin_host and not any(origin_host == h or origin_host.endswith("." + h) for h in known_hosts)
+    
+    # Allow CORS for public paths OR shop API from custom domains
+    should_allow = is_public or (is_shop_api and is_custom_domain)
+    
+    if should_allow:
         # Explicitly list allowed headers (wildcard doesn't work with credentials)
         allowed_headers = "Content-Type, Authorization, X-Requested-With, Accept, Origin, ngrok-skip-browser-warning"
         if request.method == "OPTIONS":
