@@ -63,13 +63,14 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <style>
 :root{{color-scheme:{cs}}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html{{background:{bg_value}}}
-body{{
+html,body{{
     background:{bg_value};
     color:{fg};
     font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
-    overflow-x:hidden;
-    overflow-y:visible;
+    /* No scrolling - content expands to fit */
+    overflow:hidden;
+    height:auto;
+    min-height:100%;
 }}
 
 /* Masonry grid using CSS columns */
