@@ -103,6 +103,8 @@ body{{
     width:100%;
     height:auto;
     display:block;
+    /* Show full image - no cropping */
+    object-fit:contain;
     transition:transform .3s ease,filter .3s ease;
     backface-visibility:hidden;
     /* High-quality image rendering */
