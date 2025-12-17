@@ -1580,6 +1580,109 @@ async def mark_all_sales_delivered(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to update sales: {str(e)}")
 
+
+@router.get('/sales/recent')
+async def get_recent_orders(
+    request: Request,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    """Get recent orders for the shop owner's dashboard"""
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        rows = (
+            db.query(ShopSale)
+            .filter(or_(ShopSale.owner_uid == eff_uid, ShopSale.shop_uid == eff_uid))
+            .order_by(ShopSale.created_at.desc())
+            .limit(max(1, min(int(limit), 50)))
+            .all()
+        )
+        
+        orders = []
+        for s in rows:
+            # Extract product info from items
+            items = s.items or []
+            product_title = "Product"
+            if items and len(items) > 0:
+                product_title = items[0].get("title", "Product")
+            
+            orders.append({
+                "id": s.id,
+                "product_title": product_title,
+                "amount_cents": s.amount_cents,
+                "currency": s.currency,
+                "customer_email": s.customer_email,
+                "customer_name": getattr(s, "customer_name", None),
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "items": items,
+            })
+        
+        return JSONResponse({"orders": orders, "count": len(orders)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch recent orders: {str(e)}")
+
+
+@router.get('/sales/top-products')
+async def get_top_selling_products(
+    request: Request,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    """Get top selling products aggregated by product ID"""
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        # Get all sales for this owner
+        rows = (
+            db.query(ShopSale)
+            .filter(or_(ShopSale.owner_uid == eff_uid, ShopSale.shop_uid == eff_uid))
+            .all()
+        )
+        
+        # Aggregate by product ID
+        product_stats: dict = {}
+        for sale in rows:
+            items = sale.items or []
+            for item in items:
+                pid = item.get("id") or item.get("product_id")
+                if not pid:
+                    continue
+                
+                title = item.get("title", "Unknown Product")
+                qty = int(item.get("quantity", 1))
+                unit_price = int(item.get("unit_price_cents", 0))
+                line_total = int(item.get("line_total_cents", unit_price * qty))
+                currency = item.get("currency", sale.currency or "USD")
+                
+                if pid not in product_stats:
+                    product_stats[pid] = {
+                        "product_id": pid,
+                        "title": title,
+                        "total_sold": 0,
+                        "total_revenue_cents": 0,
+                        "currency": currency,
+                    }
+                
+                product_stats[pid]["total_sold"] += qty
+                product_stats[pid]["total_revenue_cents"] += line_total
+        
+        # Sort by total sold descending
+        sorted_products = sorted(
+            product_stats.values(),
+            key=lambda x: x["total_sold"],
+            reverse=True
+        )[:limit]
+        
+        return JSONResponse({"products": sorted_products, "count": len(sorted_products)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch top products: {str(e)}")
+
+
 @router.get('/upload')
 async def upload_info():
     return JSONResponse({"error": "Use POST multipart/form-data to /api/shop/upload"}, status_code=405)
