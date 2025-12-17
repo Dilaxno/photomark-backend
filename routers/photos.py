@@ -1293,3 +1293,263 @@ async def embed_js():
 }})();
 """
     return Response(content=js, media_type="application/javascript")
+
+
+# ============== Photo Type Filtering Endpoints ==============
+# These endpoints filter photos by their source/type based on filename suffixes:
+# - Watermarked: -txt-o (text watermark), -sig-o (signature watermark)
+# - Edited: -lut-o (color grading), -relight-o, -resize-o, -denoise-o, -upscale-o, -plugin-o (from plugins)
+
+WATERMARK_SUFFIXES = ('-txt-o', '-sig-o')
+EDITED_SUFFIXES = ('-lut-o', '-relight-o', '-resize-o', '-denoise-o', '-upscale-o', '-plugin-o', '-style-o', '-bg-o')
+
+
+def _classify_photo_type(filename: str) -> str:
+    """Classify a photo based on its filename suffix."""
+    name_lower = filename.lower()
+    # Check for watermark suffixes
+    for suffix in WATERMARK_SUFFIXES:
+        if suffix in name_lower:
+            return 'watermarked'
+    # Check for edited suffixes
+    for suffix in EDITED_SUFFIXES:
+        if suffix in name_lower:
+            return 'edited'
+    # Default to edited for any other processed image
+    return 'edited'
+
+
+@router.get("/photos/watermarked")
+async def api_photos_watermarked(
+    request: Request,
+    limit: int = 200,
+    cursor: Optional[str] = None,
+):
+    """List only watermarked photos (from watermark tool) for the current user.
+    These are photos with -txt-o or -sig-o suffixes.
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+
+    items: list[dict] = []
+    next_token: Optional[str] = None
+
+    prefix = f"users/{uid}/watermarked/"
+    if s3 and R2_BUCKET:
+        try:
+            client = s3.meta.client
+            params = {
+                "Bucket": R2_BUCKET,
+                "Prefix": prefix,
+                "MaxKeys": max(1, min(int(limit or 200), 1000)),
+            }
+            if cursor:
+                params["ContinuationToken"] = cursor
+            resp = client.list_objects_v2(**params)
+            for entry in resp.get("Contents", []) or []:
+                key = entry.get("Key", "")
+                if not key or key.endswith("/") or key.endswith("/_history.txt"):
+                    continue
+                if '_thumb_' in key:
+                    continue
+                name = os.path.basename(key)
+                # Filter for watermarked photos only
+                if _classify_photo_type(name) != 'watermarked':
+                    continue
+                url = _get_url_for_key(key, expires_in=60 * 60)
+                thumb_url = _get_thumbnail_url(key, expires_in=60 * 60)
+                item = {
+                    "key": key,
+                    "url": url,
+                    "thumb_url": thumb_url,
+                    "name": name,
+                    "size": int(entry.get("Size", 0) or 0),
+                    "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
+                    "type": "watermarked",
+                }
+                items.append(item)
+            if resp.get("IsTruncated"):
+                next_token = resp.get("NextContinuationToken")
+        except Exception as ex:
+            logger.exception(f"Failed listing watermarked photos: {ex}")
+            return JSONResponse({"error": "List failed"}, status_code=500)
+    else:
+        try:
+            dir_path = os.path.join(static_dir, prefix)
+            if os.path.isdir(dir_path):
+                all_files: list[tuple[str, float, int]] = []
+                for root, _, files in os.walk(dir_path):
+                    for f in files:
+                        if f == "_history.txt" or '_thumb_' in f:
+                            continue
+                        if _classify_photo_type(f) != 'watermarked':
+                            continue
+                        local_path = os.path.join(root, f)
+                        rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
+                        try:
+                            mtime = os.path.getmtime(local_path)
+                            size = os.path.getsize(local_path)
+                        except Exception:
+                            mtime, size = 0, 0
+                        all_files.append((rel, mtime, size))
+                all_files.sort(key=lambda t: t[1], reverse=True)
+                start = int(cursor or 0) if str(cursor or "").isdigit() else 0
+                slice_files = all_files[start:start + max(1, min(int(limit or 200), 5000))]
+                for rel, mtime, size in slice_files:
+                    name = os.path.basename(rel)
+                    items.append({
+                        "key": rel,
+                        "url": f"/static/{rel}",
+                        "name": name,
+                        "size": int(size),
+                        "last_modified": datetime.utcfromtimestamp(mtime).isoformat() if mtime else datetime.utcnow().isoformat(),
+                        "type": "watermarked",
+                    })
+                if (start + len(slice_files)) < len(all_files):
+                    next_token = str(start + len(slice_files))
+        except Exception as ex:
+            logger.exception(f"Local listing failed: {ex}")
+            return JSONResponse({"error": "List failed"}, status_code=500)
+
+    resp = {"photos": items}
+    if next_token:
+        resp["next"] = next_token
+    return resp
+
+
+@router.get("/photos/edited")
+async def api_photos_edited(
+    request: Request,
+    limit: int = 200,
+    cursor: Optional[str] = None,
+):
+    """List only edited/retouched photos for the current user.
+    These are photos from tools like color grading, relighting, resize, etc.
+    Also includes photos sent from Lightroom/Photoshop plugins.
+    """
+    eff_uid, req_uid = resolve_workspace_uid(request)
+    if not eff_uid or not req_uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not has_role_access(req_uid, eff_uid, 'gallery'):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    uid = eff_uid
+
+    items: list[dict] = []
+    next_token: Optional[str] = None
+
+    prefix = f"users/{uid}/watermarked/"
+    if s3 and R2_BUCKET:
+        try:
+            client = s3.meta.client
+            params = {
+                "Bucket": R2_BUCKET,
+                "Prefix": prefix,
+                "MaxKeys": max(1, min(int(limit or 200), 1000)),
+            }
+            if cursor:
+                params["ContinuationToken"] = cursor
+            resp = client.list_objects_v2(**params)
+            for entry in resp.get("Contents", []) or []:
+                key = entry.get("Key", "")
+                if not key or key.endswith("/") or key.endswith("/_history.txt"):
+                    continue
+                if '_thumb_' in key:
+                    continue
+                name = os.path.basename(key)
+                # Filter for edited photos only
+                if _classify_photo_type(name) != 'edited':
+                    continue
+                url = _get_url_for_key(key, expires_in=60 * 60)
+                thumb_url = _get_thumbnail_url(key, expires_in=60 * 60)
+                item = {
+                    "key": key,
+                    "url": url,
+                    "thumb_url": thumb_url,
+                    "name": name,
+                    "size": int(entry.get("Size", 0) or 0),
+                    "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
+                    "type": "edited",
+                }
+                items.append(item)
+            if resp.get("IsTruncated"):
+                next_token = resp.get("NextContinuationToken")
+        except Exception as ex:
+            logger.exception(f"Failed listing edited photos: {ex}")
+            return JSONResponse({"error": "List failed"}, status_code=500)
+    else:
+        try:
+            dir_path = os.path.join(static_dir, prefix)
+            if os.path.isdir(dir_path):
+                all_files: list[tuple[str, float, int]] = []
+                for root, _, files in os.walk(dir_path):
+                    for f in files:
+                        if f == "_history.txt" or '_thumb_' in f:
+                            continue
+                        if _classify_photo_type(f) != 'edited':
+                            continue
+                        local_path = os.path.join(root, f)
+                        rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
+                        try:
+                            mtime = os.path.getmtime(local_path)
+                            size = os.path.getsize(local_path)
+                        except Exception:
+                            mtime, size = 0, 0
+                        all_files.append((rel, mtime, size))
+                all_files.sort(key=lambda t: t[1], reverse=True)
+                start = int(cursor or 0) if str(cursor or "").isdigit() else 0
+                slice_files = all_files[start:start + max(1, min(int(limit or 200), 5000))]
+                for rel, mtime, size in slice_files:
+                    name = os.path.basename(rel)
+                    items.append({
+                        "key": rel,
+                        "url": f"/static/{rel}",
+                        "name": name,
+                        "size": int(size),
+                        "last_modified": datetime.utcfromtimestamp(mtime).isoformat() if mtime else datetime.utcnow().isoformat(),
+                        "type": "edited",
+                    })
+                if (start + len(slice_files)) < len(all_files):
+                    next_token = str(start + len(slice_files))
+        except Exception as ex:
+            logger.exception(f"Local listing failed: {ex}")
+            return JSONResponse({"error": "List failed"}, status_code=500)
+
+    # Also include photos from plugins folder
+    plugin_prefix = f"users/{uid}/plugins/"
+    if s3 and R2_BUCKET:
+        try:
+            client = s3.meta.client
+            params = {"Bucket": R2_BUCKET, "Prefix": plugin_prefix, "MaxKeys": 500}
+            resp = client.list_objects_v2(**params)
+            for entry in resp.get("Contents", []) or []:
+                key = entry.get("Key", "")
+                if not key or key.endswith("/"):
+                    continue
+                if '_thumb_' in key:
+                    continue
+                name = os.path.basename(key)
+                url = _get_url_for_key(key, expires_in=60 * 60)
+                thumb_url = _get_thumbnail_url(key, expires_in=60 * 60)
+                items.append({
+                    "key": key,
+                    "url": url,
+                    "thumb_url": thumb_url,
+                    "name": name,
+                    "size": int(entry.get("Size", 0) or 0),
+                    "last_modified": (entry.get("LastModified") or datetime.utcnow()).isoformat(),
+                    "type": "plugin",
+                })
+        except Exception:
+            pass
+
+    # Sort by last_modified descending
+    items.sort(key=lambda x: x.get("last_modified", ""), reverse=True)
+
+    resp = {"photos": items}
+    if next_token:
+        resp["next"] = next_token
+    return resp

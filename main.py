@@ -381,6 +381,13 @@ if os.path.isdir(static_dir):
 app.include_router(images.router)
 app.include_router(photos.router)
 
+# Collections router (photo collections/albums)
+try:
+    from routers import collections  # noqa: E402
+    app.include_router(collections.router)
+except Exception as _ex:
+    logger.warning(f"collections router not available: {_ex}")
+
 # Thumbnails router (on-demand thumbnail generation)
 try:
     from routers import thumbnails  # noqa: E402

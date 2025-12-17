@@ -2833,29 +2833,6 @@ async def vaults_shared_approve(payload: ApprovalPayload):
         logger.warning(f"update approvals failed: {ex}")
         return JSONResponse({"error": "failed to save"}, status_code=500)
 
-    # Notify owner via email only for approvals (not denials)
-    try:
-        if action.startswith('approv'):
-            owner_email = (get_user_email_from_uid(uid) or "").strip()
-            if owner_email:
-                name = os.path.basename(photo_key)
-                client_display = client_name if client_name else client_email
-                subject = f"{client_display} approved a photo in '{vault}'"
-                intro = f"Client <strong>{client_display}</strong> <strong>approved</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
-                if comment:
-                    intro += f"<br>Comment: {comment}"
-                html = render_email(
-                    "email_basic.html",
-                    title="Photo approved by client",
-                    intro=intro,
-                    button_label="Open Gallery",
-                    button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
-                )
-                text = f"{client_email} approved the photo {name} in vault '{vault}'."
-                send_email_smtp(owner_email, subject, html, text)
-    except Exception:
-        pass
-
     # Return current status for this photo
     by_email = (data.get("by_photo", {}).get(photo_key, {}).get("by_email", {}))
     return {"ok": True, "photo": photo_key, "by_email": by_email}
@@ -2963,27 +2940,6 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
         logger.warning(f"retouch queue append failed: {ex}")
         return JSONResponse({"error": "failed to save"}, status_code=500)
 
-    # Notify owner via email (best-effort)
-    try:
-        owner_email = (get_user_email_from_uid(uid) or "").strip()
-        if owner_email:
-            name = os.path.basename(photo_key)
-            subject = f"{client_email or 'A client'} requested a retouch in '{vault}'"
-            intro = f"Client <strong>{client_email or 'unknown'}</strong> requested a <strong>retouch</strong> for photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
-            if comment:
-                intro += f"<br>Details: {comment}"
-            html = render_email(
-                "email_basic.html",
-                title="Retouch request received",
-                intro=intro,
-                button_label="Open Gallery",
-                button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
-            )
-            text = f"Retouch requested for {name} in vault '{vault}'. Comment: {comment}"
-            send_email_smtp(owner_email, subject, html, text)
-    except Exception:
-        pass
-
     return {"ok": True, "id": rid}
 
 
@@ -3059,27 +3015,91 @@ async def vaults_shared_favorite(payload: FavoritePayload):
     except Exception as ex:
         logger.warning(f"favorites vault update failed: {ex}")
 
-    # Notify owner via email (best-effort)
+    return {"ok": True, "photo": photo_key, "favorite": favorite}
+
+
+class ProofingCompletePayload(BaseModel):
+    token: str
+
+
+@router.post("/vaults/shared/notify-proofing-complete")
+async def vaults_shared_notify_proofing_complete(payload: ProofingCompletePayload):
+    """Client notifies photographer that proofing is complete."""
+    token = (payload.token or "").strip()
+    if not token:
+        return JSONResponse({"error": "token required"}, status_code=400)
+
+    rec = _read_json_key(_share_key(token))
+    if not rec:
+        return JSONResponse({"error": "invalid token"}, status_code=400)
+
+    # Expiry check
+    try:
+        exp = datetime.fromisoformat(str(rec.get('expires_at', '')))
+    except Exception:
+        exp = None
+    now = datetime.utcnow()
+    if exp and now > exp:
+        return JSONResponse({"error": "expired"}, status_code=410)
+
+    uid = rec.get('uid') or ''
+    vault = rec.get('vault') or ''
+    client_email = (rec.get('email') or '').lower()
+    client_name = rec.get('client_name') or ''
+    if not uid or not vault:
+        return JSONResponse({"error": "invalid share"}, status_code=400)
+
+    # Get approvals data to include summary in email
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        approvals_data = _read_json_key(_approval_key(uid, safe_vault)) or {}
+        by_photo = approvals_data.get("by_photo") or {}
+        
+        # Count approvals/denials for this client
+        approved_count = 0
+        denied_count = 0
+        for photo_key, photo_data in by_photo.items():
+            by_email = (photo_data or {}).get("by_email") or {}
+            client_status = by_email.get(client_email, {})
+            status = client_status.get("status", "").lower()
+            if status == "approved":
+                approved_count += 1
+            elif status == "denied":
+                denied_count += 1
+        
+        total_reviewed = approved_count + denied_count
+    except Exception:
+        approved_count = 0
+        denied_count = 0
+        total_reviewed = 0
+
+    # Send notification email to owner
     try:
         owner_email = (get_user_email_from_uid(uid) or "").strip()
-        if owner_email and favorite:
-            name = os.path.basename(photo_key)
+        if owner_email:
             client_display = client_name if client_name else client_email
-            subject = f"{client_display} favorited a photo in '{vault}'"
-            intro = f"Client <strong>{client_display}</strong> <strong>favorited</strong> the photo <strong>{name}</strong> in vault <strong>{vault}</strong>."
+            subject = f"{client_display} has finished proofing '{vault}'"
+            
+            summary = f"<strong>{approved_count}</strong> approved"
+            if denied_count > 0:
+                summary += f", <strong>{denied_count}</strong> need changes"
+            
+            intro = f"Client <strong>{client_display}</strong> has notified you that they have finished proofing the photos in vault <strong>{vault}</strong>.<br><br>Summary: {summary}"
+            
             html = render_email(
                 "email_basic.html",
-                title="Client favorited a photo",
+                title="Proofing Complete",
                 intro=intro,
-                button_label="Open Gallery",
+                button_label="Review Feedback",
                 button_url=(os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/") + "/#gallery",
             )
-            text = f"{client_email} favorited the photo {name} in vault '{vault}'."
+            text = f"{client_display} has finished proofing photos in vault '{vault}'. {approved_count} approved, {denied_count} need changes."
             send_email_smtp(owner_email, subject, html, text)
-    except Exception:
-        pass
+    except Exception as ex:
+        logger.warning(f"Failed to send proofing complete notification: {ex}")
+        return JSONResponse({"error": "Failed to send notification"}, status_code=500)
 
-    return {"ok": True, "photo": photo_key, "favorite": favorite}
+    return {"ok": True, "message": "Photographer notified"}
 
 
 @router.get("/vaults/approvals")
