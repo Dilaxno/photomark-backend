@@ -42,17 +42,16 @@ def _color_theme(theme: str | None, bg: str | None):
     return cs, bg_value, fg, border, card_bg, cap, shadow
 
 def _render_html(payload: dict, theme: str, bg: str | None, title: str):
-    """Render photos as scrollable masonry gallery - works in fixed-size iframes like Wix"""
+    """Render photos as Shopify-style collage/masonry gallery"""
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
     
-    # Build photo cards with high-quality image rendering
+    # Build photo cards - images will naturally vary in height
     photo_cards = ""
     for i, p in enumerate(photos):
         url = p.get("url", "")
         if url:
-            # Use high-quality image rendering attributes
-            photo_cards += f'<div class="c"><img src="{url}" alt="" loading="{"eager" if i < 12 else "lazy"}" decoding="async" fetchpriority="{"high" if i < 6 else "auto"}"/></div>\n'
+            photo_cards += f'<div class="item"><img src="{url}" alt="" loading="{"eager" if i < 8 else "lazy"}" decoding="async"/></div>\n'
     
     return f"""<!doctype html>
 <html>
@@ -63,106 +62,86 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
 <style>
 :root{{color-scheme:{cs}}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html{{
-    background:{bg_value};
-}}
-body{{
+html,body{{
     background:{bg_value};
     color:{fg};
     font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
-    /* Allow content to expand fully - no clipping */
-    overflow:visible;
-    min-height:auto;
+    overflow-x:hidden;
 }}
 
-/* Masonry grid using CSS columns */
-.g{{
+/* CSS Columns Masonry - like Shopify collage */
+.masonry{{
     column-count:2;
     column-gap:4px;
-    width:100%;
-    padding:0;
+    padding:4px;
 }}
-@media(min-width:400px){{.g{{column-count:3;column-gap:4px}}}}
-@media(min-width:700px){{.g{{column-count:4;column-gap:5px}}}}
-@media(min-width:1000px){{.g{{column-count:5;column-gap:5px}}}}
+@media(min-width:480px){{.masonry{{column-count:3;column-gap:5px;padding:5px}}}}
+@media(min-width:768px){{.masonry{{column-count:3;column-gap:6px;padding:6px}}}}
+@media(min-width:1024px){{.masonry{{column-count:4;column-gap:6px;padding:6px}}}}
 
-/* Photo card */
-.c{{
-    display:block;
-    width:100%;
-    margin:0 0 4px 0;
-    overflow:hidden;
-    background:#0a0a0a;
+/* Each photo item */
+.item{{
     break-inside:avoid;
+    margin-bottom:4px;
     position:relative;
+    overflow:hidden;
+    border-radius:2px;
     line-height:0;
 }}
-@media(min-width:700px){{.c{{margin-bottom:5px}}}}
+@media(min-width:480px){{.item{{margin-bottom:5px;border-radius:3px}}}}
+@media(min-width:768px){{.item{{margin-bottom:6px;border-radius:4px}}}}
 
-.c img{{
+.item img{{
     width:100%;
     height:auto;
     display:block;
-    /* Show full image - no cropping */
-    object-fit:contain;
-    transition:transform .3s ease,filter .3s ease;
-    backface-visibility:hidden;
-    /* High-quality image rendering */
-    image-rendering:-webkit-optimize-contrast;
-    image-rendering:crisp-edges;
+    object-fit:cover;
+    transition:transform .4s ease;
 }}
 
-.c:hover img{{
-    transform:scale(1.03);
-    filter:brightness(1.05);
+.item:hover img{{
+    transform:scale(1.05);
 }}
 
-/* Hover overlay */
-.c::after{{
+/* Subtle overlay on hover */
+.item::after{{
     content:'';
     position:absolute;
     inset:0;
-    background:linear-gradient(180deg,transparent 60%,rgba(0,0,0,.2) 100%);
-    opacity:0;
-    transition:opacity .25s;
+    background:rgba(0,0,0,0);
+    transition:background .3s ease;
     pointer-events:none;
 }}
-.c:hover::after{{opacity:1}}
+.item:hover::after{{
+    background:rgba(0,0,0,0.08);
+}}
 </style>
 </head>
 <body>
-<div class="g">{photo_cards}</div>
+<div class="masonry">{photo_cards}</div>
 <script>
 (function(){{
-    // Post height to parent for auto-resize iframes
     var lastH=0;
     function postHeight(){{
-        // Use scrollHeight of the grid container for accurate measurement
-        var grid=document.querySelector('.g');
-        var h=grid?grid.offsetHeight:document.body.scrollHeight;
-        // Add small buffer for padding
-        h=Math.ceil(h)+4;
+        var h=Math.max(document.body.scrollHeight,document.documentElement.scrollHeight);
         if(h!==lastH){{
             lastH=h;
             try{{window.parent.postMessage({{type:'pm-embed-height',height:h}},'*')}}catch(e){{}}
         }}
     }}
-    // Initial + on load
     postHeight();
     window.addEventListener('load',postHeight);
     window.addEventListener('resize',postHeight);
-    // After each image loads
     var imgs=document.querySelectorAll('img');
     var loaded=0;
     imgs.forEach(function(img){{
         if(img.complete){{loaded++;postHeight();}}
         else img.onload=function(){{loaded++;postHeight();}};
     }});
-    // Periodic check until all images loaded
     var check=setInterval(function(){{
         postHeight();
         if(loaded>=imgs.length)clearInterval(check);
-    }},200);
+    }},150);
 }})();
 </script>
 </body>
