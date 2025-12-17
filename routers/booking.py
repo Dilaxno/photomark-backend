@@ -1578,6 +1578,119 @@ async def get_form_analytics(request: Request, form_id: str):
         db.close()
 
 
+# ============ User Booking Analytics (Aggregated) ============
+
+@router.post("/analytics")
+async def save_booking_analytics(request: Request):
+    """Save aggregated booking analytics for a user to Neon DB"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
+    db: Session = next(get_db())
+    try:
+        # Check if analytics record exists for today
+        today = datetime.utcnow().date()
+        existing = db.execute(
+            text("""
+                SELECT id FROM booking_analytics 
+                WHERE uid = :uid AND date = :date
+            """),
+            {"uid": uid, "date": today}
+        ).fetchone()
+        
+        if existing:
+            # Update existing record
+            db.execute(
+                text("""
+                    UPDATE booking_analytics SET
+                        total_submissions = :total_submissions,
+                        conversion_rate = :conversion_rate,
+                        by_status = :by_status,
+                        by_form = :by_form,
+                        updated_at = NOW()
+                    WHERE uid = :uid AND date = :date
+                """),
+                {
+                    "uid": uid,
+                    "date": today,
+                    "total_submissions": body.get("total_submissions", 0),
+                    "conversion_rate": body.get("conversion_rate", 0),
+                    "by_status": json.dumps(body.get("by_status", {})),
+                    "by_form": json.dumps(body.get("by_form", {})),
+                }
+            )
+        else:
+            # Insert new record
+            db.execute(
+                text("""
+                    INSERT INTO booking_analytics (uid, date, total_submissions, conversion_rate, by_status, by_form, created_at, updated_at)
+                    VALUES (:uid, :date, :total_submissions, :conversion_rate, :by_status, :by_form, NOW(), NOW())
+                """),
+                {
+                    "uid": uid,
+                    "date": today,
+                    "total_submissions": body.get("total_submissions", 0),
+                    "conversion_rate": body.get("conversion_rate", 0),
+                    "by_status": json.dumps(body.get("by_status", {})),
+                    "by_form": json.dumps(body.get("by_form", {})),
+                }
+            )
+        
+        db.commit()
+        return {"success": True}
+    except Exception as e:
+        db.rollback()
+        print(f"[booking/analytics] Error saving analytics: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        db.close()
+
+
+@router.get("/analytics")
+async def get_booking_analytics(request: Request):
+    """Get booking analytics history for a user"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    days = int(request.query_params.get("days", "30"))
+    
+    db: Session = next(get_db())
+    try:
+        from datetime import timedelta
+        start_date = datetime.utcnow().date() - timedelta(days=days)
+        
+        results = db.execute(
+            text("""
+                SELECT date, total_submissions, conversion_rate, by_status, by_form
+                FROM booking_analytics 
+                WHERE uid = :uid AND date >= :start_date
+                ORDER BY date DESC
+            """),
+            {"uid": uid, "start_date": start_date}
+        ).fetchall()
+        
+        analytics = []
+        for row in results:
+            analytics.append({
+                "date": str(row.date),
+                "total_submissions": row.total_submissions,
+                "conversion_rate": row.conversion_rate,
+                "by_status": json.loads(row.by_status) if row.by_status else {},
+                "by_form": json.loads(row.by_form) if row.by_form else {},
+            })
+        
+        return {"analytics": analytics}
+    finally:
+        db.close()
+
+
 # ============ Mini Sessions (UseSession.com style) ============
 
 from models.booking import MiniSession, MiniSessionDate, MiniSessionSlot, Waitlist
