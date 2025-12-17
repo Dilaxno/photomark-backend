@@ -850,6 +850,7 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
         try:
             if sid:
                 cache_ctx = read_json_key(f"shops/cache/sessions/{sid}.json") or {}
+                logger.info(f"[pricing.webhook] shop sale: loaded cache by session_id={sid}, cache_ctx keys={list(cache_ctx.keys()) if cache_ctx else []}")
             if not cache_ctx:
                 link_url = ""
                 try:
@@ -863,10 +864,15 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
                     try:
                         code = link_url.rsplit("/", 1)[-1]
                         cache_ctx = read_json_key(f"shops/cache/links/{code}.json") or {}
+                        logger.info(f"[pricing.webhook] shop sale: loaded cache by link code={code}, cache_ctx keys={list(cache_ctx.keys()) if cache_ctx else []}")
                     except Exception:
                         pass
         except Exception:
             cache_ctx = {}
+
+        # Log metadata and cache for debugging cart_items
+        logger.info(f"[pricing.webhook] shop sale: meta keys={list(meta.keys()) if isinstance(meta, dict) else 'not dict'}, cache_ctx keys={list(cache_ctx.keys()) if cache_ctx else []}")
+        logger.info(f"[pricing.webhook] shop sale: meta.cart_items={len(meta.get('cart_items', [])) if isinstance(meta, dict) and isinstance(meta.get('cart_items'), list) else 'none'}, cache_ctx.cart_items={len(cache_ctx.get('cart_items', [])) if isinstance(cache_ctx.get('cart_items'), list) else 'none'}")
 
         if isinstance(meta, dict):
             shop_slug = str((meta.get("shop_slug") or meta.get("slug") or "" or cache_ctx.get("shop_slug") or "")).strip()
@@ -883,6 +889,8 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             shop_slug = str((qp.get("shop_slug") or qp.get("shop") or "")).strip()
         if not owner_uid_ctx and isinstance(qp, dict):
             owner_uid_ctx = str((qp.get("owner_uid") or qp.get("uid") or "")).strip()
+        
+        logger.info(f"[pricing.webhook] shop sale: final cart_items_ctx count={len(cart_items_ctx) if isinstance(cart_items_ctx, list) else 'not list'}")
 
         # Only process for completed payment events with shop context
         if (evt_type in {"payment.succeeded", "checkout.completed", "payment.completed"}) and (shop_slug or owner_uid_ctx) and (cart_items_ctx or meta.get("cart_total_cents") or cache_ctx.get("cart_total_cents")):
@@ -939,6 +947,13 @@ async def pricing_webhook(request: Request, db: Session = Depends(get_db)):
             sale_id = payment_id or uuid.uuid4().hex
             try:
                 items_payload = cart_items_ctx if isinstance(cart_items_ctx, list) else []
+                
+                # Log warning if items are empty - this helps debug why top selling products shows 0
+                if not items_payload:
+                    logger.warning(f"[pricing.webhook] shop sale: items_payload is EMPTY! sid={sid}, shop_slug={shop_slug}, meta has cart_items={isinstance(meta, dict) and 'cart_items' in meta}, cache_ctx has cart_items={'cart_items' in cache_ctx if cache_ctx else False}")
+                else:
+                    logger.info(f"[pricing.webhook] shop sale: items_payload has {len(items_payload)} items, first item id={items_payload[0].get('id') if items_payload else 'none'}")
+                
                 customer_email = ""
                 try:
                     customer_email = (_first_email_from_payload(event_obj or {}) or _first_email_from_payload(payload or {}) or str((meta.get("email") or "")).strip()).lower()

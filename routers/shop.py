@@ -349,17 +349,38 @@ async def resolve_domain(hostname: str, db: Session = Depends(get_db)):
     if not inbound:
         raise HTTPException(status_code=400, detail="Invalid hostname")
     try:
-        from sqlalchemy import cast, String
-        shop = db.query(Shop).filter(cast(Shop.domain['hostname'], String) == inbound).first()
+        # Use astext to extract the JSON string value without quotes
+        # Try exact match first
+        shop = db.query(Shop).filter(Shop.domain['hostname'].astext == inbound).first()
+        
+        # Fallback: case-insensitive match using func.lower
+        if not shop:
+            shop = db.query(Shop).filter(
+                func.lower(Shop.domain['hostname'].astext) == inbound
+            ).first()
+        
         if not shop:
             raise HTTPException(status_code=404, detail="No shop bound to this domain")
-        enabled = bool((shop.domain or {}).get('enabled') or False)
+        
+        # For custom domains, if the shop is published and domain is configured,
+        # treat it as enabled even if the enabled flag wasn't explicitly set
+        domain_data = shop.domain or {}
+        enabled = bool(domain_data.get('enabled') or False)
         published = bool(shop.published) if hasattr(shop, 'published') else True
+        
+        # Auto-enable if published and domain is verified
+        dns_verified = bool(domain_data.get('dnsVerified') or False)
+        ssl_active = str(domain_data.get('sslStatus') or '').lower() == 'active'
+        
+        # If shop is published and DNS is verified, consider it enabled for resolution
+        # This allows shops to work even if user forgot to click "enable"
+        effective_enabled = enabled or (published and dns_verified)
+        
         return {
             "slug": (shop.slug or "").strip(),
             "uid": shop.uid,
-            "domain": (shop.domain or {}),
-            "enabled": enabled,
+            "domain": domain_data,
+            "enabled": effective_enabled,
             "published": published,
         }
     except HTTPException:
@@ -1316,6 +1337,43 @@ async def get_shop_sales(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch sales: {str(e)}")
+
+@router.post('/sales/backfill-items')
+async def backfill_sale_items(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Backfill items from metadata for sales that have empty items arrays.
+    This fixes the "Top Selling Products" showing 0 sales issue.
+    """
+    eff_uid, _ = resolve_workspace_uid(request)
+    if not eff_uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        # Get all sales for this user that have empty items
+        rows = db.query(ShopSale).filter(
+            or_(ShopSale.owner_uid == eff_uid, ShopSale.shop_uid == eff_uid)
+        ).all()
+        
+        updated_count = 0
+        for sale in rows:
+            # Check if items is empty but metadata has cart_items
+            current_items = sale.items if isinstance(sale.items, list) else []
+            if len(current_items) == 0:
+                meta = sale.sale_metadata if isinstance(sale.sale_metadata, dict) else {}
+                cart_items = meta.get("cart_items") or []
+                if isinstance(cart_items, list) and len(cart_items) > 0:
+                    sale.items = cart_items
+                    updated_count += 1
+        
+        if updated_count > 0:
+            db.commit()
+        
+        return {"ok": True, "updated": updated_count, "total_checked": len(rows)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to backfill items: {str(e)}")
 
 @router.post('/traffic/visit')
 async def track_shop_visit(
