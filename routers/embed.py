@@ -9,6 +9,11 @@ from typing import Tuple
 
 router = APIRouter(prefix="/embed", tags=["embed"])
 
+
+def _get_original_url(key: str, expires_in: int = 3600) -> str:
+    """Get the original full-quality URL for embed display."""
+    return get_presigned_url(key, expires_in=expires_in) or ""
+
 def _html_page(content: str) -> HTMLResponse:
     return HTMLResponse(content=content, media_type="text/html; charset=utf-8")
 
@@ -41,12 +46,13 @@ def _render_html(payload: dict, theme: str, bg: str | None, title: str):
     cs, bg_value, fg, border, card_bg, cap, shadow = _color_theme(theme, bg)
     photos = payload.get("photos", [])
     
-    # Build photo cards
+    # Build photo cards with high-quality image rendering
     photo_cards = ""
     for i, p in enumerate(photos):
         url = p.get("url", "")
         if url:
-            photo_cards += f'<div class="c"><img src="{url}" alt="" loading="{"eager" if i < 12 else "lazy"}" decoding="async"/></div>\n'
+            # Use high-quality image rendering attributes
+            photo_cards += f'<div class="c"><img src="{url}" alt="" loading="{"eager" if i < 12 else "lazy"}" decoding="async" fetchpriority="{"high" if i < 6 else "auto"}"/></div>\n'
     
     return f"""<!doctype html>
 <html>
@@ -96,6 +102,9 @@ body{{
     display:block;
     transition:transform .3s ease,filter .3s ease;
     backface-visibility:hidden;
+    /* High-quality image rendering */
+    image-rendering:-webkit-optimize-contrast;
+    image-rendering:crisp-edges;
 }}
 
 .c:hover img{{
@@ -162,8 +171,49 @@ def embed_gallery(
     bg: str | None = Query(None, min_length=1, max_length=64),
     keys: str | None = Query(None, min_length=1),
 ):
-    data = _build_manifest(uid)
-    photos_all = data.get("photos") or []
+    # Build gallery photos with better quality URLs
+    items: list[dict] = []
+    prefix = f"users/{uid}/watermarked/"
+    if s3 and R2_BUCKET:
+        try:
+            bucket = s3.Bucket(R2_BUCKET)
+            for obj in bucket.objects.filter(Prefix=prefix):
+                key = obj.key
+                if key.endswith("/_history.txt") or key.endswith("/"):
+                    continue
+                # Skip thumbnail files
+                if "_thumb_small" in key or "_thumb_medium" in key:
+                    continue
+                last = getattr(obj, "last_modified", datetime.utcnow())
+                # Use original full-quality image
+                url = _get_original_url(key, expires_in=60 * 60)
+                items.append({
+                    "key": key,
+                    "url": url,
+                    "name": os.path.basename(key),
+                    "last": last.isoformat() if hasattr(last, "isoformat") else str(last),
+                })
+        except:
+            items = []
+    else:
+        dir_path = os.path.join(static_dir, prefix)
+        if os.path.isdir(dir_path):
+            for root, _, files in os.walk(dir_path):
+                for f in files:
+                    if f == "_history.txt" or "_thumb_small" in f or "_thumb_medium" in f:
+                        continue
+                    local_path = os.path.join(root, f)
+                    rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
+                    items.append({
+                        "key": rel,
+                        "url": f"/static/{rel}",
+                        "name": f,
+                        "last": datetime.utcfromtimestamp(os.path.getmtime(local_path)).isoformat(),
+                    })
+    
+    items.sort(key=lambda x: x.get("last", ""), reverse=True)
+    photos_all = [{"url": it["url"], "name": it["name"], "key": it["key"]} for it in items]
+    
     if keys and keys.strip():
         desired = [k.strip() for k in keys.split(',') if k.strip()]
         lookup = {p.get("key"): p for p in photos_all}
@@ -201,8 +251,12 @@ def embed_myuploads(
                 for entry in resp.get("Contents", []) or []:
                     key = entry.get("Key", "")
                     if not key or key.endswith("/"): continue
+                    # Skip thumbnail files
+                    if "_thumb_small" in key or "_thumb_medium" in key:
+                        continue
                     name = os.path.basename(key)
-                    url = get_presigned_url(key, expires_in=60 * 60) or ""
+                    # Use original full-quality image
+                    url = _get_original_url(key, expires_in=60 * 60)
                     items.append({"key": key, "url": url, "name": name, "last": (entry.get("LastModified") or datetime.utcnow()).isoformat()})
                 if resp.get("IsTruncated"):
                     continuation = resp.get("NextContinuationToken")
@@ -215,6 +269,9 @@ def embed_myuploads(
         if os.path.isdir(dir_path):
             for root, _, files in os.walk(dir_path):
                 for f in files:
+                    # Skip thumbnail files
+                    if "_thumb_small" in f or "_thumb_medium" in f:
+                        continue
                     local_path = os.path.join(root, f)
                     rel = os.path.relpath(local_path, static_dir).replace("\\", "/")
                     items.append({
@@ -228,7 +285,7 @@ def embed_myuploads(
     if keys and keys.strip():
         desired = [k.strip() for k in keys.split(',') if k.strip()]
         lookup = {p.get("key"): p for p in photos_all}
-        photos = [lookup[k] for k in desired if k in lookup]  # ✅ correctly indented
+        photos = [lookup[k] for k in desired if k in lookup]
     else:
         if limit.lower() == "all":
             photos = photos_all
@@ -301,7 +358,11 @@ def embed_vault(
             try:
                 if key.lower().endswith('.json'):
                     continue
-                url = _get_url_for_key(key, expires_in=60 * 60)
+                # Skip thumbnail files
+                if "_thumb_small" in key or "_thumb_medium" in key:
+                    continue
+                # Use original full-quality image
+                url = _get_original_url(key, expires_in=60 * 60)
                 name = os.path.basename(key)
                 items.append({"key": key, "url": url, "name": name})
             except Exception:

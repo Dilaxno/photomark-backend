@@ -1,15 +1,16 @@
 """
 Thumbnail generation utilities for optimized image loading.
-Generates small thumbnails (300px) for grid views and medium thumbnails (800px) for previews.
+Generates small thumbnails (600px) for grid views and medium thumbnails (1200px) for previews.
+Higher resolution for retina/HiDPI displays.
 """
 import io
 from PIL import Image
 from typing import Optional, Tuple
 from core.config import logger
 
-# Thumbnail sizes
-THUMB_SMALL = 300   # For grid views
-THUMB_MEDIUM = 800  # For previews/lightbox
+# Thumbnail sizes - doubled for retina/HiDPI displays
+THUMB_SMALL = 600   # For grid views (2x for 300px display)
+THUMB_MEDIUM = 1200  # For previews/lightbox (2x for 600px display)
 
 def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: int = 80) -> Optional[bytes]:
     """
@@ -63,7 +64,7 @@ def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: 
 
 def generate_thumbnails(image_data: bytes) -> Tuple[Optional[bytes], Optional[bytes]]:
     """
-    Generate both small and medium thumbnails.
+    Generate both small and medium thumbnails with high quality.
     
     Args:
         image_data: Original image bytes
@@ -71,8 +72,8 @@ def generate_thumbnails(image_data: bytes) -> Tuple[Optional[bytes], Optional[by
     Returns:
         Tuple of (small_thumb_bytes, medium_thumb_bytes)
     """
-    small = generate_thumbnail(image_data, THUMB_SMALL, quality=75)
-    medium = generate_thumbnail(image_data, THUMB_MEDIUM, quality=85)
+    small = generate_thumbnail(image_data, THUMB_SMALL, quality=90)
+    medium = generate_thumbnail(image_data, THUMB_MEDIUM, quality=92)
     return small, medium
 
 
