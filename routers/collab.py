@@ -25,9 +25,10 @@ ALLOWED_ROLES = {
     "Editor/Retoucher",
     "General Admin",
     "gallery manager",
-    "Website Manager",
     "Booking Manager",
 }
+
+MAX_COLLABORATORS = 5  # Maximum collaborators per owner
 
 COLLAB_JWT_SECRET = (os.getenv("COLLAB_JWT_SECRET", "") or os.getenv("SECRET_KEY", "")).strip()
 COLLAB_JWT_ISSUER = os.getenv("COLLAB_JWT_ISSUER", "photomark.collab")
@@ -54,6 +55,13 @@ async def collab_invite(
         return JSONResponse({"error": "Valid email required"}, status_code=400)
     if ro not in ALLOWED_ROLES:
         return JSONResponse({"error": "Invalid role"}, status_code=400)
+
+    # Check collaborator limit (only count distinct collaborators, not updates)
+    existing_collab = db.query(Collaborator).filter(Collaborator.email == em, Collaborator.owner_uid == uid).first()
+    if not existing_collab:
+        current_count = db.query(Collaborator).filter(Collaborator.owner_uid == uid).count()
+        if current_count >= MAX_COLLABORATORS:
+            return JSONResponse({"error": f"Maximum of {MAX_COLLABORATORS} collaborators allowed. Remove an existing collaborator to add a new one."}, status_code=400)
 
     try:
         raw_pw = uuid4().hex[:12]

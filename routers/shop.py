@@ -306,6 +306,10 @@ async def get_shop_by_slug(slug: str, request: Request, db: Session = Depends(ge
         if not key:
             raise HTTPException(status_code=400, detail="Invalid slug")
 
+        # Check if slug is reserved - always return 404 for reserved slugs
+        if key.lower() in RESERVED_SLUGS:
+            raise HTTPException(status_code=404, detail="Shop not found")
+
         # Preferred: look up UID from slug mapping
         slug_mapping = db.query(ShopSlug).filter(ShopSlug.slug == key).first()
         shop = None
@@ -769,6 +773,19 @@ async def request_payout(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Reserved slugs that cannot be used by any user
+RESERVED_SLUGS = {
+    'my-shop', 'myshop', 'my_shop',
+    'admin', 'api', 'shop', 'shops',
+    'public', 'private', 'settings',
+    'dashboard', 'account', 'profile',
+    'login', 'logout', 'signup', 'register',
+    'help', 'support', 'contact', 'about',
+    'terms', 'privacy', 'legal',
+    'photomark', 'demo', 'test', 'example',
+}
+
+
 @router.post('/slug')
 async def update_slug_mapping(
     request: Request,
@@ -783,6 +800,13 @@ async def update_slug_mapping(
     slug = payload.get('slug')
     if not slug:
         raise HTTPException(status_code=400, detail="Slug is required")
+    
+    # Normalize slug for comparison
+    slug_lower = slug.lower().strip()
+    
+    # Check if slug is reserved
+    if slug_lower in RESERVED_SLUGS:
+        raise HTTPException(status_code=400, detail=f"The slug '{slug}' is reserved and cannot be used")
     
     try:
         # Check if slug is already taken by another user
