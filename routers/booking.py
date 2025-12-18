@@ -19,7 +19,13 @@ from core.auth import get_uid_from_request
 from core.database import get_db
 from models.booking import (
     Client, Booking, BookingPayment, SessionPackage, BookingSettings,
-    BookingStatus, PaymentStatus, SessionType, FormView
+    BookingStatus, PaymentStatus, SessionType, FormView, BookingForm, FormSubmission,
+    MiniSession, MiniSessionDate, MiniSessionSlot, Waitlist,
+    FIELD_TYPES, DISPLAY_ONLY_FIELDS, FIELDS_WITH_OPTIONS
+)
+from utils.form_validation import (
+    validate_form_submission, validate_email_comprehensive,
+    detect_gibberish_email, verify_email_domain, generate_submission_hash
 )
 
 router = APIRouter(prefix="/api/booking", tags=["booking"])
@@ -1069,33 +1075,33 @@ class EmailVerifyRequest(BaseModel):
     email: str
     verify_domain: bool = False
     detect_gibberish: bool = False
+    professional_only: bool = False
+    block_role_emails: bool = False
 
 
 @router.post("/public/verify-email")
 async def verify_email(data: EmailVerifyRequest):
-    """Verify an email address (public endpoint for form validation)"""
-    import re
-    
+    """
+    Verify an email address (public endpoint for form validation)
+    Enhanced with CleanEnroll-style validation options
+    """
     email = data.email.strip().lower()
     
-    # Basic format validation
-    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-        return {"valid": False, "error": "Please enter a valid email address"}
+    # Use comprehensive validation from utils
+    is_valid, error = validate_email_comprehensive(
+        email=email,
+        verify_domain=data.verify_domain,
+        detect_gibberish=data.detect_gibberish,
+        professional_only=data.professional_only,
+        block_role_emails=data.block_role_emails
+    )
     
-    # Gibberish detection
-    if data.detect_gibberish:
-        is_gibberish, gibberish_msg = _detect_gibberish_email(email)
-        if is_gibberish:
-            return {"valid": False, "error": gibberish_msg}
-    
-    # DNS/MX verification
-    if data.verify_domain:
-        is_valid, verify_msg = _verify_email_domain(email)
-        if not is_valid:
-            return {"valid": False, "error": verify_msg}
+    if not is_valid:
+        return {"valid": False, "error": error}
     
     return {"valid": True}
 
+# ============ Public Form Endpoints (for embed) ============
 
 # ============ Public Form Endpoints (for embed) ============
 
@@ -1173,85 +1179,18 @@ async def get_public_form(slug: str, request: Request):
         db.close()
 
 
-def _verify_email_domain(email: str) -> tuple[bool, str]:
-    """Verify email domain has valid MX records"""
-    import dns.resolver
-    try:
-        domain = email.split('@')[1]
-        # Check MX records
-        try:
-            mx_records = dns.resolver.resolve(domain, 'MX')
-            if mx_records:
-                return True, ""
-        except dns.resolver.NoAnswer:
-            pass
-        except dns.resolver.NXDOMAIN:
-            return False, f"The domain '{domain}' does not exist"
-        except Exception:
-            pass
-        
-        # Fallback: check A record
-        try:
-            a_records = dns.resolver.resolve(domain, 'A')
-            if a_records:
-                return True, ""
-        except:
-            pass
-        
-        return False, f"The domain '{domain}' cannot receive emails"
-    except Exception as e:
-        logger.warning(f"Email domain verification failed: {e}")
-        return True, ""  # Allow on error to not block legitimate users
-
-
-def _detect_gibberish_email(email: str) -> tuple[bool, str]:
-    """Detect gibberish/random email addresses"""
-    import re
-    
-    local_part = email.split('@')[0].lower()
-    
-    # Remove common separators for analysis
-    clean_local = re.sub(r'[._\-+]', '', local_part)
-    
-    if len(clean_local) < 2:
-        return True, "Email address is too short"
-    
-    # Check for excessive consonant clusters (more than 4 consonants in a row)
-    consonant_pattern = r'[bcdfghjklmnpqrstvwxyz]{5,}'
-    if re.search(consonant_pattern, clean_local):
-        return True, "Email address appears to contain random characters"
-    
-    # Check for keyboard patterns
-    keyboard_patterns = ['qwerty', 'asdf', 'zxcv', 'qazwsx', 'wasd', 'hjkl', 'uiop']
-    for pattern in keyboard_patterns:
-        if pattern in clean_local:
-            return True, "Email address appears to be a keyboard pattern"
-    
-    # Check for repeated characters (more than 3 of the same)
-    if re.search(r'(.)\1{3,}', clean_local):
-        return True, "Email address contains too many repeated characters"
-    
-    # Check for too many numbers in a row (more than 6)
-    if re.search(r'\d{7,}', clean_local):
-        return True, "Email address contains too many consecutive numbers"
-    
-    # Check vowel ratio - gibberish often has very few vowels
-    vowels = sum(1 for c in clean_local if c in 'aeiou')
-    if len(clean_local) > 5 and vowels / len(clean_local) < 0.1:
-        return True, "Email address appears to contain random characters"
-    
-    # Check for common test/fake patterns
-    fake_patterns = ['test123', 'fake', 'noreply', 'spam', 'trash', 'temp', 'disposable']
-    for pattern in fake_patterns:
-        if pattern in clean_local:
-            return True, "Please use a real email address"
-    
-    return False, ""
-
-
 @router.post("/public/form/{slug}/submit")
 async def submit_public_form(request: Request, slug: str, data: dict = Body(...)):
-    """Submit a form (public, no auth required)"""
+    """
+    Submit a form (public, no auth required)
+    Enhanced with CleanEnroll-style validation:
+    - Email validation (format, MX, gibberish, professional-only, role-based)
+    - Bot protection (honeypot, time-based checks)
+    - Spam scoring
+    - Duplicate prevention
+    - Geo restrictions
+    - Field-level validation
+    """
     db: Session = next(get_db())
     try:
         form = db.query(BookingForm).filter(
@@ -1263,32 +1202,63 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
         if not form:
             return JSONResponse({"error": "Form not found"}, status_code=404)
         
-        # Validate email fields with verification settings
-        for field in form.fields or []:
-            field_id = field.get("id")
-            field_type = field.get("type")
-            field_settings = field.get("settings", {})
-            value = data.get(field_id)
+        # Get request metadata
+        ip_address = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
+        if ip_address and "," in ip_address:
+            ip_address = ip_address.split(",")[0].strip()
+        user_agent = request.headers.get("user-agent")
+        referrer = request.headers.get("referer")
+        
+        # Get country code from header (set by CDN/proxy) or geo lookup
+        country_code = request.headers.get("cf-ipcountry") or request.headers.get("x-country-code")
+        
+        # Parse form load time from submission data (for bot detection)
+        form_load_time = None
+        if data.get("_form_load_time"):
+            try:
+                form_load_time = datetime.fromisoformat(data.get("_form_load_time").replace('Z', '+00:00'))
+            except:
+                pass
+        
+        # Run comprehensive validation
+        is_valid, errors, validation_metadata = validate_form_submission(
+            form=form,
+            data=data,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            country_code=country_code,
+            form_load_time=form_load_time
+        )
+        
+        if not is_valid:
+            return JSONResponse({"error": errors[0] if errors else "Validation failed", "errors": errors}, status_code=400)
+        
+        # Check for duplicate submissions (if enabled)
+        if form.prevent_duplicate_email or form.prevent_duplicate_by_ip:
+            # Find email in submission
+            submission_email = None
+            for field in form.fields or []:
+                if field.get("type") == "email":
+                    submission_email = data.get(field.get("id"))
+                    break
             
-            if field_type == "email" and value:
-                email = str(value).strip().lower()
-                
-                # Basic email format validation
-                import re
-                if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-                    return JSONResponse({"error": "Please enter a valid email address"}, status_code=400)
-                
-                # Gibberish detection
-                if field_settings.get("detectGibberish"):
-                    is_gibberish, gibberish_msg = _detect_gibberish_email(email)
-                    if is_gibberish:
-                        return JSONResponse({"error": gibberish_msg}, status_code=400)
-                
-                # DNS/MX verification
-                if field_settings.get("verifyEmail"):
-                    is_valid, verify_msg = _verify_email_domain(email)
-                    if not is_valid:
-                        return JSONResponse({"error": verify_msg}, status_code=400)
+            window_hours = form.duplicate_window_hours or 24
+            window_start = datetime.utcnow() - timedelta(hours=window_hours)
+            
+            duplicate_query = db.query(FormSubmission).filter(
+                FormSubmission.form_id == form.id,
+                FormSubmission.created_at >= window_start
+            )
+            
+            if form.prevent_duplicate_email and submission_email:
+                existing = duplicate_query.filter(FormSubmission.contact_email == submission_email.lower()).first()
+                if existing:
+                    return JSONResponse({"error": "You have already submitted this form"}, status_code=400)
+            
+            if form.prevent_duplicate_by_ip and ip_address:
+                existing = duplicate_query.filter(FormSubmission.ip_address == ip_address).first()
+                if existing:
+                    return JSONResponse({"error": "A submission from your location already exists"}, status_code=400)
         
         # Extract contact info from submission
         contact_name = None
@@ -1302,22 +1272,20 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
             field_type = field.get("type")
             value = data.get(field_id)
             
-            if field_type in ["name", "full_name"] and value:
+            if field_type in ["full-name", "name", "full_name"] and value:
                 contact_name = str(value)
             elif field_type == "email" and value:
-                contact_email = str(value)
+                contact_email = str(value).lower().strip()
             elif field_type == "phone" and value:
                 contact_phone = str(value)
-            elif field_type == "calendar" and value:
-                scheduled_date = _parse_datetime(value.get("start") if isinstance(value, dict) else value)
-                if isinstance(value, dict) and value.get("end"):
+            elif field_type in ["date", "time", "calendar"] and value:
+                if isinstance(value, dict):
+                    scheduled_date = _parse_datetime(value.get("start") or value.get("date"))
                     scheduled_end = _parse_datetime(value.get("end"))
+                else:
+                    scheduled_date = _parse_datetime(str(value))
         
-        # Get request metadata
-        ip_address = request.headers.get("x-forwarded-for", request.client.host if request.client else None)
-        user_agent = request.headers.get("user-agent")
-        referrer = request.headers.get("referer")
-        
+        # Create submission with enhanced metadata
         submission = FormSubmission(
             uid=form.uid,
             form_id=form.id,
@@ -1329,14 +1297,30 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
             scheduled_end=scheduled_end,
             ip_address=ip_address,
             user_agent=user_agent,
-            referrer=referrer
+            referrer=referrer,
+            country_code=country_code,
+            spam_score=validation_metadata.get("spam_score", 0.0),
+            is_spam=validation_metadata.get("is_spam", False),
+            time_to_complete_seconds=validation_metadata.get("time_to_complete"),
+            validation_errors=validation_metadata.get("validation_errors", [])
         )
         db.add(submission)
         
-        # Create or find client record if we have contact info
+        # If marked as spam, save but don't process further
+        if validation_metadata.get("is_spam"):
+            form.submissions_count = (form.submissions_count or 0) + 1
+            db.commit()
+            db.refresh(submission)
+            return {
+                "ok": True,
+                "submission_id": str(submission.id),
+                "success_message": form.success_message,
+                "redirect_url": form.redirect_url if form.redirect_enabled else None
+            }
+        
+        # Create or find client record
         client_id = None
         if contact_name or contact_email:
-            # Check if client already exists by email
             existing_client = None
             if contact_email:
                 existing_client = db.query(Client).filter(
@@ -1346,13 +1330,11 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
             
             if existing_client:
                 client_id = existing_client.id
-                # Update client info if we have new data
                 if contact_name and not existing_client.name:
                     existing_client.name = contact_name
                 if contact_phone and not existing_client.phone:
                     existing_client.phone = contact_phone
             else:
-                # Create new client
                 new_client = Client(
                     uid=form.uid,
                     name=contact_name or "Unknown",
@@ -1365,24 +1347,20 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
                 db.flush()
                 client_id = new_client.id
         
-        # Create booking if there's a scheduled date
+        # Create booking if scheduled
         booking_id = None
         if scheduled_date:
-            # Extract additional info from form data for booking
-            budget = None
             notes_parts = []
-            
             for field in form.fields or []:
-                field_id = field.get("id")
-                field_type = field.get("type")
-                field_label = field.get("label", "")
-                value = data.get(field_id)
-                
-                if value and field_type == "budget":
-                    budget = str(value)
-                elif value and field_type not in ["name", "email", "phone", "calendar", "datetime"]:
-                    # Add other field values to notes
-                    notes_parts.append(f"{field_label}: {value}")
+                fid = field.get("id")
+                ftype = field.get("type")
+                flabel = field.get("label", "")
+                fval = data.get(fid)
+                if fval and ftype not in ["full-name", "name", "email", "phone", "date", "time", "calendar"]:
+                    if isinstance(fval, list):
+                        notes_parts.append(f"{flabel}: {', '.join(str(v) for v in fval)}")
+                    else:
+                        notes_parts.append(f"{flabel}: {fval}")
             
             booking = Booking(
                 uid=form.uid,
@@ -1402,9 +1380,7 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
             booking_id = booking.id
             submission.booking_id = booking_id
         
-        # Update form stats
         form.submissions_count = (form.submissions_count or 0) + 1
-        
         db.commit()
         db.refresh(submission)
         
@@ -1414,11 +1390,10 @@ async def submit_public_form(request: Request, slug: str, data: dict = Body(...)
             "client_id": str(client_id) if client_id else None,
             "booking_id": str(booking_id) if booking_id else None,
             "success_message": form.success_message,
-            "redirect_url": form.redirect_url
+            "redirect_url": form.redirect_url if form.redirect_enabled else None
         }
     finally:
         db.close()
-
 
 # ============ Form Submissions ============
 

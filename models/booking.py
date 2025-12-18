@@ -1,6 +1,7 @@
 """
 Booking System Models
 Full booking/CRM system for photographers - stores clients, bookings, sessions, invoices
+Enhanced with CleanEnroll-style form builder field types and validations
 """
 from datetime import datetime
 from typing import Optional, List
@@ -43,6 +44,41 @@ class SessionType(str, enum.Enum):
     OTHER = "other"
 
 
+# ============================================================================
+# FIELD TYPES - Matching CleanEnroll's comprehensive field type system
+# ============================================================================
+
+# All supported field types for booking forms
+FIELD_TYPES = [
+    # Headings (display only)
+    "heading1", "heading2", "heading3",
+    # Basic Information
+    "full-name", "email", "phone", "country", "address", "age",
+    # Text & Input
+    "text", "textarea", "long-answer", "password", "signature",
+    # Choice & Selection
+    "yes-no", "dropdown", "multiple", "checkbox", "tags", "color-picker", "ranking", "quiz",
+    # Date & Time
+    "date", "time",
+    # Rating & Scale
+    "linear-scale", "rating-stars", "rating-heart", "rating-number", "rating-emoji", "range-slider", "matrix",
+    # Numeric & Quantitative
+    "number", "price", "payment", "dimensions",
+    # Upload & Recording
+    "file", "video-recording", "audio-recording",
+    # Media Displays (non-input)
+    "image", "video", "audio",
+    # Link & Location
+    "url", "location", "my-location",
+]
+
+# Field types that don't collect input (display only)
+DISPLAY_ONLY_FIELDS = ["heading1", "heading2", "heading3", "image", "video", "audio"]
+
+# Field types that require options array
+FIELDS_WITH_OPTIONS = ["dropdown", "multiple", "checkbox", "tags", "ranking", "quiz"]
+
+
 class Client(Base):
     """Client/Contact record"""
     __tablename__ = "booking_clients"
@@ -54,7 +90,7 @@ class Client(Base):
     name = Column(String(255), nullable=False)
     email = Column(String(255), nullable=True, index=True)
     phone = Column(String(50), nullable=True)
-    
+
     # Additional details
     company = Column(String(255), nullable=True)
     address = Column(Text, nullable=True)
@@ -68,7 +104,7 @@ class Client(Base):
     tags = Column(JSON, default=list)  # ["vip", "repeat", "referral"]
     
     # Source tracking
-    source = Column(String(100), nullable=True)  # "website", "referral", "instagram", etc.
+    source = Column(String(100), nullable=True)
     referral_source = Column(String(255), nullable=True)
     
     # Avatar/photo
@@ -118,7 +154,7 @@ class SessionPackage(Base):
     price = Column(Float, default=0.0)
     currency = Column(String(3), default="USD")
     deposit_amount = Column(Float, default=0.0)
-    deposit_percentage = Column(Float, nullable=True)  # Alternative: percentage of total
+    deposit_percentage = Column(Float, nullable=True)
     
     # Duration
     duration_minutes = Column(Integer, default=60)
@@ -126,11 +162,11 @@ class SessionPackage(Base):
     # Deliverables
     included_photos = Column(Integer, nullable=True)
     included_hours = Column(Float, nullable=True)
-    deliverables = Column(JSON, default=list)  # ["20 edited photos", "Online gallery", "Print release"]
+    deliverables = Column(JSON, default=list)
     
     # Settings
     is_active = Column(Boolean, default=True)
-    color = Column(String(7), nullable=True)  # Hex color for UI
+    color = Column(String(7), nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -166,7 +202,7 @@ class Booking(Base):
     client_id = Column(UUID(as_uuid=True), ForeignKey("booking_clients.id", ondelete="SET NULL"), nullable=True)
     client = relationship("Client", back_populates="bookings")
     
-    # Quick client info (denormalized for display)
+    # Quick client info (denormalized)
     client_name = Column(String(255), nullable=True)
     client_email = Column(String(255), nullable=True)
     client_phone = Column(String(50), nullable=True)
@@ -201,7 +237,7 @@ class Booking(Base):
     
     # Notes
     notes = Column(Text, nullable=True)
-    internal_notes = Column(Text, nullable=True)  # Private notes not shown to client
+    internal_notes = Column(Text, nullable=True)
     
     # Questionnaire responses
     questionnaire_data = Column(JSON, default=dict)
@@ -210,7 +246,7 @@ class Booking(Base):
     contract_signed = Column(Boolean, default=False)
     contract_signed_at = Column(DateTime, nullable=True)
     contract_id = Column(UUID(as_uuid=True), nullable=True)
-    
+
     # Reminders
     reminder_sent = Column(Boolean, default=False)
     reminder_sent_at = Column(DateTime, nullable=True)
@@ -266,26 +302,16 @@ class BookingPayment(Base):
     uid = Column(String(128), nullable=False, index=True)
     booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False)
     
-    # Payment details
     amount = Column(Float, nullable=False)
     currency = Column(String(3), default="USD")
-    payment_type = Column(String(50), default="payment")  # "deposit", "payment", "final", "refund"
-    payment_method = Column(String(50), nullable=True)  # "card", "cash", "check", "venmo", "paypal"
-    
-    # Status
-    status = Column(String(50), default="completed")  # "pending", "completed", "failed", "refunded"
-    
-    # External reference
-    external_id = Column(String(255), nullable=True)  # Stripe/PayPal transaction ID
-    
-    # Notes
+    payment_type = Column(String(50), default="payment")
+    payment_method = Column(String(50), nullable=True)
+    status = Column(String(50), default="completed")
+    external_id = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)
-    
-    # Timestamps
     paid_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Relationship
     booking = relationship("Booking", back_populates="payments")
     
     def to_dict(self):
@@ -305,7 +331,7 @@ class BookingPayment(Base):
 
 
 class BookingSettings(Base):
-    """User's booking settings (availability, defaults, etc.)"""
+    """User's booking settings (availability, defaults, branding)"""
     __tablename__ = "booking_settings"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -318,15 +344,15 @@ class BookingSettings(Base):
     business_logo = Column(Text, nullable=True)
     business_website = Column(Text, nullable=True)
     
-    # Availability (JSON: {"monday": {"enabled": true, "start": "09:00", "end": "17:00"}, ...})
+    # Availability JSON
     availability = Column(JSON, default=dict)
     
     # Booking settings
     default_duration = Column(Integer, default=60)
-    buffer_before = Column(Integer, default=15)  # Minutes before session
-    buffer_after = Column(Integer, default=15)   # Minutes after session
-    min_notice_hours = Column(Integer, default=24)  # Minimum booking notice
-    max_advance_days = Column(Integer, default=90)  # How far in advance can book
+    buffer_before = Column(Integer, default=15)
+    buffer_after = Column(Integer, default=15)
+    min_notice_hours = Column(Integer, default=24)
+    max_advance_days = Column(Integer, default=90)
     
     # Default pricing
     default_currency = Column(String(3), default="USD")
@@ -337,11 +363,11 @@ class BookingSettings(Base):
     sms_notifications = Column(Boolean, default=False)
     
     # Branding
-    brand_logo = Column(Text, nullable=True)  # Logo URL for forms
-    brand_primary_color = Column(String(7), default="#6366f1")  # Primary/accent color
-    brand_secondary_color = Column(String(7), default="#8b5cf6")  # Secondary color
-    brand_text_color = Column(String(7), default="#1f2937")  # Text color
-    brand_background_color = Column(String(7), default="#ffffff")  # Background color
+    brand_logo = Column(Text, nullable=True)
+    brand_primary_color = Column(String(7), default="#6366f1")
+    brand_secondary_color = Column(String(7), default="#8b5cf6")
+    brand_text_color = Column(String(7), default="#1f2937")
+    brand_background_color = Column(String(7), default="#ffffff")
     
     # Booking page
     booking_page_enabled = Column(Boolean, default=False)
@@ -349,7 +375,7 @@ class BookingSettings(Base):
     booking_page_title = Column(String(255), nullable=True)
     booking_page_description = Column(Text, nullable=True)
     booking_page_cover_image = Column(Text, nullable=True)
-    booking_page_theme = Column(String(50), default="light")  # light, dark, custom
+    booking_page_theme = Column(String(50), default="light")
     booking_page_accent_color = Column(String(7), default="#6366f1")
     
     # Timezone
@@ -357,7 +383,7 @@ class BookingSettings(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     def to_dict(self):
         return {
             "id": str(self.id),
@@ -389,7 +415,10 @@ class BookingSettings(Base):
 
 
 class BookingForm(Base):
-    """Custom booking forms with drag-and-drop fields"""
+    """
+    Custom booking forms with CleanEnroll-style drag-and-drop fields
+    Enhanced with comprehensive field types, validation, and theming
+    """
     __tablename__ = "booking_forms"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -397,26 +426,120 @@ class BookingForm(Base):
     
     # Form basics
     name = Column(String(255), nullable=False)
-    slug = Column(String(100), nullable=True, index=True)  # For embed URL
+    slug = Column(String(100), nullable=True, index=True)
     description = Column(Text, nullable=True)
     
     # Form content
     title = Column(String(255), nullable=True)
     subtitle = Column(Text, nullable=True)
-    fields = Column(JSON, default=list)  # Array of field definitions
     
-    # Styling
-    style = Column(JSON, default=dict)  # {font_family, primary_color, bg_color, text_color, border_radius, etc.}
+    # Fields array - each field has: {id, type, label, required, placeholder, options, validation, etc.}
+    fields = Column(JSON, default=list)
     
-    # Settings
+    # Form type: 'simple' (single page) or 'multi-step' (wizard)
+    form_type = Column(String(20), default="simple")
+    
+    # Language
+    language = Column(String(10), default="en")
+    
+    # ============================================================================
+    # THEME/STYLING - Matching CleanEnroll's comprehensive theming
+    # ============================================================================
+    theme = Column(JSON, default=dict)  # Full theme object
+    # Individual theme fields for quick access
+    primary_color = Column(String(7), default="#4f46e5")
+    background_color = Column(String(7), default="#ffffff")
+    text_color = Column(String(7), default="#111827")
+    input_bg_color = Column(String(7), default="#ffffff")
+    input_border_color = Column(String(7), default="#d1d5db")
+    input_border_radius = Column(Integer, default=8)
+    font_family = Column(String(100), default="Inter")
+    layout_variant = Column(String(20), default="card")  # card, split, isolated, full-page
+    
+    # Branding
+    branding = Column(JSON, default=dict)  # {logo, logoPosition, logoSize}
+
+    # ============================================================================
+    # SUBMIT BUTTON CUSTOMIZATION
+    # ============================================================================
     submit_button_text = Column(String(100), default="Submit")
+    submit_button_color = Column(String(7), default="#3b82f6")
+    submit_button_text_color = Column(String(7), default="#ffffff")
+    submit_button_position = Column(String(20), default="left")  # left, center, right
+    
+    # ============================================================================
+    # SUCCESS/THANK YOU SETTINGS
+    # ============================================================================
     success_message = Column(Text, default="Thank you for your submission!")
+    thank_you_display = Column(String(20), default="message")  # message, redirect, toast
+    celebration_enabled = Column(Boolean, default=False)
     redirect_url = Column(Text, nullable=True)
+    redirect_enabled = Column(Boolean, default=False)
+    
+    # ============================================================================
+    # AUTO-REPLY EMAIL SETTINGS
+    # ============================================================================
+    auto_reply_enabled = Column(Boolean, default=False)
+    auto_reply_email_field_id = Column(String(100), nullable=True)  # Which field contains email
+    auto_reply_subject = Column(String(255), default="Thank you for contacting us")
+    auto_reply_message_html = Column(Text, nullable=True)
+    auto_reply_message_text = Column(Text, nullable=True)
+    
+    # ============================================================================
+    # EMAIL VALIDATION SETTINGS (CleanEnroll-style)
+    # ============================================================================
+    email_validation_enabled = Column(Boolean, default=False)
+    professional_emails_only = Column(Boolean, default=False)  # Block free email providers
+    block_role_emails = Column(Boolean, default=False)  # Block admin@, info@, etc.
+    email_reject_bad_reputation = Column(Boolean, default=False)
+    min_domain_age_days = Column(Integer, default=30)
+    verify_email_domain = Column(Boolean, default=False)  # MX record check
+    detect_gibberish_email = Column(Boolean, default=False)
+
+    # ============================================================================
+    # BOT PROTECTION & SPAM PREVENTION (CleanEnroll-style)
+    # ============================================================================
+    honeypot_enabled = Column(Boolean, default=False)
+    time_based_check_enabled = Column(Boolean, default=False)
+    min_submission_time = Column(Integer, default=3)  # Minimum seconds to fill form
+    recaptcha_enabled = Column(Boolean, default=False)
+    recaptcha_site_key = Column(String(255), nullable=True)
+    
+    # ============================================================================
+    # DUPLICATE PREVENTION
+    # ============================================================================
+    prevent_duplicate_email = Column(Boolean, default=False)
+    prevent_duplicate_by_ip = Column(Boolean, default=False)
+    duplicate_window_hours = Column(Integer, default=24)
+    
+    # ============================================================================
+    # GEO RESTRICTIONS
+    # ============================================================================
+    restricted_countries = Column(JSON, default=list)  # Countries to block
+    allowed_countries = Column(JSON, default=list)  # Only allow these countries
+    
+    # ============================================================================
+    # PASSWORD PROTECTION
+    # ============================================================================
+    password_protection_enabled = Column(Boolean, default=False)
+    password_hash = Column(String(255), nullable=True)
+    
+    # ============================================================================
+    # GDPR & PRIVACY
+    # ============================================================================
+    gdpr_compliance_enabled = Column(Boolean, default=False)
+    privacy_policy_url = Column(Text, nullable=True)
+    show_powered_by = Column(Boolean, default=True)
+    
+    # ============================================================================
+    # SUBMISSION LIMITS
+    # ============================================================================
+    submission_limit = Column(Integer, default=0)  # 0 = unlimited
     
     # Notifications
     notify_email = Column(String(255), nullable=True)
     send_confirmation = Column(Boolean, default=True)
-    
+
     # Status
     is_active = Column(Boolean, default=True)
     is_published = Column(Boolean, default=False)
@@ -440,12 +563,66 @@ class BookingForm(Base):
             "title": self.title,
             "subtitle": self.subtitle,
             "fields": self.fields or [],
-            "style": self.style or {},
+            "form_type": self.form_type,
+            "language": self.language,
+            # Theme
+            "theme": self.theme or {},
+            "primary_color": self.primary_color,
+            "background_color": self.background_color,
+            "text_color": self.text_color,
+            "input_bg_color": self.input_bg_color,
+            "input_border_color": self.input_border_color,
+            "input_border_radius": self.input_border_radius,
+            "font_family": self.font_family,
+            "layout_variant": self.layout_variant,
+            "branding": self.branding or {},
+            # Submit button
             "submit_button_text": self.submit_button_text,
+            "submit_button_color": self.submit_button_color,
+            "submit_button_text_color": self.submit_button_text_color,
+            "submit_button_position": self.submit_button_position,
+            # Success settings
             "success_message": self.success_message,
+            "thank_you_display": self.thank_you_display,
+            "celebration_enabled": self.celebration_enabled,
             "redirect_url": self.redirect_url,
+            "redirect_enabled": self.redirect_enabled,
+            # Auto-reply
+            "auto_reply_enabled": self.auto_reply_enabled,
+            "auto_reply_email_field_id": self.auto_reply_email_field_id,
+            "auto_reply_subject": self.auto_reply_subject,
+            # Email validation
+            "email_validation_enabled": self.email_validation_enabled,
+            "professional_emails_only": self.professional_emails_only,
+            "block_role_emails": self.block_role_emails,
+            "email_reject_bad_reputation": self.email_reject_bad_reputation,
+            "min_domain_age_days": self.min_domain_age_days,
+            "verify_email_domain": self.verify_email_domain,
+            "detect_gibberish_email": self.detect_gibberish_email,
+            # Bot protection
+            "honeypot_enabled": self.honeypot_enabled,
+            "time_based_check_enabled": self.time_based_check_enabled,
+            "min_submission_time": self.min_submission_time,
+            "recaptcha_enabled": self.recaptcha_enabled,
+            # Duplicate prevention
+            "prevent_duplicate_email": self.prevent_duplicate_email,
+            "prevent_duplicate_by_ip": self.prevent_duplicate_by_ip,
+            "duplicate_window_hours": self.duplicate_window_hours,
+            # Geo restrictions
+            "restricted_countries": self.restricted_countries or [],
+            "allowed_countries": self.allowed_countries or [],
+            # Password protection
+            "password_protection_enabled": self.password_protection_enabled,
+            # GDPR
+            "gdpr_compliance_enabled": self.gdpr_compliance_enabled,
+            "privacy_policy_url": self.privacy_policy_url,
+            "show_powered_by": self.show_powered_by,
+            # Limits
+            "submission_limit": self.submission_limit,
+            # Notifications
             "notify_email": self.notify_email,
             "send_confirmation": self.send_confirmation,
+            # Status
             "is_active": self.is_active,
             "is_published": self.is_published,
             "views_count": self.views_count,
@@ -456,22 +633,22 @@ class BookingForm(Base):
 
 
 class FormSubmission(Base):
-    """Submissions from booking forms"""
+    """Submissions from booking forms with enhanced metadata"""
     __tablename__ = "form_submissions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    uid = Column(String(128), nullable=False, index=True)  # Form owner's UID
+    uid = Column(String(128), nullable=False, index=True)
     form_id = Column(UUID(as_uuid=True), ForeignKey("booking_forms.id", ondelete="CASCADE"), nullable=False)
     
     # Submission data
-    data = Column(JSON, default=dict)  # {field_id: value, ...}
+    data = Column(JSON, default=dict)
     
     # Contact info (extracted for quick access)
     contact_name = Column(String(255), nullable=True)
     contact_email = Column(String(255), nullable=True, index=True)
     contact_phone = Column(String(50), nullable=True)
     
-    # Calendar booking (if form has calendar field)
+    # Calendar booking
     scheduled_date = Column(DateTime, nullable=True, index=True)
     scheduled_end = Column(DateTime, nullable=True)
     
@@ -482,15 +659,25 @@ class FormSubmission(Base):
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(Text, nullable=True)
     referrer = Column(Text, nullable=True)
+    country_code = Column(String(2), nullable=True)
     
-    # Linked booking (if converted)
+    # Spam/validation flags
+    spam_score = Column(Float, default=0.0)
+    is_spam = Column(Boolean, default=False)
+    validation_errors = Column(JSON, default=list)
+    
+    # Time tracking (for bot detection)
+    form_load_time = Column(DateTime, nullable=True)
+    submission_time = Column(DateTime, nullable=True)
+    time_to_complete_seconds = Column(Integer, nullable=True)
+    
+    # Linked booking
     booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
-    # Relationships
     form = relationship("BookingForm", back_populates="submissions")
-    
+
     def to_dict(self):
         return {
             "id": str(self.id),
@@ -502,83 +689,73 @@ class FormSubmission(Base):
             "scheduled_date": self.scheduled_date.isoformat() if self.scheduled_date else None,
             "scheduled_end": self.scheduled_end.isoformat() if self.scheduled_end else None,
             "status": self.status,
+            "ip_address": self.ip_address,
+            "country_code": self.country_code,
+            "spam_score": self.spam_score,
+            "is_spam": self.is_spam,
+            "time_to_complete_seconds": self.time_to_complete_seconds,
             "booking_id": str(self.booking_id) if self.booking_id else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
 class FormView(Base):
-    """Track unique form views to prevent double counting"""
+    """Track unique form views"""
     __tablename__ = "form_views"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     form_id = Column(UUID(as_uuid=True), ForeignKey("booking_forms.id", ondelete="CASCADE"), nullable=False, index=True)
-    visitor_hash = Column(String(64), nullable=False, index=True)  # Hash of IP + User-Agent
+    visitor_hash = Column(String(64), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     __table_args__ = (
-        # Unique constraint to prevent duplicate views from same visitor on same form within tracking period
         Index('ix_form_views_form_visitor', 'form_id', 'visitor_hash'),
     )
 
 
 class MiniSession(Base):
-    """
-    Mini-session events (UseSession.com style)
-    A mini-session is a scheduled event with multiple time slots that clients can book
-    """
+    """Mini-session events with multiple time slots"""
     __tablename__ = "mini_sessions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     uid = Column(String(128), nullable=False, index=True)
     
-    # Basic info
-    name = Column(String(255), nullable=False)  # "Fall Mini Sessions", "Holiday Portraits"
-    slug = Column(String(100), nullable=True, index=True)  # For public URL
+    name = Column(String(255), nullable=False)
+    slug = Column(String(100), nullable=True, index=True)
     description = Column(Text, nullable=True)
     
-    # Session details
     session_type = Column(SQLEnum(SessionType), default=SessionType.PORTRAIT)
-    duration_minutes = Column(Integer, default=20)  # Each slot duration
-    buffer_minutes = Column(Integer, default=10)  # Buffer between slots
+    duration_minutes = Column(Integer, default=20)
+    buffer_minutes = Column(Integer, default=10)
     
-    # Pricing
     price = Column(Float, default=0.0)
     deposit_amount = Column(Float, default=0.0)
     currency = Column(String(3), default="USD")
     
-    # What's included
     included_photos = Column(Integer, nullable=True)
-    deliverables = Column(JSON, default=list)  # ["5 digital images", "Print release", etc.]
+    deliverables = Column(JSON, default=list)
     
-    # Location
     location_name = Column(String(255), nullable=True)
     location_address = Column(Text, nullable=True)
     location_notes = Column(Text, nullable=True)
     
-    # Cover image for booking page
     cover_image = Column(Text, nullable=True)
-    gallery_images = Column(JSON, default=list)  # Sample images to show
+    gallery_images = Column(JSON, default=list)
     
-    # Booking settings
-    max_bookings_per_slot = Column(Integer, default=1)  # Usually 1 for photography
+    max_bookings_per_slot = Column(Integer, default=1)
     allow_waitlist = Column(Boolean, default=True)
     require_deposit = Column(Boolean, default=True)
-    auto_confirm = Column(Boolean, default=False)  # Auto-confirm or manual review
+    auto_confirm = Column(Boolean, default=False)
     
-    # Visibility
     is_active = Column(Boolean, default=True)
     is_published = Column(Boolean, default=False)
-    
-    # Stats
     views_count = Column(Integer, default=0)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Relationships
     dates = relationship("MiniSessionDate", back_populates="mini_session", cascade="all, delete-orphan")
-    
+
     def to_dict(self):
         return {
             "id": str(self.id),
@@ -610,33 +787,23 @@ class MiniSession(Base):
 
 
 class MiniSessionDate(Base):
-    """
-    Specific dates for a mini-session event
-    Each date can have multiple time slots
-    """
+    """Specific dates for a mini-session event"""
     __tablename__ = "mini_session_dates"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     uid = Column(String(128), nullable=False, index=True)
     mini_session_id = Column(UUID(as_uuid=True), ForeignKey("mini_sessions.id", ondelete="CASCADE"), nullable=False)
     
-    # Date info
-    session_date = Column(DateTime, nullable=False, index=True)  # The date
-    
-    # Override settings for this specific date
-    location_name = Column(String(255), nullable=True)  # Override location
+    session_date = Column(DateTime, nullable=False, index=True)
+    location_name = Column(String(255), nullable=True)
     location_address = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)
-    
-    # Status
     is_active = Column(Boolean, default=True)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Relationships
     mini_session = relationship("MiniSession", back_populates="dates")
     slots = relationship("MiniSessionSlot", back_populates="session_date", cascade="all, delete-orphan")
-    
+
     def to_dict(self):
         return {
             "id": str(self.id),
@@ -651,32 +818,21 @@ class MiniSessionDate(Base):
 
 
 class MiniSessionSlot(Base):
-    """
-    Individual time slots within a mini-session date
-    """
+    """Individual time slots within a mini-session date"""
     __tablename__ = "mini_session_slots"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     uid = Column(String(128), nullable=False, index=True)
     session_date_id = Column(UUID(as_uuid=True), ForeignKey("mini_session_dates.id", ondelete="CASCADE"), nullable=False)
     
-    # Time slot
     start_time = Column(DateTime, nullable=False, index=True)
     end_time = Column(DateTime, nullable=False)
-    
-    # Status
-    status = Column(String(50), default="available")  # available, booked, held, blocked
-    
-    # Booking reference (if booked)
+    status = Column(String(50), default="available")
     booking_id = Column(UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True)
-    
-    # Hold info (temporary hold during checkout)
     held_until = Column(DateTime, nullable=True)
     held_by_email = Column(String(255), nullable=True)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Relationships
     session_date = relationship("MiniSessionDate", back_populates="slots")
     
     def to_dict(self):
@@ -696,26 +852,21 @@ class Waitlist(Base):
     __tablename__ = "booking_waitlist"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    uid = Column(String(128), nullable=False, index=True)  # Photographer's UID
+    uid = Column(String(128), nullable=False, index=True)
     
-    # What they're waiting for
     mini_session_id = Column(UUID(as_uuid=True), ForeignKey("mini_sessions.id", ondelete="CASCADE"), nullable=True)
     session_date_id = Column(UUID(as_uuid=True), ForeignKey("mini_session_dates.id", ondelete="CASCADE"), nullable=True)
     
-    # Contact info
     name = Column(String(255), nullable=False)
     email = Column(String(255), nullable=False, index=True)
     phone = Column(String(50), nullable=True)
     
-    # Preferences
-    preferred_dates = Column(JSON, default=list)  # List of preferred date strings
-    preferred_times = Column(JSON, default=list)  # ["morning", "afternoon", "evening"]
+    preferred_dates = Column(JSON, default=list)
+    preferred_times = Column(JSON, default=list)
     notes = Column(Text, nullable=True)
     
-    # Status
-    status = Column(String(50), default="waiting")  # waiting, notified, booked, expired
+    status = Column(String(50), default="waiting")
     notified_at = Column(DateTime, nullable=True)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
     
     def to_dict(self):
