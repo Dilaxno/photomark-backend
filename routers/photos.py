@@ -1297,10 +1297,11 @@ async def embed_js():
 
 # ============== Photo Type Filtering Endpoints ==============
 # These endpoints filter photos by their source/type based on filename suffixes:
-# - Watermarked: -txt-o (text watermark), -sig-o (signature watermark)
+# - Watermarked: -txt (text watermark from /upload), -logo (logo watermark from /upload),
+#                -txt-o (text watermark from /images/watermark), -sig-o (signature from /images/watermark)
 # - Edited: -lut-o (color grading), -relight-o, -resize-o, -denoise-o, -upscale-o, -plugin-o (from plugins)
 
-WATERMARK_SUFFIXES = ('-txt-o', '-sig-o')
+WATERMARK_SUFFIXES = ('-txt.', '-logo.', '-txt-o', '-sig-o')
 EDITED_SUFFIXES = ('-lut-o', '-relight-o', '-resize-o', '-denoise-o', '-upscale-o', '-plugin-o', '-style-o', '-bg-o')
 
 
