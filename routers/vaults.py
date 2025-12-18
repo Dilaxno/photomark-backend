@@ -18,61 +18,6 @@ import bcrypt
 
 from core.config import s3, s3_presign_client, R2_BUCKET, R2_PUBLIC_BASE_URL, R2_CUSTOM_DOMAIN, logger, DODO_API_BASE, DODO_CHECKOUT_PATH, DODO_PRODUCTS_PATH, DODO_API_KEY, DODO_WEBHOOK_SECRET, LICENSE_SECRET, LICENSE_PRIVATE_KEY, LICENSE_PUBLIC_KEY, LICENSE_ISSUER
 from utils.storage import read_json_key, write_json_key, read_bytes_key, upload_bytes, get_presigned_url
-
-# SECURITY: File magic bytes for image validation
-IMAGE_MAGIC_BYTES = {
-    b'\xff\xd8\xff': 'image/jpeg',  # JPEG
-    b'\x89PNG\r\n\x1a\n': 'image/png',  # PNG
-    b'RIFF': 'image/webp',  # WebP (partial)
-    b'GIF87a': 'image/gif',
-    b'GIF89a': 'image/gif',
-}
-
-VIDEO_MAGIC_BYTES = {
-    b'\x00\x00\x00': 'video/',  # MP4/MOV (ftyp box starts at offset 4)
-    b'\x1a\x45\xdf\xa3': 'video/webm',  # WebM/MKV
-    b'RIFF': 'video/avi',  # AVI
-}
-
-def _validate_media_content(data: bytes, filename: str = '') -> bool:
-    """Validate that file content matches expected image/video magic bytes."""
-    if not data or len(data) < 12:
-        return False
-    ext = os.path.splitext(filename)[1].lower() if filename else ''
-    
-    # Check image magic bytes
-    for magic in IMAGE_MAGIC_BYTES:
-        if data[:len(magic)] == magic:
-            return True
-    
-    # WebP check (RIFF....WEBP)
-    if data[:4] == b'RIFF' and len(data) > 11 and data[8:12] == b'WEBP':
-        return True
-    
-    # HEIC/HEIF check (ftyp box)
-    if len(data) > 11 and data[4:8] == b'ftyp':
-        return True
-    
-    # Video checks for video extensions
-    if ext in {'.mp4', '.mov', '.m4v', '.3gp'}:
-        # MP4/MOV have ftyp box
-        if len(data) > 11 and data[4:8] == b'ftyp':
-            return True
-    
-    if ext in {'.webm', '.mkv'}:
-        if data[:4] == b'\x1a\x45\xdf\xa3':
-            return True
-    
-    if ext == '.avi':
-        if data[:4] == b'RIFF' and len(data) > 11 and data[8:12] == b'AVI ':
-            return True
-    
-    # RAW camera formats - check by extension (magic bytes vary by manufacturer)
-    RAW_EXTS = {'.cr2', '.cr3', '.nef', '.nrw', '.arw', '.sr2', '.srf', '.srw', '.orf', '.raf', '.rw2', '.rwl', '.pef', '.dng', '.3fr', '.erf', '.kdc', '.mrw', '.x3f', '.mef', '.iiq', '.fff'}
-    if ext in RAW_EXTS:
-        return True
-    
-    return False
 from utils.metadata import auto_embed_metadata_for_user
 from core.auth import get_uid_from_request, get_user_email_from_uid
 from utils.emailing import render_email, send_email_smtp
@@ -784,12 +729,6 @@ async def vaults_upload(
             ext = os.path.splitext(orig_filename)[1].lower()
             if not ext or ext not in ALLOWED_EXTS:
                 ext = '.jpg'
-            
-            # SECURITY: Validate file content matches expected magic bytes
-            if not _validate_media_content(raw, orig_filename):
-                logger.warning(f"[vaults.upload] Invalid media content for {orig_filename}")
-                errors.append({"filename": uf.filename, "error": "Invalid file content"})
-                continue
             
             # Auto-embed IPTC/EXIF metadata if user has it enabled
             try:
