@@ -85,7 +85,7 @@ async def public_endpoints_cors(request: Request, call_next):
     origin = request.headers.get("origin", "*")
     
     # Public endpoints that should allow any origin
-    public_paths = ["/api/uploads/public/", "/api/vaults/shared/", "/api/booking/public/"]
+    public_paths = ["/api/uploads/public/", "/api/vaults/shared/"]
     is_public = any(path.startswith(p) for p in public_paths)
     
     # Shop API endpoints that custom domains need access to
