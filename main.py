@@ -243,18 +243,18 @@ def _find_vault_domain_by_host(db, host: str):
         return None
 
 
-def _find_website_domain_by_host(db, host: str):
-    """Find website domain record by hostname (for portfolios, etc.)"""
+def _find_portfolio_domain_by_host(db, host: str):
+    """Find portfolio domain record by hostname"""
     try:
-        from models.website_domain import WebsiteDomain
+        from models.portfolio_domain import PortfolioDomain
         host_l = (host or "").strip().lower().rstrip(".")
-        domain = db.query(WebsiteDomain).filter(WebsiteDomain.hostname == host_l).first()
-        logger.info(f"[custom-domain] Website domain lookup for '{host_l}': found={domain is not None}, enabled={domain.enabled if domain else None}")
-        if domain and domain.enabled:
+        domain = db.query(PortfolioDomain).filter(PortfolioDomain.hostname == host_l).first()
+        logger.info(f"[custom-domain] Portfolio domain lookup for '{host_l}': found={domain is not None}, enabled={domain.enabled if domain else None}")
+        if domain and domain.enabled and domain.dns_verified:
             return domain
         return None
     except Exception as e:
-        logger.error(f"[custom-domain] Website domain lookup error: {e}")
+        logger.error(f"[custom-domain] Portfolio domain lookup error: {e}")
         return None
 
 
@@ -287,8 +287,8 @@ async def custom_domain_routing(request: Request, call_next):
                     shop = _find_shop_by_host(db, host)
                     uploads_domain = _find_uploads_domain_by_host(db, host) if not shop else None
                     vault_domain = _find_vault_domain_by_host(db, host) if not shop and not uploads_domain else None
-                    website_domain = _find_website_domain_by_host(db, host) if not shop and not uploads_domain and not vault_domain else None
-                    if shop or uploads_domain or vault_domain or website_domain:
+                    portfolio_domain = _find_portfolio_domain_by_host(db, host) if not shop and not uploads_domain and not vault_domain else None
+                    if shop or uploads_domain or vault_domain or portfolio_domain:
                         # Proxy static asset request to frontend
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         # Strip /shop prefix if present (happens when URL is /shop/{slug} and assets are relative)
@@ -832,19 +832,19 @@ async def domains_validate(request: Request):
                 except Exception:
                     pass
             
-            # Check website custom domains (using dedicated table)
+            # Check portfolio custom domains (using dedicated table)
             try:
-                from models.website_domain import WebsiteDomain
-                website_domain = db.query(WebsiteDomain).filter(WebsiteDomain.hostname == domain).first()
-                if website_domain:
-                    logger.info(f"Domain {domain} found in website_domains (enabled={website_domain.enabled}, dns_verified={website_domain.dns_verified})")
-                    if website_domain.enabled or website_domain.dns_verified:
-                        logger.info(f"Domain {domain} validated via website_domains table")
+                from models.portfolio_domain import PortfolioDomain
+                portfolio_domain = db.query(PortfolioDomain).filter(PortfolioDomain.hostname == domain).first()
+                if portfolio_domain:
+                    logger.info(f"Domain {domain} found in portfolio_domains (enabled={portfolio_domain.enabled}, dns_verified={portfolio_domain.dns_verified})")
+                    if portfolio_domain.enabled or portfolio_domain.dns_verified:
+                        logger.info(f"Domain {domain} validated via portfolio_domains table")
                         return PlainTextResponse("ok", status_code=200)
                     else:
                         logger.info(f"Domain {domain} found but not enabled/verified yet")
             except Exception as e:
-                logger.warning(f"Website domain query failed: {e}")
+                logger.warning(f"Portfolio domain query failed: {e}")
                 try:
                     db.rollback()
                 except Exception:
