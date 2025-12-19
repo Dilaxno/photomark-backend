@@ -1,32 +1,23 @@
 """
 Portfolio models for PostgreSQL
-Replaces Firestore 'portfolio_photos' and 'portfolio_settings' collections
 """
-from sqlalchemy import Column, String, Text, JSON, DateTime, Integer, Boolean
+from sqlalchemy import Column, String, Text, DateTime, Integer, Boolean
 from sqlalchemy.sql import func
 from core.database import Base
 
 class PortfolioPhoto(Base):
     __tablename__ = "portfolio_photos"
     
-    # Primary key
     id = Column(String(128), primary_key=True, index=True)
-    
-    # User reference
     uid = Column(String(128), nullable=False, index=True)
-    
-    # Photo details
     url = Column(Text, nullable=False)
     title = Column(String(255), nullable=True)
     order = Column(Integer, default=0, nullable=False)
-    source = Column(String(50), default="upload", nullable=False)  # upload, gallery
-    
-    # Timestamps
+    source = Column(String(50), default="upload", nullable=False)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
     def to_dict(self):
-        """Convert to dict for API responses"""
         return {
             "id": self.id,
             "url": self.url,
@@ -39,23 +30,17 @@ class PortfolioPhoto(Base):
 class PortfolioSettings(Base):
     __tablename__ = "portfolio_settings"
     
-    # Primary key - user UID
     uid = Column(String(128), primary_key=True, index=True)
-    
-    # Portfolio configuration
     title = Column(String(255), default="My Portfolio", nullable=False)
     subtitle = Column(String(500), nullable=True)
-    template = Column(String(50), default="canvas", nullable=False)  # canvas, editorial, noir
+    template = Column(String(50), default="canvas", nullable=False)
     custom_domain = Column(String(255), nullable=True)
     is_published = Column(Boolean, default=False, nullable=False)
-    
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     published_at = Column(DateTime(timezone=True), nullable=True)
     
     def to_dict(self):
-        """Convert to dict for API responses"""
         return {
             "title": self.title,
             "subtitle": self.subtitle,
