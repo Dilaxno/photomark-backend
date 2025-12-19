@@ -468,6 +468,13 @@ try:
     app.include_router(vault_domain.router)
 except Exception as _ex:
     logger.warning(f"vault_domain router not available: {_ex}")
+
+# portfolio domain (custom domain for portfolio pages)
+try:
+    from routers import portfolio_domain  # noqa: E402
+    app.include_router(portfolio_domain.router)
+except Exception as _ex:
+    logger.warning(f"portfolio_domain router not available: {_ex}")
 # backups router (Backblaze B2)
 try:
     from routers import backup  # noqa: E402
