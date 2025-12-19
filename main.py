@@ -376,6 +376,24 @@ window.__SHOP_SLUG__="{slug}";
                         html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
                         return Response(content=html, media_type="text/html", status_code=200)
                 
+                # Check for portfolio custom domain
+                portfolio_domain = _find_portfolio_domain_by_host(db, host)
+                logger.info(f"[custom-domain] Found portfolio_domain: {portfolio_domain.hostname if portfolio_domain else None}")
+                if portfolio_domain:
+                    # Serve the portfolio page
+                    uid = portfolio_domain.uid
+                    front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        r = await client.get(f"{front}/", follow_redirects=True)
+                        html = r.text
+                        # Inject script to set portfolio custom domain mode with user ID
+                        inject = f"""<script>
+                            window.__PORTFOLIO_CUSTOM_DOMAIN__ = true;
+                            window.__PORTFOLIO_USER_ID__ = "{uid}";
+                            try{{history.replaceState(null,'','/portfolio/{uid}')}}catch(e){{}}
+                        </script>"""
+                        html = html.replace("</head>", inject + "</head>") if "</head>" in html else (inject + html)
+                        return Response(content=html, media_type="text/html", status_code=200)
 
             finally:
                 try:
