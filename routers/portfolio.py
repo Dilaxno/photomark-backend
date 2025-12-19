@@ -9,7 +9,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from core.auth import get_uid_from_request
-from utils.storage import upload_file_to_gcs
+from utils.storage import upload_bytes
 from core.database import get_db
 from models.portfolio import PortfolioPhoto, PortfolioSettings
 
@@ -77,9 +77,9 @@ async def upload_portfolio_photos(
             file_ext = os.path.splitext(photo.filename or '')[1] or '.jpg'
             filename = f"portfolio/{uid}/{uuid.uuid4()}{file_ext}"
             
-            # Upload to GCS
+            # Upload to storage
             file_content = await photo.read()
-            file_url = upload_file_to_gcs(file_content, filename, photo.content_type)
+            file_url = upload_bytes(filename, file_content, photo.content_type)
             
             if file_url:
                 # Create database record
