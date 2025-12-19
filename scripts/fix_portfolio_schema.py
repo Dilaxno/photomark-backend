@@ -5,15 +5,19 @@ Run this script to fix the database schema issue.
 """
 import os
 import sys
-import asyncio
 from pathlib import Path
 
 # Add the backend directory to the Python path
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
-from core.database import get_db
-from sqlalchemy import text
+try:
+    from core.database import get_db
+    from sqlalchemy import text
+except ImportError as e:
+    print(f"❌ Import error: {e}")
+    print("Make sure you're running this from the backend directory with the virtual environment activated.")
+    sys.exit(1)
 
 def run_migration():
     """Run the portfolio schema fix migration"""
