@@ -1,12 +1,16 @@
 import os
 import uuid
 import json
+import zipfile
+import io
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 import logging
+import requests
+from PIL import Image
 
 from core.auth import get_current_user_uid
 from core.storage import upload_file_to_gcs
@@ -24,6 +28,9 @@ class PortfolioSettings(BaseModel):
 
 class PublishRequest(BaseModel):
     isPublished: bool
+
+class AddFromGalleryRequest(BaseModel):
+    photoUrls: List[str]
 
 @router.get("/photos")
 async def get_portfolio_photos(uid: str = Depends(get_current_user_uid)):
@@ -112,6 +119,167 @@ async def upload_portfolio_photos(
     except Exception as e:
         logger.error(f"Error uploading portfolio photos: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload photos")
+
+@router.post("/upload-zip")
+async def upload_zip_to_portfolio(
+    zipFile: UploadFile = File(...),
+    uid: str = Depends(get_current_user_uid)
+):
+    """Extract and upload photos from a ZIP file to portfolio"""
+    try:
+        if not zipFile.content_type or 'zip' not in zipFile.content_type.lower():
+            raise HTTPException(status_code=400, detail="File must be a ZIP archive")
+        
+        db = get_fs_client()
+        if not db:
+            raise HTTPException(status_code=500, detail="Database not available")
+        
+        # Read ZIP file content
+        zip_content = await zipFile.read()
+        uploaded_photos = []
+        
+        # Extract and process images from ZIP
+        with zipfile.ZipFile(io.BytesIO(zip_content), 'r') as zip_ref:
+            for file_info in zip_ref.filelist:
+                # Skip directories and non-image files
+                if file_info.is_dir():
+                    continue
+                
+                filename = file_info.filename.lower()
+                if not any(filename.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']):
+                    continue
+                
+                try:
+                    # Extract file content
+                    with zip_ref.open(file_info) as image_file:
+                        image_content = image_file.read()
+                    
+                    # Validate it's actually an image
+                    try:
+                        with Image.open(io.BytesIO(image_content)) as img:
+                            img.verify()
+                    except Exception:
+                        continue  # Skip invalid images
+                    
+                    # Generate unique filename
+                    original_name = os.path.basename(file_info.filename)
+                    file_ext = os.path.splitext(original_name)[1] or '.jpg'
+                    gcs_filename = f"portfolio/{uid}/{uuid.uuid4()}{file_ext}"
+                    
+                    # Determine content type
+                    content_type = 'image/jpeg'
+                    if file_ext.lower() in ['.png']:
+                        content_type = 'image/png'
+                    elif file_ext.lower() in ['.gif']:
+                        content_type = 'image/gif'
+                    elif file_ext.lower() in ['.webp']:
+                        content_type = 'image/webp'
+                    
+                    # Upload to GCS
+                    file_url = upload_file_to_gcs(image_content, gcs_filename, content_type)
+                    
+                    if file_url:
+                        photo_data = {
+                            "id": str(uuid.uuid4()),
+                            "url": file_url,
+                            "title": original_name,
+                            "order": len(uploaded_photos),
+                            "uploaded_at": datetime.now(timezone.utc).isoformat()
+                        }
+                        uploaded_photos.append(photo_data)
+                
+                except Exception as e:
+                    logger.warning(f"Failed to process file {file_info.filename} from ZIP: {e}")
+                    continue
+        
+        if uploaded_photos:
+            # Get existing photos
+            doc_ref = db.collection('portfolio_photos').document(uid)
+            doc = doc_ref.get()
+            
+            if doc.exists:
+                existing_data = doc.to_dict()
+                existing_photos = existing_data.get('photos', [])
+            else:
+                existing_photos = []
+            
+            # Add new photos
+            all_photos = existing_photos + uploaded_photos
+            
+            # Update Firestore
+            doc_ref.set({
+                'photos': all_photos,
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            })
+        
+        return {"photos": uploaded_photos, "message": f"Extracted and uploaded {len(uploaded_photos)} photos from ZIP"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing ZIP upload: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process ZIP file")
+
+@router.post("/add-from-gallery")
+async def add_photos_from_gallery(
+    request: AddFromGalleryRequest,
+    uid: str = Depends(get_current_user_uid)
+):
+    """Add existing photos from gallery/vaults to portfolio"""
+    try:
+        if not request.photoUrls:
+            raise HTTPException(status_code=400, detail="No photo URLs provided")
+        
+        db = get_fs_client()
+        if not db:
+            raise HTTPException(status_code=500, detail="Database not available")
+        
+        added_photos = []
+        
+        for photo_url in request.photoUrls:
+            try:
+                # Create portfolio entry for existing photo
+                photo_data = {
+                    "id": str(uuid.uuid4()),
+                    "url": photo_url,
+                    "title": f"Photo {len(added_photos) + 1}",
+                    "order": len(added_photos),
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "gallery"
+                }
+                added_photos.append(photo_data)
+            
+            except Exception as e:
+                logger.warning(f"Failed to add photo {photo_url}: {e}")
+                continue
+        
+        if added_photos:
+            # Get existing photos
+            doc_ref = db.collection('portfolio_photos').document(uid)
+            doc = doc_ref.get()
+            
+            if doc.exists:
+                existing_data = doc.to_dict()
+                existing_photos = existing_data.get('photos', [])
+            else:
+                existing_photos = []
+            
+            # Add new photos
+            all_photos = existing_photos + added_photos
+            
+            # Update Firestore
+            doc_ref.set({
+                'photos': all_photos,
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            })
+        
+        return {"photos": added_photos, "message": f"Added {len(added_photos)} photos to portfolio"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding photos from gallery: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add photos from gallery")
 
 @router.delete("/photos/{photo_id}")
 async def delete_portfolio_photo(

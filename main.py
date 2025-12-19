@@ -243,6 +243,21 @@ def _find_vault_domain_by_host(db, host: str):
         return None
 
 
+def _find_website_domain_by_host(db, host: str):
+    """Find website domain record by hostname (for portfolios, etc.)"""
+    try:
+        from models.website_domain import WebsiteDomain
+        host_l = (host or "").strip().lower().rstrip(".")
+        domain = db.query(WebsiteDomain).filter(WebsiteDomain.hostname == host_l).first()
+        logger.info(f"[custom-domain] Website domain lookup for '{host_l}': found={domain is not None}, enabled={domain.enabled if domain else None}")
+        if domain and domain.enabled:
+            return domain
+        return None
+    except Exception as e:
+        logger.error(f"[custom-domain] Website domain lookup error: {e}")
+        return None
+
+
 
 
 @app.middleware("http")
@@ -272,7 +287,8 @@ async def custom_domain_routing(request: Request, call_next):
                     shop = _find_shop_by_host(db, host)
                     uploads_domain = _find_uploads_domain_by_host(db, host) if not shop else None
                     vault_domain = _find_vault_domain_by_host(db, host) if not shop and not uploads_domain else None
-                    if shop or uploads_domain or vault_domain:
+                    website_domain = _find_website_domain_by_host(db, host) if not shop and not uploads_domain and not vault_domain else None
+                    if shop or uploads_domain or vault_domain or website_domain:
                         # Proxy static asset request to frontend
                         front = (os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
                         # Strip /shop prefix if present (happens when URL is /shop/{slug} and assets are relative)
