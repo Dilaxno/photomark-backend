@@ -245,6 +245,82 @@ async def publish_portfolio(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update portfolio status")
 
+@router.post("/create-demo")
+async def create_demo_portfolio(db: Session = Depends(get_db)):
+    """Create a demo portfolio for testing"""
+    try:
+        demo_uid = "demo-user"
+        
+        # Check if demo portfolio already exists
+        existing = db.query(PortfolioSettings).filter(
+            PortfolioSettings.uid == demo_uid
+        ).first()
+        
+        if existing:
+            # Update to published
+            existing.is_published = True
+            existing.published_at = datetime.now(timezone.utc)
+            db.commit()
+            return {"message": "Demo portfolio already exists and is now published", "uid": demo_uid}
+        
+        # Create demo portfolio settings
+        demo_settings = PortfolioSettings(
+            uid=demo_uid,
+            title="Demo Photography Portfolio",
+            subtitle="Professional Photography Services",
+            template="canvas",
+            is_published=True,
+            published_at=datetime.now(timezone.utc)
+        )
+        
+        db.add(demo_settings)
+        
+        # Create some demo photos (using placeholder images)
+        demo_photos = [
+            {
+                "id": "demo-photo-1",
+                "title": "Landscape Photography",
+                "url": "https://res.cloudinary.com/demo/image/upload/f_auto,q_auto:best,w_1600,dpr_2.0/sample.jpg",
+                "order": 0
+            },
+            {
+                "id": "demo-photo-2", 
+                "title": "Portrait Session",
+                "url": "https://res.cloudinary.com/demo/image/upload/f_auto,q_auto:best,w_1600,dpr_2.0/woman.jpg",
+                "order": 1
+            },
+            {
+                "id": "demo-photo-3",
+                "title": "Wedding Photography", 
+                "url": "https://res.cloudinary.com/demo/image/upload/f_auto,q_auto:best,w_1600,dpr_2.0/couple.jpg",
+                "order": 2
+            }
+        ]
+        
+        for photo_data in demo_photos:
+            demo_photo = PortfolioPhoto(
+                id=photo_data["id"],
+                uid=demo_uid,
+                url=photo_data["url"],
+                title=photo_data["title"],
+                order=photo_data["order"],
+                source="demo"
+            )
+            db.add(demo_photo)
+        
+        db.commit()
+        
+        return {
+            "message": "Demo portfolio created successfully",
+            "uid": demo_uid,
+            "url": f"/portfolio/{demo_uid}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating demo portfolio: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create demo portfolio")
+
 @router.get("/my-portfolio/public")
 async def get_my_public_portfolio(
     uid: str = Depends(get_current_user_uid),
@@ -297,6 +373,10 @@ async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_d
         
         logger.info(f"Looking for portfolio with user_id: {user_id}")
         
+        # Debug: List all portfolio settings to see what UIDs exist
+        all_settings = db.query(PortfolioSettings).all()
+        logger.info(f"Available portfolio UIDs: {[s.uid for s in all_settings]}")
+        
         # Get settings
         settings = db.query(PortfolioSettings).filter(
             PortfolioSettings.uid == user_id
@@ -304,7 +384,12 @@ async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_d
         
         if not settings:
             logger.warning(f"No portfolio settings found for user_id: {user_id}")
-            raise HTTPException(status_code=404, detail="Portfolio not found")
+            # Return available UIDs in error for debugging
+            available_uids = [s.uid for s in all_settings if s.is_published]
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Portfolio not found. Available published portfolios: {available_uids}"
+            )
         
         if not settings.is_published:
             logger.warning(f"Portfolio exists but not published for user_id: {user_id}")
