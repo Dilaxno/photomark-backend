@@ -5,19 +5,26 @@ import zipfile
 import io
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 import logging
 import requests
 from PIL import Image
 
-from core.auth import get_current_user_uid
+from core.auth import get_uid_from_request
 from core.storage import upload_file_to_gcs
 from core.firestore import get_fs_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# FastAPI dependency to get current user UID
+async def get_current_user_uid(request: Request) -> str:
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return uid
 
 class PortfolioSettings(BaseModel):
     title: str
