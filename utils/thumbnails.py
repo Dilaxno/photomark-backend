@@ -8,11 +8,11 @@ from PIL import Image
 from typing import Optional, Tuple
 from core.config import logger
 
-# Thumbnail sizes - doubled for retina/HiDPI displays
-THUMB_SMALL = 600   # For grid views (2x for 300px display)
+# Thumbnail sizes - optimized for retina/HiDPI displays
+THUMB_SMALL = 800   # For grid views (2x for 400px display, high quality)
 THUMB_MEDIUM = 1200  # For previews/lightbox (2x for 600px display)
 
-def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: int = 80) -> Optional[bytes]:
+def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: int = 92) -> Optional[bytes]:
     """
     Generate a thumbnail from image data.
     
@@ -52,9 +52,15 @@ def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: 
             new_width = int(width * (max_size / height))
             img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
         
-        # Save as optimized JPEG
+        # Apply subtle sharpening for better quality (only if resized)
+        if width > max_size or height > max_size:
+            from PIL import ImageFilter
+            img = img.filter(ImageFilter.UnsharpMask(radius=0.5, percent=50, threshold=2))
+        
+        # Save as optimized JPEG with high quality settings
         buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=quality, optimize=True, progressive=True)
+        img.save(buf, format='JPEG', quality=quality, optimize=True, progressive=True, 
+                 subsampling=0, qtables='web_high')
         buf.seek(0)
         return buf.getvalue()
     except Exception as ex:
@@ -72,8 +78,8 @@ def generate_thumbnails(image_data: bytes) -> Tuple[Optional[bytes], Optional[by
     Returns:
         Tuple of (small_thumb_bytes, medium_thumb_bytes)
     """
-    small = generate_thumbnail(image_data, THUMB_SMALL, quality=90)
-    medium = generate_thumbnail(image_data, THUMB_MEDIUM, quality=92)
+    small = generate_thumbnail(image_data, THUMB_SMALL, quality=95)
+    medium = generate_thumbnail(image_data, THUMB_MEDIUM, quality=95)
     return small, medium
 
 

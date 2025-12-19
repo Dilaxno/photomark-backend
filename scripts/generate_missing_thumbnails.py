@@ -59,7 +59,7 @@ def generate_and_upload_thumbnail(bucket, key: str, read_func, dry_run: bool = F
             return False
         
         # Generate thumbnail
-        thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=75)
+        thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=92)
         if not thumb_data:
             logger.warning(f"Could not generate thumbnail for: {key}")
             return False

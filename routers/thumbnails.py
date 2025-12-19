@@ -54,7 +54,7 @@ def _generate_thumbnail_for_key(key: str, bucket, read_func) -> bool:
             return False
         
         # Generate thumbnail
-        thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=75)
+        thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=92)
         if not thumb_data:
             return False
         
@@ -253,7 +253,7 @@ async def get_or_generate_thumbnail(request: Request, key: str, background_tasks
         if not data:
             return JSONResponse({"error": "Image not found"}, status_code=404)
         
-        thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=75)
+        thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=92)
         if not thumb_data:
             return JSONResponse({"error": "Could not generate thumbnail"}, status_code=500)
         
