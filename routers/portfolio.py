@@ -33,6 +33,10 @@ class PortfolioSettingsRequest(BaseModel):
 class PublishRequest(BaseModel):
     isPublished: bool
 
+class PortfolioUrlResponse(BaseModel):
+    url: str
+    slug: str
+
 class AddFromGalleryRequest(BaseModel):
     photoUrls: List[str]
 
@@ -276,10 +280,59 @@ async def publish_portfolio(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update portfolio status")
 
-@router.get("/{user_id}/public")
-async def get_public_portfolio(user_id: str, db: Session = Depends(get_db)):
-    """Get public portfolio data for viewing"""
+@router.get("/url")
+async def get_portfolio_url(
+    uid: str = Depends(get_current_user_uid),
+    db: Session = Depends(get_db)
+):
+    """Get the portfolio URL for the current user"""
     try:
+        # Get portfolio settings to check if published
+        settings = db.query(PortfolioSettings).filter(
+            PortfolioSettings.uid == uid
+        ).first()
+        
+        if not settings:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        
+        # For now, we'll use a simple slug based on the UID
+        # In the future, this could be based on user profile data
+        slug = uid[:8]  # Use first 8 characters of UID as slug
+        
+        # Check if custom domain is configured
+        if settings.custom_domain:
+            url = f"https://{settings.custom_domain}"
+        else:
+            # Use the frontend origin from environment or default
+            frontend_origin = os.getenv("FRONTEND_ORIGIN", "https://photomark.cloud").split(",")[0].strip()
+            url = f"{frontend_origin}/portfolio/{slug}"
+        
+        return PortfolioUrlResponse(url=url, slug=slug)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting portfolio URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get portfolio URL")
+
+def _resolve_user_identifier(identifier: str, db: Session) -> str:
+    """Resolve a user identifier (slug or UID) to a UID"""
+    # If it looks like a Firebase UID (28 chars, alphanumeric), use it directly
+    if len(identifier) == 28 and identifier.replace('_', '').replace('-', '').isalnum():
+        return identifier
+    
+    # Otherwise, try to resolve as a slug by checking user profiles
+    # For now, we'll need to query Firebase Auth or implement a user profiles table
+    # As a temporary solution, we'll fall back to treating it as a UID
+    return identifier
+
+@router.get("/{user_identifier}/public")
+async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_db)):
+    """Get public portfolio data for viewing (supports both UID and slug)"""
+    try:
+        # Resolve identifier to UID
+        user_id = _resolve_user_identifier(user_identifier, db)
+        
         # Get settings
         settings = db.query(PortfolioSettings).filter(
             PortfolioSettings.uid == user_id
