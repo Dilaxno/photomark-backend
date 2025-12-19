@@ -539,9 +539,12 @@ except Exception as _ex:
 from routers import affiliates  # noqa: E402
 app.include_router(affiliates.router)
 
-# portfolios endpoints (owner showcase)
-from routers import portfolios  # noqa: E402
-app.include_router(portfolios.router)
+# portfolio endpoints (gallery portfolio)
+try:
+    from routers import portfolio  # noqa: E402
+    app.include_router(portfolio.router, prefix="/api/portfolio")
+except Exception as _ex:
+    logger.warning(f"portfolio router not available: {_ex}")
 
 
 
