@@ -12,6 +12,7 @@ from datetime import datetime
 from core.config import s3, R2_BUCKET, STATIC_DIR as static_dir, logger
 from core.auth import resolve_workspace_uid, has_role_access
 from utils.storage import read_json_key, write_json_key, get_presigned_url, read_bytes_key
+from typing import Optional
 from sqlalchemy.orm import Session
 from core.database import get_db
 
@@ -31,6 +32,23 @@ def _get_collection_data_key(uid: str, collection_name: str) -> str:
     safe_name = "".join(c for c in collection_name if c.isalnum() or c in (' ', '-', '_')).strip()
     safe_name = safe_name.replace(' ', '_')[:50]
     return f"users/{uid}/collections/{safe_name}/data.json"
+
+
+def _get_thumbnail_url(key: str, expires_in: int = 3600) -> Optional[str]:
+    """Get thumbnail URL for a key if it exists."""
+    try:
+        from utils.thumbnails import get_thumbnail_key
+        thumb_key = get_thumbnail_key(key, 'small')
+        # Check if thumbnail exists before generating URL
+        if s3 and R2_BUCKET:
+            try:
+                s3.Object(R2_BUCKET, thumb_key).load()
+                return get_presigned_url(thumb_key, expires_in=expires_in)
+            except Exception:
+                return None
+        return None
+    except Exception:
+        return None
 
 
 @router.get("")
@@ -61,14 +79,15 @@ async def list_collections(request: Request):
             photos = coll_data.get("photos", []) if isinstance(coll_data, dict) else []
             photo_count = len(photos)
             
-            # Get cover image (first photo in collection)
+            # Get cover image (first photo in collection) - prefer thumbnail for faster loading
             cover_url = ""
             cover_key = ""
             if photos and len(photos) > 0:
                 first_photo = photos[0]
                 cover_key = first_photo.get("key", "")
                 if cover_key:
-                    cover_url = _get_url_for_key(cover_key, expires_in=3600)
+                    # Try thumbnail first, fallback to full image
+                    cover_url = _get_thumbnail_url(cover_key, expires_in=3600) or _get_url_for_key(cover_key, expires_in=3600)
             
             enriched.append({
                 **coll,
@@ -208,9 +227,13 @@ async def get_collection_photos(request: Request, collection_name: str):
             # Get presigned URL for the photo
             url = _get_url_for_key(key, expires_in=3600)
             if url:
+                # Get thumbnail URL if available
+                thumb_url = _get_thumbnail_url(key, expires_in=3600)
+                
                 photos.append({
                     "key": key,
                     "url": url,
+                    "thumb_url": thumb_url,
                     "name": ref.get("name", os.path.basename(key)),
                     "added_at": ref.get("added_at", ""),
                     "source_tab": ref.get("source_tab", ""),
