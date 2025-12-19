@@ -4050,9 +4050,9 @@ async def vaults_shared_lowres_zip(token: str, password: Optional[str] = None, k
     if exp and now > exp:
         return JSONResponse({"error": "expired"}, status_code=410)
 
-    # Permission check: allow low-res for 'low' or 'high'
+    # Permission check: allow low-res for 'low', 'high', or 'proofing_download'
     perm = str((rec.get('download_permission') or '')).strip().lower()
-    if perm not in ('low', 'high'):
+    if perm not in ('low', 'high', 'proofing_download'):
         return JSONResponse({"error": "permission_denied"}, status_code=403)
     
     # Check download limit

@@ -1,5 +1,6 @@
 import os
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
@@ -12,10 +13,61 @@ from core.auth import get_uid_from_request
 from utils.storage import upload_bytes, get_presigned_url
 from core.database import get_db
 from models.portfolio import PortfolioPhoto, PortfolioSettings
+from models.portfolio_slug import PortfolioSlug
 from core.config import s3, R2_BUCKET
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+def slugify(text: str) -> str:
+    """Convert text to URL-friendly slug"""
+    if not text:
+        return 'portfolio'
+    
+    # Convert to lowercase and replace spaces/special chars with hyphens
+    slug = re.sub(r'[^\w\s-]', '', text.lower().strip())
+    slug = re.sub(r'[\s_-]+', '-', slug)
+    slug = slug.strip('-')[:50]  # Limit length
+    
+    return slug or 'portfolio'
+
+def generate_user_slug(display_name: Optional[str] = None, email: Optional[str] = None) -> str:
+    """Generate a user-friendly slug from display name or email"""
+    if display_name and display_name.strip():
+        return slugify(display_name.strip())
+    
+    if email:
+        username = email.split('@')[0]
+        return slugify(username)
+    
+    return 'portfolio'
+
+def get_or_create_portfolio_slug(uid: str, display_name: Optional[str] = None, email: Optional[str] = None, db: Session = None) -> str:
+    """Get existing portfolio slug or create a new one"""
+    if not db:
+        raise ValueError("Database session required")
+    
+    # Check if user already has a slug
+    existing_slug = db.query(PortfolioSlug).filter(PortfolioSlug.uid == uid).first()
+    if existing_slug:
+        return existing_slug.slug
+    
+    # Generate base slug
+    base_slug = generate_user_slug(display_name, email)
+    
+    # Ensure uniqueness by checking existing slugs
+    slug = base_slug
+    counter = 1
+    while db.query(PortfolioSlug).filter(PortfolioSlug.slug == slug).first():
+        slug = f"{base_slug}-{counter}"
+        counter += 1
+    
+    # Create new slug record
+    portfolio_slug = PortfolioSlug(slug=slug, uid=uid)
+    db.add(portfolio_slug)
+    db.commit()
+    
+    return slug
 
 def _get_thumbnail_url(url: str) -> Optional[str]:
     """Generate Cloudinary thumbnail URL for photos following optimization standards"""
@@ -53,7 +105,41 @@ class PortfolioSettingsRequest(BaseModel):
 class PublishRequest(BaseModel):
     isPublished: bool
 
-@router.get("/settings")
+@router.get("/url")
+async def get_portfolio_url(
+    uid: str = Depends(get_current_user_uid),
+    db: Session = Depends(get_db)
+):
+    """Get the public portfolio URL for the current user"""
+    try:
+        # Get or create portfolio slug
+        slug = get_or_create_portfolio_slug(uid, db=db)
+        
+        # Check if portfolio is published
+        settings = db.query(PortfolioSettings).filter(
+            PortfolioSettings.uid == uid
+        ).first()
+        
+        is_published = settings.is_published if settings else False
+        
+        # Generate URLs
+        cloud_url = f"https://photomark.cloud/portfolio/{slug}"
+        
+        # Check for custom domain
+        custom_domain_url = None
+        if settings and settings.custom_domain:
+            custom_domain_url = f"https://{settings.custom_domain}"
+        
+        return {
+            "slug": slug,
+            "cloudUrl": cloud_url,
+            "customDomainUrl": custom_domain_url,
+            "isPublished": is_published,
+            "uid": uid
+        }
+    except Exception as e:
+        logger.error(f"Error getting portfolio URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get portfolio URL")
 async def get_portfolio_settings(
     uid: str = Depends(get_current_user_uid),
     db: Session = Depends(get_db)
@@ -366,16 +452,21 @@ async def get_my_public_portfolio(
 
 @router.get("/{user_identifier}/public")
 async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_db)):
-    """Get public portfolio data for viewing"""
+    """Get public portfolio data for viewing (supports both slug and UID)"""
     try:
-        # For now, treat identifier as UID (can be enhanced later for slugs)
         user_id = user_identifier
         
-        logger.info(f"Looking for portfolio with user_id: {user_id}")
+        # Try to resolve slug to UID first
+        slug_record = db.query(PortfolioSlug).filter(
+            PortfolioSlug.slug == user_identifier
+        ).first()
         
-        # Debug: List all portfolio settings to see what UIDs exist
-        all_settings = db.query(PortfolioSettings).all()
-        logger.info(f"Available portfolio UIDs: {[s.uid for s in all_settings]}")
+        if slug_record:
+            user_id = slug_record.uid
+            logger.info(f"Resolved slug '{user_identifier}' to UID: {user_id}")
+        else:
+            # Treat as direct UID
+            logger.info(f"Using identifier as UID: {user_identifier}")
         
         # Get settings
         settings = db.query(PortfolioSettings).filter(
@@ -384,12 +475,7 @@ async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_d
         
         if not settings:
             logger.warning(f"No portfolio settings found for user_id: {user_id}")
-            # Return available UIDs in error for debugging
-            available_uids = [s.uid for s in all_settings if s.is_published]
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Portfolio not found. Available published portfolios: {available_uids}"
-            )
+            raise HTTPException(status_code=404, detail="Portfolio not found")
         
         if not settings.is_published:
             logger.warning(f"Portfolio exists but not published for user_id: {user_id}")

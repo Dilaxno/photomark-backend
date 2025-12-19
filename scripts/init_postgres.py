@@ -16,6 +16,8 @@ from models.pricing import PricingEvent, Subscription
 from models.replies import Reply
 from models.prelaunch import PrelaunchSignup
 from models.collaborator import Collaborator
+from models.portfolio import PortfolioPhoto, PortfolioSettings
+from models.portfolio_slug import PortfolioSlug
 
 def init_database():
     """Create all tables in the database"""
@@ -36,6 +38,9 @@ def init_database():
         print("  - replies")
         print("  - prelaunch_signups")
         print("  - collaborators")
+        print("  - portfolio_photos")
+        print("  - portfolio_settings")
+        print("  - portfolio_slugs")
         
     except Exception as e:
         print(f"✗ Error creating tables: {e}")
