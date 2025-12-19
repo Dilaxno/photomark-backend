@@ -42,8 +42,8 @@ def generate_user_slug(display_name: Optional[str] = None, email: Optional[str] 
     
     return 'portfolio'
 
-def get_or_create_portfolio_slug(uid: str, display_name: Optional[str] = None, email: Optional[str] = None, db: Session = None) -> str:
-    """Get existing portfolio slug or create a new one"""
+def get_or_create_portfolio_slug(uid: str, portfolio_title: Optional[str] = None, display_name: Optional[str] = None, email: Optional[str] = None, db: Session = None) -> str:
+    """Get existing portfolio slug or create a new one using portfolio title"""
     if not db:
         raise ValueError("Database session required")
     
@@ -52,8 +52,11 @@ def get_or_create_portfolio_slug(uid: str, display_name: Optional[str] = None, e
     if existing_slug:
         return existing_slug.slug
     
-    # Generate base slug
-    base_slug = generate_user_slug(display_name, email)
+    # Generate base slug - prioritize portfolio title
+    if portfolio_title and portfolio_title.strip():
+        base_slug = slugify(portfolio_title.strip())
+    else:
+        base_slug = generate_user_slug(display_name, email)
     
     # Ensure uniqueness by checking existing slugs
     slug = base_slug
@@ -112,13 +115,15 @@ async def get_portfolio_url(
 ):
     """Get the public portfolio URL for the current user"""
     try:
-        # Get or create portfolio slug
-        slug = get_or_create_portfolio_slug(uid, db=db)
-        
-        # Check if portfolio is published
+        # Get portfolio settings to access the title
         settings = db.query(PortfolioSettings).filter(
             PortfolioSettings.uid == uid
         ).first()
+        
+        portfolio_title = settings.title if settings else None
+        
+        # Get or create portfolio slug using the portfolio title
+        slug = get_or_create_portfolio_slug(uid, portfolio_title=portfolio_title, db=db)
         
         is_published = settings.is_published if settings else False
         
@@ -140,6 +145,45 @@ async def get_portfolio_url(
     except Exception as e:
         logger.error(f"Error getting portfolio URL: {e}")
         raise HTTPException(status_code=500, detail="Failed to get portfolio URL")
+
+@router.post("/regenerate-slug")
+async def regenerate_portfolio_slug(
+    uid: str = Depends(get_current_user_uid),
+    db: Session = Depends(get_db)
+):
+    """Regenerate portfolio slug based on current portfolio title"""
+    try:
+        # Get current portfolio settings
+        settings = db.query(PortfolioSettings).filter(
+            PortfolioSettings.uid == uid
+        ).first()
+        
+        if not settings:
+            raise HTTPException(status_code=404, detail="Portfolio settings not found")
+        
+        # Delete existing slug
+        existing_slug = db.query(PortfolioSlug).filter(PortfolioSlug.uid == uid).first()
+        if existing_slug:
+            db.delete(existing_slug)
+            db.commit()
+        
+        # Generate new slug based on portfolio title
+        new_slug = get_or_create_portfolio_slug(uid, portfolio_title=settings.title, db=db)
+        
+        # Generate new URL
+        cloud_url = f"https://photomark.cloud/portfolio/{new_slug}"
+        
+        return {
+            "slug": new_slug,
+            "cloudUrl": cloud_url,
+            "message": "Portfolio slug regenerated successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error regenerating portfolio slug: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to regenerate slug")
+
+@router.get("/settings")
 async def get_portfolio_settings(
     uid: str = Depends(get_current_user_uid),
     db: Session = Depends(get_db)

@@ -59,13 +59,17 @@ def migrate_portfolio_slugs():
                 print(f"  ✓ Slug already exists for {portfolio.uid}: {existing_slug.slug}")
                 continue
             
-            # Get user info for better slug generation
-            user = db.query(User).filter(User.uid == portfolio.uid).first()
-            display_name = user.display_name if user else None
-            email = user.email if user else None
-            
-            # Generate base slug
-            base_slug = generate_user_slug(display_name, email)
+            # Use portfolio title first, then fall back to user info
+            if portfolio.title and portfolio.title.strip():
+                base_slug = slugify(portfolio.title.strip())
+                print(f"  → Using portfolio title '{portfolio.title}' for {portfolio.uid}")
+            else:
+                # Get user info for fallback slug generation
+                user = db.query(User).filter(User.uid == portfolio.uid).first()
+                display_name = user.display_name if user else None
+                email = user.email if user else None
+                base_slug = generate_user_slug(display_name, email)
+                print(f"  → Using user info for {portfolio.uid} (no portfolio title)")
             
             # Ensure uniqueness
             slug = base_slug

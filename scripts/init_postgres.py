@@ -18,6 +18,7 @@ from models.prelaunch import PrelaunchSignup
 from models.collaborator import Collaborator
 from models.portfolio import PortfolioPhoto, PortfolioSettings
 from models.portfolio_slug import PortfolioSlug
+from models.analytics import PhotoView, GalleryView, DailyAnalytics, PhotoAnalytics, DownloadEvent
 
 def init_database():
     """Create all tables in the database"""
@@ -41,6 +42,11 @@ def init_database():
         print("  - portfolio_photos")
         print("  - portfolio_settings")
         print("  - portfolio_slugs")
+        print("  - photo_views")
+        print("  - gallery_views")
+        print("  - daily_analytics")
+        print("  - photo_analytics")
+        print("  - download_events")
         
     except Exception as e:
         print(f"✗ Error creating tables: {e}")

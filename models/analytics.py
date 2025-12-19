@@ -25,19 +25,25 @@ class PhotoView(Base):
     vault_name = Column(String(255), nullable=True, index=True)
     share_token = Column(String(255), nullable=True, index=True)
     
-    # Viewer info
-    visitor_hash = Column(String(64), nullable=False, index=True)  # Hash of IP + User-Agent
-    ip_address = Column(String(45), nullable=True)
+    # Viewer info (enhanced with device fingerprinting)
+    visitor_hash = Column(String(64), nullable=False, index=True)  # Hash of IP + User-Agent + Device fingerprint
+    ip_hash = Column(String(64), nullable=True, index=True)  # Hashed IP for privacy
+    device_fingerprint = Column(String(128), nullable=True)  # Browser fingerprint hash
     country = Column(String(2), nullable=True)  # ISO country code
     city = Column(String(100), nullable=True)
     
-    # Device info
+    # Device info (enhanced)
     device_type = Column(String(20), nullable=True)  # mobile, tablet, desktop
     browser = Column(String(50), nullable=True)
+    browser_version = Column(String(20), nullable=True)
     os = Column(String(50), nullable=True)
+    os_version = Column(String(20), nullable=True)
+    screen_resolution = Column(String(20), nullable=True)  # e.g., "1920x1080"
     
-    # Engagement
+    # Engagement (enhanced)
     view_duration_seconds = Column(Integer, nullable=True)
+    is_download = Column(Boolean, default=False, nullable=False)  # Track if this was a download
+    download_type = Column(String(20), nullable=True)  # original, lowres, single
     
     # Context
     referrer = Column(Text, nullable=True)
@@ -61,21 +67,26 @@ class GalleryView(Base):
     share_token = Column(String(255), nullable=True, index=True)
     page_type = Column(String(50), nullable=True)  # vault, gallery, portfolio, shop
     
-    # Viewer info
+    # Viewer info (enhanced with device fingerprinting)
     visitor_hash = Column(String(64), nullable=False, index=True)
-    ip_address = Column(String(45), nullable=True)
+    ip_hash = Column(String(64), nullable=True, index=True)  # Hashed IP for privacy
+    device_fingerprint = Column(String(128), nullable=True)  # Browser fingerprint hash
     country = Column(String(2), nullable=True)
     city = Column(String(100), nullable=True)
     
-    # Device info
+    # Device info (enhanced)
     device_type = Column(String(20), nullable=True)
     browser = Column(String(50), nullable=True)
+    browser_version = Column(String(20), nullable=True)
     os = Column(String(50), nullable=True)
+    os_version = Column(String(20), nullable=True)
+    screen_resolution = Column(String(20), nullable=True)
     
-    # Session info
+    # Session info (enhanced)
     session_id = Column(String(128), nullable=True, index=True)
     session_duration_seconds = Column(Integer, nullable=True)
     photos_viewed = Column(Integer, default=0)
+    photos_downloaded = Column(Integer, default=0)  # Track downloads in session
     
     # Engagement
     favorited_count = Column(Integer, default=0)
@@ -87,6 +98,51 @@ class GalleryView(Base):
     
     # Timestamps
     viewed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DownloadEvent(Base):
+    """Track download events with detailed analytics"""
+    __tablename__ = "download_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Owner info
+    owner_uid = Column(String(128), nullable=False, index=True)
+    
+    # Download info
+    vault_name = Column(String(255), nullable=True, index=True)
+    share_token = Column(String(255), nullable=True, index=True)
+    download_type = Column(String(20), nullable=False)  # original, lowres, single, zip
+    photo_keys = Column(JSON, nullable=True)  # List of photo keys downloaded
+    file_count = Column(Integer, default=1)
+    total_size_bytes = Column(Integer, nullable=True)
+    
+    # Viewer info (enhanced with device fingerprinting)
+    visitor_hash = Column(String(64), nullable=False, index=True)
+    ip_hash = Column(String(64), nullable=True, index=True)
+    device_fingerprint = Column(String(128), nullable=True)
+    country = Column(String(2), nullable=True)
+    city = Column(String(100), nullable=True)
+    
+    # Device info
+    device_type = Column(String(20), nullable=True)
+    browser = Column(String(50), nullable=True)
+    browser_version = Column(String(20), nullable=True)
+    os = Column(String(50), nullable=True)
+    os_version = Column(String(20), nullable=True)
+    screen_resolution = Column(String(20), nullable=True)
+    
+    # Payment info (for paid downloads)
+    is_paid = Column(Boolean, default=False)
+    payment_amount_cents = Column(Integer, nullable=True)
+    payment_id = Column(String(255), nullable=True)
+    
+    # Context
+    referrer = Column(Text, nullable=True)
+    source = Column(String(50), nullable=True)
+    
+    # Timestamps
+    downloaded_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class DailyAnalytics(Base):

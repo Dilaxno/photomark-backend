@@ -23,7 +23,7 @@ except ImportError:
 from core.config import logger
 from core.auth import get_uid_from_request
 from core.database import get_db
-from models.analytics import PhotoView, GalleryView, DailyAnalytics, PhotoAnalytics
+from models.analytics import PhotoView, GalleryView, DailyAnalytics, PhotoAnalytics, DownloadEvent
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -50,6 +50,20 @@ class TrackGalleryView(BaseModel):
     referrer: Optional[str] = None
 
 
+class TrackDownload(BaseModel):
+    owner_uid: str
+    vault_name: Optional[str] = None
+    share_token: Optional[str] = None
+    download_type: str  # original, lowres, single, zip
+    photo_keys: Optional[List[str]] = None
+    file_count: Optional[int] = 1
+    total_size_bytes: Optional[int] = None
+    is_paid: Optional[bool] = False
+    payment_amount_cents: Optional[int] = None
+    payment_id: Optional[str] = None
+    referrer: Optional[str] = None
+
+
 class TrackEngagement(BaseModel):
     owner_uid: str
     vault_name: Optional[str] = None
@@ -59,12 +73,37 @@ class TrackEngagement(BaseModel):
 
 # ============ Helper Functions ============
 
-def _get_visitor_hash(request: Request) -> str:
+def _get_visitor_hash(request: Request, device_fingerprint: str = None) -> str:
     """Generate a hash to identify unique visitors without storing PII"""
     ip = request.client.host if request.client else "unknown"
     ua = request.headers.get("user-agent", "unknown")
-    raw = f"{ip}:{ua}"
+    fingerprint = device_fingerprint or ""
+    raw = f"{ip}:{ua}:{fingerprint}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def _get_ip_hash(request: Request) -> str:
+    """Generate a hash of the IP address for privacy-compliant tracking"""
+    ip = request.client.host if request.client else "unknown"
+    return hashlib.sha256(f"ip:{ip}".encode()).hexdigest()[:32]
+
+
+def _get_device_fingerprint_hash(fingerprint_data: dict) -> str:
+    """Generate a hash from device fingerprint data"""
+    if not fingerprint_data:
+        return ""
+    
+    # Create a consistent string from fingerprint data
+    fingerprint_str = "|".join([
+        str(fingerprint_data.get("screen", "")),
+        str(fingerprint_data.get("timezone", "")),
+        str(fingerprint_data.get("language", "")),
+        str(fingerprint_data.get("platform", "")),
+        str(fingerprint_data.get("plugins", "")),
+        str(fingerprint_data.get("canvas", ""))
+    ])
+    
+    return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:32]
 
 
 def _parse_user_agent(ua_string: str) -> dict:
@@ -78,7 +117,13 @@ def _parse_user_agent(ua_string: str) -> dict:
             device_type = "tablet"
         else:
             device_type = "desktop"
-        return {"device_type": device_type, "browser": "unknown", "os": "unknown"}
+        return {
+            "device_type": device_type,
+            "browser": "unknown",
+            "browser_version": "unknown",
+            "os": "unknown",
+            "os_version": "unknown"
+        }
     
     try:
         ua = parse_ua(ua_string)
@@ -86,10 +131,18 @@ def _parse_user_agent(ua_string: str) -> dict:
         return {
             "device_type": device_type,
             "browser": ua.browser.family,
-            "os": ua.os.family
+            "browser_version": ua.browser.version_string,
+            "os": ua.os.family,
+            "os_version": ua.os.version_string
         }
     except:
-        return {"device_type": "unknown", "browser": "unknown", "os": "unknown"}
+        return {
+            "device_type": "unknown",
+            "browser": "unknown",
+            "browser_version": "unknown",
+            "os": "unknown",
+            "os_version": "unknown"
+        }
 
 
 def _get_source(referrer: Optional[str]) -> str:
@@ -112,42 +165,88 @@ def _get_source(referrer: Optional[str]) -> str:
 async def track_photo_view(
     request: Request,
     data: TrackPhotoView,
+    fingerprint_data: dict = Body(default={}),
     db: Session = Depends(get_db)
 ):
     """Track a photo view (called from frontend)"""
-    visitor_hash = _get_visitor_hash(request)
-    ua_info = _parse_user_agent(request.headers.get("user-agent", ""))
-    source = _get_source(data.referrer)
-    
-    # Create view record
-    view = PhotoView(
-        owner_uid=data.owner_uid,
-        photo_key=data.photo_key,
-        vault_name=data.vault_name,
-        share_token=data.share_token,
-        visitor_hash=visitor_hash,
-        ip_address=request.client.host if request.client else None,
-        device_type=ua_info["device_type"],
-        browser=ua_info["browser"],
-        os=ua_info["os"],
-        view_duration_seconds=data.view_duration_seconds,
-        referrer=data.referrer,
-        source=source
-    )
-    db.add(view)
-    
-    # Update photo analytics summary
-    photo_stats = db.query(PhotoAnalytics).filter(
-        PhotoAnalytics.owner_uid == data.owner_uid,
-        PhotoAnalytics.photo_key == data.photo_key
-    ).first()
-    
-    if photo_stats:
-        photo_stats.total_views += 1
-        photo_stats.last_viewed_at = datetime.utcnow()
-        # Check if unique viewer
-        existing_view = db.query(PhotoView).filter(
-            PhotoView.owner_uid == data.owner_uid,
+    try:
+        # Generate hashes for privacy-compliant tracking
+        device_fingerprint = _get_device_fingerprint_hash(fingerprint_data)
+        visitor_hash = _get_visitor_hash(request, device_fingerprint)
+        ip_hash = _get_ip_hash(request)
+        
+        # Parse user agent for device info
+        ua_info = _parse_user_agent(request.headers.get("user-agent", ""))
+        source = _get_source(data.referrer)
+        
+        # Extract screen resolution from fingerprint data
+        screen_resolution = fingerprint_data.get("screen", "")
+        
+        # Create view record
+        view = PhotoView(
+            owner_uid=data.owner_uid,
+            photo_key=data.photo_key,
+            vault_name=data.vault_name,
+            share_token=data.share_token,
+            visitor_hash=visitor_hash,
+            ip_hash=ip_hash,
+            device_fingerprint=device_fingerprint,
+            device_type=ua_info["device_type"],
+            browser=ua_info["browser"],
+            browser_version=ua_info["browser_version"],
+            os=ua_info["os"],
+            os_version=ua_info["os_version"],
+            screen_resolution=screen_resolution,
+            view_duration_seconds=data.view_duration_seconds,
+            referrer=data.referrer,
+            source=source
+        )
+        db.add(view)
+        
+        # Update photo analytics summary
+        photo_stats = db.query(PhotoAnalytics).filter(
+            PhotoAnalytics.owner_uid == data.owner_uid,
+            PhotoAnalytics.photo_key == data.photo_key
+        ).first()
+        
+        if photo_stats:
+            photo_stats.total_views += 1
+            photo_stats.last_viewed_at = datetime.utcnow()
+            # Check if unique viewer
+            existing_view = db.query(PhotoView).filter(
+                PhotoView.owner_uid == data.owner_uid,
+                PhotoView.photo_key == data.photo_key,
+                PhotoView.visitor_hash == visitor_hash
+            ).first()
+            
+            if not existing_view:
+                photo_stats.unique_viewers += 1
+        else:
+            # Create new photo analytics record
+            photo_stats = PhotoAnalytics(
+                owner_uid=data.owner_uid,
+                photo_key=data.photo_key,
+                vault_name=data.vault_name,
+                total_views=1,
+                unique_viewers=1,
+                last_viewed_at=datetime.utcnow()
+            )
+            db.add(photo_stats)
+        
+        db.commit()
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Photo view tracked successfully"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error tracking photo view: {e}")
+        db.rollback()
+        return JSONResponse({
+            "success": False,
+            "error": "Failed to track photo view"
+        }, status_code=500)
             PhotoView.photo_key == data.photo_key,
             PhotoView.visitor_hash == visitor_hash,
             PhotoView.id != view.id
@@ -168,6 +267,104 @@ async def track_photo_view(
     
     db.commit()
     return {"ok": True}
+
+
+@router.post("/track/download")
+async def track_download(
+    request: Request,
+    data: TrackDownload,
+    fingerprint_data: dict = Body(default={}),
+    db: Session = Depends(get_db)
+):
+    """Track a download event with enhanced analytics"""
+    try:
+        # Generate hashes for privacy-compliant tracking
+        device_fingerprint = _get_device_fingerprint_hash(fingerprint_data)
+        visitor_hash = _get_visitor_hash(request, device_fingerprint)
+        ip_hash = _get_ip_hash(request)
+        
+        # Parse user agent for device info
+        ua_info = _parse_user_agent(request.headers.get("user-agent", ""))
+        source = _get_source(data.referrer)
+        
+        # Extract screen resolution from fingerprint data
+        screen_resolution = fingerprint_data.get("screen", "")
+        
+        # Create download event record
+        download_event = DownloadEvent(
+            owner_uid=data.owner_uid,
+            vault_name=data.vault_name,
+            share_token=data.share_token,
+            download_type=data.download_type,
+            photo_keys=data.photo_keys,
+            file_count=data.file_count or 1,
+            total_size_bytes=data.total_size_bytes,
+            visitor_hash=visitor_hash,
+            ip_hash=ip_hash,
+            device_fingerprint=device_fingerprint,
+            device_type=ua_info["device_type"],
+            browser=ua_info["browser"],
+            browser_version=ua_info["browser_version"],
+            os=ua_info["os"],
+            os_version=ua_info["os_version"],
+            screen_resolution=screen_resolution,
+            is_paid=data.is_paid or False,
+            payment_amount_cents=data.payment_amount_cents,
+            payment_id=data.payment_id,
+            referrer=data.referrer,
+            source=source
+        )
+        db.add(download_event)
+        
+        # Update photo analytics for each downloaded photo
+        if data.photo_keys:
+            for photo_key in data.photo_keys:
+                photo_stats = db.query(PhotoAnalytics).filter(
+                    PhotoAnalytics.owner_uid == data.owner_uid,
+                    PhotoAnalytics.photo_key == photo_key
+                ).first()
+                
+                if photo_stats:
+                    photo_stats.downloads_count += 1
+                    photo_stats.last_downloaded_at = datetime.utcnow()
+                else:
+                    # Create new photo analytics record
+                    photo_stats = PhotoAnalytics(
+                        owner_uid=data.owner_uid,
+                        photo_key=photo_key,
+                        vault_name=data.vault_name,
+                        downloads_count=1,
+                        last_downloaded_at=datetime.utcnow()
+                    )
+                    db.add(photo_stats)
+        
+        # Update gallery view session if session_id provided
+        session_id = request.headers.get("x-session-id")
+        if session_id and data.vault_name:
+            gallery_view = db.query(GalleryView).filter(
+                GalleryView.session_id == session_id,
+                GalleryView.vault_name == data.vault_name,
+                GalleryView.owner_uid == data.owner_uid
+            ).order_by(GalleryView.viewed_at.desc()).first()
+            
+            if gallery_view:
+                gallery_view.photos_downloaded += data.file_count or 1
+                gallery_view.downloaded_count += 1
+        
+        db.commit()
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Download tracked successfully"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error tracking download: {e}")
+        db.rollback()
+        return JSONResponse({
+            "success": False,
+            "error": "Failed to track download"
+        }, status_code=500)
 
 
 @router.post("/track/gallery")

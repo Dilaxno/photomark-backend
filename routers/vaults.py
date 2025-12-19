@@ -9,6 +9,7 @@ import asyncio
 import qrcode
 import subprocess
 import tempfile
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Body, UploadFile, File, Form, BackgroundTasks, Depends
@@ -30,6 +31,98 @@ from models.user import User
 from models.vault_trash import VaultTrash, VaultVersion
 
 router = APIRouter(prefix="/api", tags=["vaults"])
+
+
+async def _track_download_analytics(
+    request: Request,
+    owner_uid: str,
+    vault_name: str,
+    share_token: str,
+    download_type: str,
+    photo_keys: List[str],
+    file_count: int,
+    total_size_bytes: Optional[int] = None,
+    is_paid: bool = False,
+    payment_amount_cents: Optional[int] = None,
+    payment_id: Optional[str] = None
+):
+    """Track download analytics asynchronously"""
+    try:
+        from models.analytics import DownloadEvent
+        from core.database import get_db
+        
+        # Generate analytics data
+        visitor_hash = hashlib.sha256(f"{request.client.host}:{request.headers.get('user-agent', '')}".encode()).hexdigest()[:32]
+        ip_hash = hashlib.sha256(f"ip:{request.client.host}".encode()).hexdigest()[:32]
+        
+        # Parse user agent
+        ua_string = request.headers.get("user-agent", "")
+        ua_lower = ua_string.lower()
+        if "mobile" in ua_lower or "android" in ua_lower or "iphone" in ua_lower:
+            device_type = "mobile"
+        elif "tablet" in ua_lower or "ipad" in ua_lower:
+            device_type = "tablet"
+        else:
+            device_type = "desktop"
+        
+        # Extract browser info (simple)
+        browser = "unknown"
+        if "chrome" in ua_lower:
+            browser = "Chrome"
+        elif "firefox" in ua_lower:
+            browser = "Firefox"
+        elif "safari" in ua_lower and "chrome" not in ua_lower:
+            browser = "Safari"
+        elif "edge" in ua_lower:
+            browser = "Edge"
+        
+        # Get referrer source
+        referrer = request.headers.get("referer", "")
+        source = "direct"
+        if referrer:
+            referrer_lower = referrer.lower()
+            if any(s in referrer_lower for s in ["facebook", "instagram", "twitter", "linkedin"]):
+                source = "social"
+            elif any(s in referrer_lower for s in ["google", "bing", "yahoo"]):
+                source = "search"
+            elif "mail" in referrer_lower:
+                source = "email"
+            else:
+                source = "referral"
+        
+        # Create download event
+        db = next(get_db())
+        try:
+            download_event = DownloadEvent(
+                owner_uid=owner_uid,
+                vault_name=vault_name,
+                share_token=share_token,
+                download_type=download_type,
+                photo_keys=photo_keys,
+                file_count=file_count,
+                total_size_bytes=total_size_bytes,
+                visitor_hash=visitor_hash,
+                ip_hash=ip_hash,
+                device_type=device_type,
+                browser=browser,
+                os="unknown",
+                is_paid=is_paid,
+                payment_amount_cents=payment_amount_cents,
+                payment_id=payment_id,
+                referrer=referrer,
+                source=source
+            )
+            db.add(download_event)
+            db.commit()
+            logger.info(f"Download analytics tracked: {download_type} for vault {vault_name}")
+        except Exception as e:
+            logger.error(f"Failed to track download analytics: {e}")
+            db.rollback()
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error in download analytics tracking: {e}")
 
 
 def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
@@ -3875,7 +3968,7 @@ async def dodo_webhook(request: Request):
 
 
 @router.get("/vaults/shared/originals.zip")
-async def vaults_shared_originals_zip(token: str, password: Optional[str] = None, keys: Optional[str] = None):
+async def vaults_shared_originals_zip(request: Request, token: str, password: Optional[str] = None, keys: Optional[str] = None):
     if not token or len(token) < 10:
         return JSONResponse({"error": "invalid token"}, status_code=400)
 
@@ -4022,6 +4115,27 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
     except Exception:
         pass
 
+    # Calculate total size for analytics
+    total_size = sum(len(content) for _, content in original_items)
+    
+    # Track download analytics
+    try:
+        await _track_download_analytics(
+            request=request,
+            owner_uid=uid,
+            vault_name=vault,
+            share_token=token,
+            download_type="original",
+            photo_keys=selected,
+            file_count=len(original_items),
+            total_size_bytes=total_size,
+            is_paid=(download_type == 'paid' and download_price_cents > 0),
+            payment_amount_cents=download_price_cents if download_type == 'paid' else None,
+            payment_id=rec.get('payment_id')
+        )
+    except Exception as e:
+        logger.error(f"Failed to track download analytics: {e}")
+
     # Build zip in-memory
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -4033,7 +4147,7 @@ async def vaults_shared_originals_zip(token: str, password: Optional[str] = None
 
 
 @router.get("/vaults/shared/lowres.zip")
-async def vaults_shared_lowres_zip(token: str, password: Optional[str] = None, keys: Optional[str] = None, max_size: Optional[int] = 1920, quality: Optional[int] = 60):
+async def vaults_shared_lowres_zip(request: Request, token: str, password: Optional[str] = None, keys: Optional[str] = None, max_size: Optional[int] = 1920, quality: Optional[int] = 60):
     if not token or len(token) < 10:
         return JSONResponse({"error": "invalid token"}, status_code=400)
 
@@ -4178,6 +4292,25 @@ async def vaults_shared_lowres_zip(token: str, password: Optional[str] = None, k
         _write_json_key(_share_key(token), rec)
     except Exception:
         pass
+
+    # Calculate total size for analytics
+    total_size = sum(len(content) for _, content in low_items)
+    
+    # Track download analytics
+    try:
+        await _track_download_analytics(
+            request=request,
+            owner_uid=uid,
+            vault_name=vault,
+            share_token=token,
+            download_type="lowres",
+            photo_keys=selected,
+            file_count=len(low_items),
+            total_size_bytes=total_size,
+            is_paid=False,  # Lowres downloads are typically free
+        )
+    except Exception as e:
+        logger.error(f"Failed to track lowres download analytics: {e}")
 
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
