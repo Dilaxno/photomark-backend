@@ -247,26 +247,6 @@ async def track_photo_view(
             "success": False,
             "error": "Failed to track photo view"
         }, status_code=500)
-            PhotoView.photo_key == data.photo_key,
-            PhotoView.visitor_hash == visitor_hash,
-            PhotoView.id != view.id
-        ).first()
-        if not existing_view:
-            photo_stats.unique_viewers += 1
-    else:
-        photo_stats = PhotoAnalytics(
-            owner_uid=data.owner_uid,
-            photo_key=data.photo_key,
-            vault_name=data.vault_name,
-            total_views=1,
-            unique_viewers=1,
-            first_viewed_at=datetime.utcnow(),
-            last_viewed_at=datetime.utcnow()
-        )
-        db.add(photo_stats)
-    
-    db.commit()
-    return {"ok": True}
 
 
 @router.post("/track/download")
