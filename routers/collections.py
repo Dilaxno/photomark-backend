@@ -52,16 +52,29 @@ async def list_collections(request: Request):
         
         collections = index_data.get("collections", [])
         
-        # Enrich with photo counts
+        # Enrich with photo counts and cover images
         enriched = []
         for coll in collections:
             name = coll.get("name", "")
             data_key = _get_collection_data_key(uid, name)
             coll_data = read_json_key(data_key)
-            photo_count = len(coll_data.get("photos", [])) if isinstance(coll_data, dict) else 0
+            photos = coll_data.get("photos", []) if isinstance(coll_data, dict) else []
+            photo_count = len(photos)
+            
+            # Get cover image (first photo in collection)
+            cover_url = ""
+            cover_key = ""
+            if photos and len(photos) > 0:
+                first_photo = photos[0]
+                cover_key = first_photo.get("key", "")
+                if cover_key:
+                    cover_url = _get_url_for_key(cover_key, expires_in=3600)
+            
             enriched.append({
                 **coll,
-                "photo_count": photo_count
+                "photo_count": photo_count,
+                "cover_url": cover_url,
+                "cover_key": cover_key,
             })
         
         return {"collections": enriched}

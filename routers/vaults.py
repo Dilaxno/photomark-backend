@@ -1640,7 +1640,7 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         exp_dt = exp
     expire_pretty = f"{exp_dt.strftime('%Y-%m-%d at %H:%M')} UTC"
 
-    subject = f"{studio_name} has shared photos for your review"
+    subject = "Your photos are ready for review 📸"
 
     client_greeting = f"Hello {client_name}," if client_name else "Hello,"
 
@@ -1660,11 +1660,13 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
 
     body_html = (
         f"{client_greeting}<br><br>"
-        f"{studio_name} has shared a set of photos with you to review and proof.<br><br>"
-        f"You have been granted one-time access to view {count} {noun} in a secure photo vault.<br><br>"
-        f"Click the link below to view your photos:<br>"
+        f"Your photographer, {studio_name}, has shared your photos with you for review.<br><br>"
+        f"You can securely view {count} {noun}, mark your favorites, approve them, or request changes — all in one place.<br><br>"
+        f"👉 View your photos here:<br>"
         f"<a href=\"{link}\">{link}</a><br><br>"
-        f"This link will expire on: <strong>{expire_pretty}</strong>."
+        f"This private link will expire on <strong>{expire_pretty}</strong>.<br><br>"
+        f"If you have any questions while reviewing, you can leave feedback directly on the photos.<br><br>"
+        f"Enjoy reviewing your images!"
         f"{password_info}"
     )
 
@@ -1683,11 +1685,13 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
     text = (
         (client_greeting.replace('<br>', '').replace('</br>', '').replace('<br/>', ''))
         + "\n\n"
-        + f"{studio_name} has shared a set of photos with you to review and proof.\n\n"
-        + f"You have been granted one-time access to view {count} {noun} in a secure photo vault.\n\n"
-        + "Click the link below to view your photos:\n"
+        + f"Your photographer, {studio_name}, has shared your photos with you for review.\n\n"
+        + f"You can securely view {count} {noun}, mark your favorites, approve them, or request changes — all in one place.\n\n"
+        + "👉 View your photos here:\n"
         + f"{link}\n\n"
-        + f"This link will expire on: {expire_pretty}."
+        + f"This private link will expire on {expire_pretty}.\n\n"
+        + "If you have any questions while reviewing, you can leave feedback directly on the photos.\n\n"
+        + "Enjoy reviewing your images!"
         + password_info_text
     )
 
