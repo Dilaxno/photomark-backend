@@ -17,8 +17,8 @@ class PortfolioPhoto(Base):
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
-    def to_dict(self):
-        return {
+    def to_dict(self, include_thumb_url=False):
+        result = {
             "id": self.id,
             "url": self.url,
             "title": self.title,
@@ -26,6 +26,12 @@ class PortfolioPhoto(Base):
             "source": self.source,
             "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None
         }
+        
+        if include_thumb_url:
+            # This will be populated by the router
+            result["thumb_url"] = None
+            
+        return result
 
 class PortfolioSettings(Base):
     __tablename__ = "portfolio_settings"

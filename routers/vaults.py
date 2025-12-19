@@ -2755,7 +2755,10 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
     download_limit = int((rec or {}).get('download_limit') or 0)
     download_count = int((rec or {}).get('download_count') or 0)
     
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": final_price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit, "download_limit": download_limit, "download_count": download_count}
+    # Include proofing notification status
+    proofing_notified = bool((rec or {}).get('proofing_notified', False))
+    
+    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": final_price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit, "download_limit": download_limit, "download_count": download_count, "proofing_notified": proofing_notified}
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
@@ -3077,6 +3080,10 @@ async def vaults_shared_notify_proofing_complete(payload: ProofingCompletePayloa
         denied_count = 0
         total_reviewed = 0
 
+    # Check if already notified to prevent duplicate notifications
+    if rec.get('proofing_notified'):
+        return JSONResponse({"error": "Photographer has already been notified"}, status_code=400)
+
     # Send notification email to owner
     try:
         owner_email = (get_user_email_from_uid(uid) or "").strip()
@@ -3099,6 +3106,12 @@ async def vaults_shared_notify_proofing_complete(payload: ProofingCompletePayloa
             )
             text = f"{client_display} has finished proofing photos in vault '{vault}'. {approved_count} approved, {denied_count} need changes."
             send_email_smtp(owner_email, subject, html, text)
+            
+            # Mark as notified in the share record
+            rec['proofing_notified'] = True
+            rec['proofing_notified_at'] = datetime.utcnow().isoformat()
+            _write_json_key(_share_key(token), rec)
+            
     except Exception as ex:
         logger.warning(f"Failed to send proofing complete notification: {ex}")
         return JSONResponse({"error": "Failed to send notification"}, status_code=500)

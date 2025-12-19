@@ -9,12 +9,34 @@ import logging
 from sqlalchemy.orm import Session
 
 from core.auth import get_uid_from_request
-from utils.storage import upload_bytes
+from utils.storage import upload_bytes, get_presigned_url
 from core.database import get_db
 from models.portfolio import PortfolioPhoto, PortfolioSettings
+from core.config import s3, R2_BUCKET
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+def _get_thumbnail_url(url: str) -> Optional[str]:
+    """Generate Cloudinary thumbnail URL for photos following optimization standards"""
+    try:
+        # Check if it's a Cloudinary URL
+        if 'cloudinary.com' in url:
+            # For photo thumbnails: f_auto,q_auto:best,w_600,dpr_2.0
+            return url.replace('/upload/', '/upload/f_auto,q_auto:best,w_600,dpr_2.0/')
+        return None
+    except Exception:
+        return None
+
+def _get_optimized_photo_url(url: str, width: int = 1200) -> str:
+    """Generate optimized Cloudinary URL for full photos"""
+    try:
+        if 'cloudinary.com' in url:
+            # For full photos: f_auto,q_auto:best,w_[WIDTH],dpr_2.0
+            return url.replace('/upload/', f'/upload/f_auto,q_auto:best,w_{width},dpr_2.0/')
+        return url
+    except Exception:
+        return url
 
 async def get_current_user_uid(request: Request) -> str:
     uid = get_uid_from_request(request)
@@ -98,7 +120,18 @@ async def get_portfolio_photos(
             PortfolioPhoto.uid == uid
         ).order_by(PortfolioPhoto.order).all()
         
-        return {"photos": [photo.to_dict() for photo in photos]}
+        # Add optimized URLs to photos
+        photos_with_thumbs = []
+        for photo in photos:
+            photo_dict = photo.to_dict(include_thumb_url=True)
+            if photo.url:
+                # Generate thumbnail for fast loading
+                photo_dict["thumb_url"] = _get_thumbnail_url(photo.url)
+                # Optimize full photo URL for gallery view
+                photo_dict["url"] = _get_optimized_photo_url(photo.url, width=800)
+            photos_with_thumbs.append(photo_dict)
+        
+        return {"photos": photos_with_thumbs}
     except Exception as e:
         logger.error(f"Error getting portfolio photos: {e}")
         raise HTTPException(status_code=500, detail="Failed to get photos")
@@ -212,6 +245,49 @@ async def publish_portfolio(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update portfolio status")
 
+@router.get("/my-portfolio/public")
+async def get_my_public_portfolio(
+    uid: str = Depends(get_current_user_uid),
+    db: Session = Depends(get_db)
+):
+    """Get current user's public portfolio data"""
+    try:
+        # Get settings
+        settings = db.query(PortfolioSettings).filter(
+            PortfolioSettings.uid == uid
+        ).first()
+        
+        if not settings:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+        
+        if not settings.is_published:
+            raise HTTPException(status_code=404, detail="Portfolio not published")
+        
+        # Get photos
+        photos = db.query(PortfolioPhoto).filter(
+            PortfolioPhoto.uid == uid
+        ).order_by(PortfolioPhoto.order).all()
+        
+        # Add optimized URLs
+        photos_with_thumbs = []
+        for photo in photos:
+            photo_dict = photo.to_dict(include_thumb_url=True)
+            if photo.url:
+                photo_dict["thumb_url"] = _get_thumbnail_url(photo.url)
+                photo_dict["url"] = _get_optimized_photo_url(photo.url, width=1600)
+            photos_with_thumbs.append(photo_dict)
+        
+        return {
+            "settings": settings.to_dict(),
+            "photos": photos_with_thumbs,
+            "uid": uid  # Include UID for easy access
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting my public portfolio: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get portfolio")
+
 @router.get("/{user_identifier}/public")
 async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_db)):
     """Get public portfolio data for viewing"""
@@ -219,22 +295,44 @@ async def get_public_portfolio(user_identifier: str, db: Session = Depends(get_d
         # For now, treat identifier as UID (can be enhanced later for slugs)
         user_id = user_identifier
         
+        logger.info(f"Looking for portfolio with user_id: {user_id}")
+        
         # Get settings
         settings = db.query(PortfolioSettings).filter(
             PortfolioSettings.uid == user_id
         ).first()
         
-        if not settings or not settings.is_published:
-            raise HTTPException(status_code=404, detail="Portfolio not found or not published")
+        if not settings:
+            logger.warning(f"No portfolio settings found for user_id: {user_id}")
+            raise HTTPException(status_code=404, detail="Portfolio not found")
         
-        # Get photos
+        if not settings.is_published:
+            logger.warning(f"Portfolio exists but not published for user_id: {user_id}")
+            raise HTTPException(status_code=404, detail="Portfolio not published")
+        
+        logger.info(f"Found published portfolio for user_id: {user_id}")
+        
+        # Get photos with thumbnails
         photos = db.query(PortfolioPhoto).filter(
             PortfolioPhoto.uid == user_id
         ).order_by(PortfolioPhoto.order).all()
         
+        logger.info(f"Found {len(photos)} photos for portfolio")
+        
+        # Add optimized URLs to photos for public view
+        photos_with_thumbs = []
+        for photo in photos:
+            photo_dict = photo.to_dict(include_thumb_url=True)
+            if photo.url:
+                # Generate thumbnail for fast loading
+                photo_dict["thumb_url"] = _get_thumbnail_url(photo.url)
+                # Optimize full photo URL for public portfolio
+                photo_dict["url"] = _get_optimized_photo_url(photo.url, width=1600)
+            photos_with_thumbs.append(photo_dict)
+        
         return {
             "settings": settings.to_dict(),
-            "photos": [photo.to_dict() for photo in photos]
+            "photos": photos_with_thumbs
         }
     except HTTPException:
         raise
