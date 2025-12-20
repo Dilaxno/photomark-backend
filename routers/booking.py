@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
 
-from fastapi import APIRouter, Request, Query, HTTPException, Body
+from fastapi import APIRouter, Request, Query, HTTPException, Body, UploadFile, File, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -1174,6 +1174,94 @@ async def get_public_form(slug: str, request: Request):
                 "logo": settings.brand_logo if settings else None,
                 "business_name": settings.business_name if settings else None,
             } if settings else None,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/public/form/{slug}/calendar")
+async def get_public_form_calendar(
+    slug: str,
+    start: str = Query(..., description="Start date in ISO format"),
+    end: str = Query(..., description="End date in ISO format")
+):
+    """
+    Get calendar data for a public form (shows existing bookings).
+    This allows clients to see when sessions are already booked and by whom.
+    """
+    db: Session = next(get_db())
+    try:
+        # Find the form and get owner's uid
+        form = db.query(BookingForm).filter(
+            BookingForm.slug == slug,
+            BookingForm.is_published == True,
+            BookingForm.is_active == True
+        ).first()
+        
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        # Parse date range
+        start_date = _parse_datetime(start)
+        end_date = _parse_datetime(end)
+        
+        if not start_date or not end_date:
+            return JSONResponse({"error": "Invalid date range"}, status_code=400)
+        
+        # Get confirmed/pending bookings for this owner (not cancelled)
+        bookings = db.query(Booking).filter(
+            Booking.uid == form.uid,
+            Booking.session_date >= start_date,
+            Booking.session_date <= end_date,
+            Booking.status.in_([
+                BookingStatus.confirmed,
+                BookingStatus.pending,
+                BookingStatus.deposit_pending,
+                BookingStatus.contract_pending
+            ])
+        ).order_by(Booking.session_date.asc()).all()
+        
+        # Return booking info with client names
+        events = []
+        for b in bookings:
+            # Calculate end time if not set
+            end_time = b.session_end
+            if not end_time and b.session_date and b.duration_minutes:
+                end_time = b.session_date + timedelta(minutes=b.duration_minutes)
+            elif not end_time and b.session_date:
+                # Default 1 hour if no duration
+                end_time = b.session_date + timedelta(hours=1)
+            
+            # Get client name - use first name only for some privacy
+            client_name = b.client_name or "Client"
+            # Show full name for transparency
+            display_name = client_name
+            
+            events.append({
+                "id": str(b.id),
+                "title": b.title or f"{display_name}'s Session",
+                "client_name": display_name,
+                "start": b.session_date.isoformat() if b.session_date else None,
+                "end": end_time.isoformat() if end_time else None,
+                "status": "booked",
+                "session_type": b.session_type.value if b.session_type else None,
+            })
+        
+        # Also get owner's availability settings if they exist
+        settings = db.query(BookingSettings).filter(BookingSettings.uid == form.uid).first()
+        availability = None
+        if settings:
+            availability = {
+                "working_hours": settings.working_hours,
+                "blocked_dates": settings.blocked_dates,
+                "buffer_minutes": settings.buffer_minutes,
+                "advance_booking_days": settings.advance_booking_days,
+                "min_notice_hours": settings.min_notice_hours,
+            }
+        
+        return {
+            "events": events,
+            "availability": availability
         }
     finally:
         db.close()
@@ -2530,19 +2618,62 @@ async def update_settings(request: Request, data: SettingsUpdate):
 
 
 @router.post("/settings/upload-logo")
-async def upload_logo(request: Request):
-    """Upload brand logo - returns URL to store in settings"""
+async def upload_logo(request: Request, file: UploadFile = File(...)):
+    """Upload brand logo using R2 storage - secure per user"""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    # This endpoint expects the frontend to handle the actual file upload
-    # to a storage service (like S3 or Firebase Storage) and then call
-    # PUT /settings with the brand_logo URL
-    # 
-    # For now, we just return instructions
-    return {
-        "message": "Upload your logo to storage and then update settings with the URL",
-        "endpoint": "PUT /api/booking/settings",
-        "field": "brand_logo"
-    }
+    if not file:
+        return JSONResponse({"error": "File required"}, status_code=400)
+    
+    # Rate limiting
+    from utils.rate_limit import check_upload_rate_limit
+    allowed, rate_err = check_upload_rate_limit(uid, file_count=1)
+    if not allowed:
+        return JSONResponse({"error": rate_err}, status_code=429)
+    
+    try:
+        name = file.filename or "logo"
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".webp", ".svg"):
+            ext = ".png"
+        
+        ct = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+        }.get(ext, "application/octet-stream")
+        
+        data = await file.read()
+        
+        # Validate file size (logos should be small, max 5MB)
+        if len(data) > 5 * 1024 * 1024:
+            return JSONResponse({"error": "Logo file too large. Maximum size is 5MB."}, status_code=400)
+        
+        # Validate file type
+        if not file.content_type or not file.content_type.startswith('image/'):
+            return JSONResponse({"error": "Invalid file type. Please upload an image."}, status_code=400)
+        
+        # Create secure user-specific path
+        date_prefix = datetime.utcnow().strftime('%Y/%m/%d')
+        key = f"users/{uid}/booking/branding/{date_prefix}/logo{ext}"
+        
+        # Upload to R2
+        from utils.storage import upload_bytes
+        url = upload_bytes(key, data, content_type=ct)
+        
+        return {"ok": True, "logo_url": url}
+        
+    except Exception as ex:
+        logger.warning(f"booking logo upload failed: {ex}")
+        # Provide additional diagnostics to the client
+        hint = ""
+        try:
+            from core.config import R2_PUBLIC_BASE_URL, R2_BUCKET
+            hint = f"Check R2 env and bucket. R2_PUBLIC_BASE_URL={R2_PUBLIC_BASE_URL} bucket={R2_BUCKET}"
+        except Exception:
+            pass
+        return JSONResponse({"error": "upload failed", "hint": hint}, status_code=500)
