@@ -3,6 +3,7 @@ Booking System Router
 Clean, modern booking/CRM system for photographers
 """
 import secrets
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, List
 
@@ -19,6 +20,7 @@ from models.booking import (
     Client, Booking, BookingPayment, SessionPackage, BookingSettings,
     BookingStatus, PaymentStatus, SessionType, BookingForm, FormSubmission
 )
+from utils.emailing import send_email_smtp, render_email
 
 router = APIRouter(prefix="/api/booking", tags=["booking"])
 
@@ -109,6 +111,106 @@ class SubmissionUpdate(BaseModel):
 
 
 # ============ Helper Functions ============
+
+def _send_booking_notification_email(
+    owner_email: str,
+    form_name: str,
+    contact_name: Optional[str],
+    contact_email: Optional[str],
+    contact_phone: Optional[str],
+    form_data: dict,
+    form_fields: list,
+    submission_id: str
+):
+    """Send email notification to form owner about new booking submission"""
+    import os
+    try:
+        # Build form fields for email template
+        email_fields = []
+        field_labels = {f.get("id"): f.get("label", f.get("id")) for f in form_fields}
+        
+        # Skip contact fields we already show separately
+        skip_types = {"name", "email", "phone"}
+        skip_ids = set()
+        for f in form_fields:
+            if f.get("type") in skip_types:
+                skip_ids.add(f.get("id"))
+        
+        for field_id, value in form_data.items():
+            if field_id in skip_ids or not value:
+                continue
+            label = field_labels.get(field_id, field_id.replace("_", " ").title())
+            # Format value
+            if isinstance(value, list):
+                display_value = ", ".join(str(v) for v in value)
+            elif isinstance(value, str) and value.startswith("{"):
+                # Try to parse JSON (e.g., location picker)
+                try:
+                    import json
+                    parsed = json.loads(value)
+                    if isinstance(parsed, dict) and "address" in parsed:
+                        display_value = parsed["address"]
+                    else:
+                        display_value = str(value)
+                except:
+                    display_value = str(value)
+            else:
+                display_value = str(value)
+            
+            if len(display_value) > 200:
+                display_value = display_value[:200] + "..."
+            
+            email_fields.append({"label": label, "value": display_value})
+        
+        # Get frontend URL for dashboard link
+        frontend_url = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip().rstrip("/")
+        dashboard_url = f"{frontend_url}/booking" if frontend_url else "#"
+        
+        # Get contact initial for avatar
+        contact_initial = (contact_name or "?")[0].upper()
+        
+        # Render email template
+        html = render_email(
+            "booking_notification.html",
+            form_name=form_name,
+            contact_name=contact_name or "Unknown",
+            contact_email=contact_email,
+            contact_phone=contact_phone,
+            contact_initial=contact_initial,
+            form_fields=email_fields if email_fields else None,
+            dashboard_url=dashboard_url,
+        )
+        
+        # Plain text version
+        text = f"""New Booking Submission!
+
+Someone submitted your booking form "{form_name}".
+
+Contact Information:
+- Name: {contact_name or 'Not provided'}
+- Email: {contact_email or 'Not provided'}
+- Phone: {contact_phone or 'Not provided'}
+
+View the full submission in your dashboard: {dashboard_url}
+"""
+        
+        # Send email
+        success = send_email_smtp(
+            to_addr=owner_email,
+            subject=f"🎉 New Booking: {contact_name or 'New Lead'} via {form_name}",
+            html=html,
+            text=text,
+            reply_to=contact_email if contact_email else None,
+        )
+        
+        if success:
+            logger.info(f"Booking notification email sent to {owner_email} for submission {submission_id}")
+        else:
+            logger.warning(f"Failed to send booking notification email to {owner_email}")
+            
+    except Exception as e:
+        logger.error(f"Error sending booking notification email: {e}")
+
 
 def _parse_session_type(value: str) -> SessionType:
     try:
@@ -926,6 +1028,42 @@ async def submit_public_form(request: Request, slug: str):
         form.submissions_count = (form.submissions_count or 0) + 1
         
         db.commit()
+        db.refresh(submission)
+        
+        # Send email notification to form owner (in background thread)
+        # Get owner's notification settings
+        settings = db.query(BookingSettings).filter(BookingSettings.uid == form.uid).first()
+        owner_email = None
+        should_send_email = True
+        
+        if settings:
+            # Check if email notifications are enabled
+            if settings.email_notifications is False:
+                should_send_email = False
+            # Use business email if set, otherwise we need to get user email from auth
+            owner_email = settings.business_email
+        
+        # Also check form-specific notify_email
+        if form.notify_email:
+            owner_email = form.notify_email
+        
+        if should_send_email and owner_email:
+            # Send email in background thread to not block response
+            thread = threading.Thread(
+                target=_send_booking_notification_email,
+                args=(
+                    owner_email,
+                    form.name,
+                    contact_name,
+                    contact_email,
+                    contact_phone,
+                    data,
+                    form.fields or [],
+                    str(submission.id)
+                )
+            )
+            thread.daemon = True
+            thread.start()
         
         return {
             "ok": True,
@@ -1101,6 +1239,108 @@ async def list_form_files(request: Request, form_id: str):
             })
         
         return {"files": files}
+    finally:
+        db.close()
+
+
+# ============ Notifications ============
+
+@router.get("/notifications")
+async def get_notifications(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    unread_only: bool = Query(False)
+):
+    """Get recent booking notifications (new submissions)"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        # Get recent submissions as notifications
+        query = db.query(FormSubmission).filter(FormSubmission.uid == uid)
+        
+        if unread_only:
+            query = query.filter(FormSubmission.status == "new")
+        
+        submissions = query.order_by(FormSubmission.created_at.desc()).limit(limit).all()
+        
+        # Get form names for context
+        form_ids = list(set(str(s.form_id) for s in submissions))
+        forms = db.query(BookingForm).filter(BookingForm.id.in_(form_ids)).all()
+        form_map = {str(f.id): f.name for f in forms}
+        
+        notifications = []
+        for sub in submissions:
+            notifications.append({
+                "id": str(sub.id),
+                "type": "new_booking",
+                "form_id": str(sub.form_id),
+                "form_name": form_map.get(str(sub.form_id), "Unknown Form"),
+                "contact_name": sub.contact_name or "Unknown",
+                "contact_email": sub.contact_email,
+                "status": sub.status,
+                "is_read": sub.status != "new",
+                "created_at": sub.created_at.isoformat() if sub.created_at else None,
+            })
+        
+        # Count unread
+        unread_count = db.query(func.count(FormSubmission.id)).filter(
+            FormSubmission.uid == uid,
+            FormSubmission.status == "new"
+        ).scalar() or 0
+        
+        return {
+            "notifications": notifications,
+            "unread_count": unread_count,
+        }
+    finally:
+        db.close()
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(request: Request, notification_id: str):
+    """Mark a notification as read"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        submission = db.query(FormSubmission).filter(
+            FormSubmission.id == notification_id,
+            FormSubmission.uid == uid
+        ).first()
+        
+        if not submission:
+            return JSONResponse({"error": "Notification not found"}, status_code=404)
+        
+        if submission.status == "new":
+            submission.status = "read"
+            db.commit()
+        
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@router.post("/notifications/read-all")
+async def mark_all_notifications_read(request: Request):
+    """Mark all notifications as read"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        db.query(FormSubmission).filter(
+            FormSubmission.uid == uid,
+            FormSubmission.status == "new"
+        ).update({"status": "read"})
+        db.commit()
+        
+        return {"ok": True}
     finally:
         db.close()
 
