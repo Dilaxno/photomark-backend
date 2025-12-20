@@ -77,8 +77,8 @@ def _get_thumbnail_url(url: str) -> Optional[str]:
     try:
         # Check if it's a Cloudinary URL
         if 'cloudinary.com' in url:
-            # For photo thumbnails: f_auto,q_auto:best,w_600,dpr_2.0
-            return url.replace('/upload/', '/upload/f_auto,q_auto:best,w_600,dpr_2.0/')
+            from utils.cloudinary import get_cloudinary_thumbnail_url
+            return get_cloudinary_thumbnail_url(url)
         return None
     except Exception:
         return None
@@ -87,8 +87,8 @@ def _get_optimized_photo_url(url: str, width: int = 1200) -> str:
     """Generate optimized Cloudinary URL for full photos"""
     try:
         if 'cloudinary.com' in url:
-            # For full photos: f_auto,q_auto:best,w_[WIDTH],dpr_2.0
-            return url.replace('/upload/', f'/upload/f_auto,q_auto:best,w_{width},dpr_2.0/')
+            from utils.cloudinary import get_cloudinary_optimized_url
+            return get_cloudinary_optimized_url(url, width)
         return url
     except Exception:
         return url

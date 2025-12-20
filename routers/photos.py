@@ -28,11 +28,17 @@ def _get_url_for_key(key: str, expires_in: int = 3600) -> str:
     return get_presigned_url(key, expires_in=expires_in) or ""
 
 
-def _get_thumbnail_url(key: str, expires_in: int = 3600) -> Optional[str]:
-    """Get thumbnail URL for a key if it exists."""
+def _get_thumbnail_url(key_or_url: str, expires_in: int = 3600) -> Optional[str]:
+    """Get thumbnail URL - uses Cloudinary for Cloudinary URLs, S3 thumbnails for storage keys."""
     try:
+        # If it's a Cloudinary URL, use Cloudinary thumbnail transformation
+        if 'cloudinary.com' in key_or_url:
+            from utils.cloudinary import get_cloudinary_thumbnail_url
+            return get_cloudinary_thumbnail_url(key_or_url)
+        
+        # Otherwise, treat as S3/R2 storage key and check for generated thumbnail
         from utils.thumbnails import get_thumbnail_key
-        thumb_key = get_thumbnail_key(key, 'small')
+        thumb_key = get_thumbnail_key(key_or_url, 'small')
         # Check if thumbnail exists before generating URL
         if s3 and R2_BUCKET:
             try:
