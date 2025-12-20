@@ -2857,7 +2857,42 @@ async def vaults_shared_photos(token: str, password: Optional[str] = None, db: S
     # Include proofing notification status
     proofing_notified = bool((rec or {}).get('proofing_notified', False))
     
-    return {"photos": items, "vault": vault, "email": email, "approvals": approvals, "favorites": favorites, "licensed": licensed, "removal_unlocked": removal_unlocked, "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), "price_cents": final_price_cents, "currency": currency, "share": share, "retouch": retouch, "download_permission": share['permission'], "client_role": role, "brand_kit": brand_kit, "download_limit": download_limit, "download_count": download_count, "proofing_notified": proofing_notified}
+    # Include final delivery status from vault metadata
+    final_delivery = None
+    try:
+        vault_meta = _read_vault_meta(uid, vault) or {}
+        if vault_meta.get("final_delivery"):
+            final_delivery = vault_meta["final_delivery"]
+    except Exception:
+        pass
+    
+    response_data = {
+        "photos": items, 
+        "vault": vault, 
+        "email": email, 
+        "approvals": approvals, 
+        "favorites": favorites, 
+        "licensed": licensed, 
+        "removal_unlocked": removal_unlocked, 
+        "requires_remove_password": bool((rec or {}).get("remove_pw_hash")), 
+        "price_cents": final_price_cents, 
+        "currency": currency, 
+        "share": share, 
+        "retouch": retouch, 
+        "download_permission": share['permission'], 
+        "client_role": role, 
+        "brand_kit": brand_kit, 
+        "download_limit": download_limit, 
+        "download_count": download_count, 
+        "proofing_notified": proofing_notified,
+        "owner_uid": uid
+    }
+    
+    # Add final delivery data if available
+    if final_delivery:
+        response_data["final_delivery"] = final_delivery
+    
+    return response_data
 
 
 def _update_approvals(uid: str, vault: str, photo_key: str, client_email: str, action: str, comment: str | None = None, client_name: str | None = None) -> dict:
@@ -3210,6 +3245,24 @@ async def vaults_shared_notify_proofing_complete(payload: ProofingCompletePayloa
             rec['proofing_notified'] = True
             rec['proofing_notified_at'] = datetime.utcnow().isoformat()
             _write_json_key(_share_key(token), rec)
+            
+            # Mark proofing as complete in vault metadata
+            try:
+                safe_vault = _vault_key(uid, vault)[1]
+                meta = _read_vault_meta(uid, safe_vault)
+                meta["proofing_complete"] = {
+                    "completed": True,
+                    "completed_at": datetime.utcnow().isoformat(),
+                    "client_email": client_email,
+                    "client_name": client_name,
+                    "approved_count": approved_count,
+                    "denied_count": denied_count,
+                    "total_reviewed": total_reviewed
+                }
+                _write_vault_meta(uid, safe_vault, meta)
+                logger.info(f"Marked proofing complete for vault {safe_vault} by client {client_email}")
+            except Exception as ex:
+                logger.warning(f"Failed to mark proofing complete in vault metadata: {ex}")
             
     except Exception as ex:
         logger.warning(f"Failed to send proofing complete notification: {ex}")
@@ -4515,3 +4568,109 @@ def _pg_upsert_vault_meta(db: Session, uid: str, name: str, meta_updates: dict, 
         except Exception:
             pass
         logger.warning(f"vault meta upsert failed: {ex}")
+
+
+@router.get("/vaults/proofing/status")
+async def get_proofing_status(request: Request, vault: str):
+    """Check if client proofing is completed for a vault"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    
+    try:
+        # Read vault metadata to check for proofing completion
+        meta = _read_vault_meta(uid, vault)
+        proofing_complete = meta.get("proofing_complete", {})
+        
+        if not proofing_complete.get("completed", False):
+            return {"completed": False}
+        
+        # Count approved images and retouch requests
+        approvals = meta.get("approvals", {}).get("by_photo", {})
+        approved_count = 0
+        retouch_count = 0
+        
+        for photo_key, photo_data in approvals.items():
+            by_email = photo_data.get("by_email", {})
+            for email, email_data in by_email.items():
+                if email_data.get("status") == "approved":
+                    approved_count += 1
+                    break  # Count each photo only once
+        
+        # Count retouch requests
+        retouch_queue = meta.get("retouch_queue", [])
+        retouch_count = len(retouch_queue)
+        
+        return {
+            "completed": True,
+            "approved_count": approved_count,
+            "retouch_count": retouch_count,
+            "completed_at": proofing_complete.get("completed_at")
+        }
+        
+    except Exception as ex:
+        logger.error(f"Failed to get proofing status: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
+class FinalDeliveryPayload(BaseModel):
+    vault: str
+    image_source: str  # 'approved' or 'edited'
+    delivery_type: str  # 'download' or 'view_only'
+    download_limit: Optional[int] = 1
+    expiration_days: Optional[int] = 7
+    zip_delivery: Optional[bool] = True
+
+
+@router.post("/vaults/final-delivery")
+async def prepare_final_delivery(request: Request, payload: FinalDeliveryPayload):
+    """Prepare final delivery for completed proofing"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    
+    try:
+        vault = payload.vault.strip()
+        if not vault:
+            return JSONResponse({"error": "vault name required"}, status_code=400)
+        
+        # Read vault metadata
+        meta = _read_vault_meta(uid, vault)
+        
+        # Verify proofing is completed
+        proofing_complete = meta.get("proofing_complete", {})
+        if not proofing_complete.get("completed", False):
+            return JSONResponse({"error": "proofing not completed"}, status_code=400)
+        
+        # Prepare final delivery configuration
+        final_delivery = {
+            "prepared": True,
+            "prepared_at": datetime.utcnow().isoformat(),
+            "image_source": payload.image_source,
+            "delivery_type": payload.delivery_type,
+            "download_limit": payload.download_limit or 1,
+            "expiration_days": payload.expiration_days or 7,
+            "zip_delivery": payload.zip_delivery if payload.zip_delivery is not None else True,
+            "downloads_used": 0
+        }
+        
+        # Update vault metadata
+        meta["final_delivery"] = final_delivery
+        _write_vault_meta(uid, vault, meta)
+        
+        # Clear the proofing completion banner (it's served its purpose)
+        if "proofing_complete" in meta:
+            del meta["proofing_complete"]
+            _write_vault_meta(uid, vault, meta)
+        
+        logger.info(f"Final delivery prepared for vault {vault} by {uid}")
+        
+        return {
+            "ok": True,
+            "vault": vault,
+            "final_delivery": final_delivery
+        }
+        
+    except Exception as ex:
+        logger.error(f"Failed to prepare final delivery: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
