@@ -57,6 +57,11 @@ def init_db():
     from models.shop import Shop, ShopSlug  # noqa: F401
     from models.uploads_domain import UploadsDomain  # noqa: F401
     from models.chat_workspace import ChatWorkspace  # noqa: F401
+    from models.booking import (  # noqa: F401
+        Client, Booking, BookingPayment, SessionPackage, BookingSettings,
+        BookingForm, FormSubmission, FormView,
+        MiniSession, MiniSessionDate, MiniSessionSlot, Waitlist
+    )
     
     Base.metadata.create_all(bind=engine)
     # Run idempotent DDL inside a transaction so changes are committed
