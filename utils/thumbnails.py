@@ -1,18 +1,18 @@
 """
 Thumbnail generation utilities for optimized image loading.
-Generates small thumbnails (600px) for grid views and medium thumbnails (1200px) for previews.
-Higher resolution for retina/HiDPI displays.
+Generates thumbnails matching Cloudinary optimization standards.
+Thumbnails are 1200px (600px base × 2.0 DPR) for retina/HiDPI displays.
 """
 import io
 from PIL import Image
 from typing import Optional, Tuple
 from core.config import logger
 
-# Thumbnail sizes - optimized for retina/HiDPI displays
-THUMB_SMALL = 800   # For grid views (2x for 400px display, high quality)
-THUMB_MEDIUM = 1200  # For previews/lightbox (2x for 600px display)
+# Thumbnail sizes - matching Cloudinary standards (w_600,dpr_2.0 = 1200px actual)
+THUMB_SMALL = 1200   # For grid/gallery views (600px base × 2.0 DPR, matches Cloudinary)
+THUMB_MEDIUM = 1600  # For lightbox/full views (800px base × 2.0 DPR)
 
-def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: int = 92) -> Optional[bytes]:
+def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: int = 95) -> Optional[bytes]:
     """
     Generate a thumbnail from image data.
     
@@ -57,7 +57,7 @@ def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: 
             from PIL import ImageFilter
             img = img.filter(ImageFilter.UnsharpMask(radius=0.5, percent=50, threshold=2))
         
-        # Save as optimized JPEG with high quality settings
+        # Save as optimized JPEG with highest quality settings (matching Cloudinary q_auto:best)
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=quality, optimize=True, progressive=True, 
                  subsampling=0, qtables='web_high')
@@ -70,7 +70,8 @@ def generate_thumbnail(image_data: bytes, max_size: int = THUMB_SMALL, quality: 
 
 def generate_thumbnails(image_data: bytes) -> Tuple[Optional[bytes], Optional[bytes]]:
     """
-    Generate both small and medium thumbnails with high quality.
+    Generate both small and medium thumbnails with highest quality.
+    Matches Cloudinary q_auto:best quality standards.
     
     Args:
         image_data: Original image bytes
@@ -78,8 +79,8 @@ def generate_thumbnails(image_data: bytes) -> Tuple[Optional[bytes], Optional[by
     Returns:
         Tuple of (small_thumb_bytes, medium_thumb_bytes)
     """
-    small = generate_thumbnail(image_data, THUMB_SMALL, quality=95)
-    medium = generate_thumbnail(image_data, THUMB_MEDIUM, quality=95)
+    small = generate_thumbnail(image_data, THUMB_SMALL, quality=98)
+    medium = generate_thumbnail(image_data, THUMB_MEDIUM, quality=98)
     return small, medium
 
 

@@ -150,7 +150,7 @@ def upload_bytes(key: str, data: bytes, content_type: str = "image/jpeg", genera
     if generate_thumbs and content_type.startswith('image/') and _should_generate_thumbnail(key):
         try:
             from utils.thumbnails import generate_thumbnail, get_thumbnail_key, THUMB_SMALL
-            thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=92)
+            thumb_data = generate_thumbnail(data, THUMB_SMALL, quality=98)
             if thumb_data:
                 thumb_key = get_thumbnail_key(key, 'small')
                 try:
