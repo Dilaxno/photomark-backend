@@ -448,7 +448,8 @@ class BookingForm(Base):
     theme = Column(JSON, default=dict)  # Full theme object
     # Individual theme fields for quick access
     primary_color = Column(String(7), default="#4f46e5")
-    background_color = Column(String(7), default="#ffffff")
+    background_color = Column(String(7), default="#f5f5f5")  # Page background
+    form_bg_color = Column(String(7), default="#ffffff")  # Form card background
     text_color = Column(String(7), default="#111827")
     input_bg_color = Column(String(7), default="#ffffff")
     input_border_color = Column(String(7), default="#d1d5db")

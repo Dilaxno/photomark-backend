@@ -604,7 +604,8 @@ async def create_form(request: Request, data: FormCreate):
             # Style properties
             font_family=style.get("fontFamily", "Inter"),
             primary_color=style.get("primaryColor", "#1f2937"),
-            background_color=style.get("backgroundColor", "#ffffff"),
+            background_color=style.get("backgroundColor", "#f5f5f5"),
+            form_bg_color=style.get("formBgColor", "#ffffff"),
             text_color=style.get("textColor", "#1f2937"),
             input_border_radius=style.get("borderRadius", 12),
             input_border_color=style.get("borderColor", "#e5e7eb"),
@@ -660,6 +661,8 @@ async def update_form(request: Request, form_id: str, data: FormUpdate):
                 form.primary_color = style["primaryColor"]
             if "backgroundColor" in style:
                 form.background_color = style["backgroundColor"]
+            if "formBgColor" in style:
+                form.form_bg_color = style["formBgColor"]
             if "textColor" in style:
                 form.text_color = style["textColor"]
             if "borderRadius" in style:
@@ -714,7 +717,8 @@ def _form_to_response(form: BookingForm) -> dict:
         "style": {
             "fontFamily": form.font_family or "Inter",
             "primaryColor": form.primary_color or "#1f2937",
-            "backgroundColor": form.background_color or "#ffffff",
+            "backgroundColor": form.background_color or "#f5f5f5",
+            "formBgColor": form.form_bg_color or "#ffffff",
             "textColor": form.text_color or "#1f2937",
             "borderRadius": form.input_border_radius or 12,
             "borderColor": form.input_border_color or "#e5e7eb",
@@ -850,7 +854,8 @@ async def get_public_form(slug: str):
             "style": {
                 "fontFamily": form.font_family or "Inter",
                 "primaryColor": form.primary_color or "#1f2937",
-                "backgroundColor": form.background_color or "#ffffff",
+                "backgroundColor": form.background_color or "#f5f5f5",
+                "formBgColor": form.form_bg_color or "#ffffff",
                 "textColor": form.text_color or "#1f2937",
                 "borderRadius": form.input_border_radius or 12,
                 "borderColor": form.input_border_color or "#e5e7eb",
@@ -976,3 +981,126 @@ async def get_public_calendar(slug: str, start: str = Query(...), end: str = Que
         return {"events": events}
     finally:
         db.close()
+
+
+# ============ File Upload for Forms ============
+
+from fastapi import UploadFile, File
+
+@router.post("/public/form/{slug}/upload")
+async def upload_form_file(slug: str, file: UploadFile = File(...)):
+    """Upload a file for a form submission (stored in form owner's R2 bucket)"""
+    from utils.storage import upload_bytes, get_presigned_url
+    import os
+    
+    db: Session = next(get_db())
+    try:
+        # Get the form to find the owner's uid
+        form = db.query(BookingForm).filter(
+            BookingForm.slug == slug,
+            BookingForm.is_published == True
+        ).first()
+        
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        owner_uid = form.uid
+        
+        # Validate file
+        if not file.filename:
+            return JSONResponse({"error": "No file provided"}, status_code=400)
+        
+        # Check file size (max 10MB)
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            return JSONResponse({"error": "File too large (max 10MB)"}, status_code=400)
+        
+        # Get file extension
+        _, ext = os.path.splitext(file.filename)
+        ext = ext.lower()
+        
+        # Validate file type
+        allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.doc', '.docx', '.txt', '.heic']
+        if ext not in allowed_extensions:
+            return JSONResponse({"error": f"File type not allowed. Allowed: {', '.join(allowed_extensions)}"}, status_code=400)
+        
+        # Generate unique filename
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        random_suffix = secrets.token_hex(4)
+        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in '._-')[:50]
+        
+        # Store in owner's booking_uploads folder
+        key = f"users/{owner_uid}/booking_uploads/{form.id}/{timestamp}_{random_suffix}_{safe_filename}"
+        
+        # Determine content type
+        content_type = file.content_type or "application/octet-stream"
+        if ext in ['.jpg', '.jpeg']:
+            content_type = "image/jpeg"
+        elif ext == '.png':
+            content_type = "image/png"
+        elif ext == '.gif':
+            content_type = "image/gif"
+        elif ext == '.webp':
+            content_type = "image/webp"
+        elif ext == '.pdf':
+            content_type = "application/pdf"
+        elif ext in ['.doc', '.docx']:
+            content_type = "application/msword"
+        elif ext == '.txt':
+            content_type = "text/plain"
+        
+        # Upload to R2
+        url = upload_bytes(key, content, content_type=content_type, generate_thumbs=False)
+        
+        return {
+            "ok": True,
+            "key": key,
+            "url": url,
+            "filename": file.filename,
+            "size": len(content),
+            "content_type": content_type,
+        }
+    except Exception as e:
+        logger.error(f"File upload error: {e}")
+        return JSONResponse({"error": "Failed to upload file"}, status_code=500)
+    finally:
+        db.close()
+
+
+@router.get("/forms/{form_id}/files")
+async def list_form_files(request: Request, form_id: str):
+    """List all files uploaded for a form's submissions"""
+    from utils.storage import list_keys, get_presigned_url
+    
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    db: Session = next(get_db())
+    try:
+        form = db.query(BookingForm).filter(BookingForm.id == form_id, BookingForm.uid == uid).first()
+        if not form:
+            return JSONResponse({"error": "Form not found"}, status_code=404)
+        
+        # List files in the form's upload folder
+        prefix = f"users/{uid}/booking_uploads/{form_id}/"
+        keys = list_keys(prefix, max_keys=500)
+        
+        files = []
+        for key in keys:
+            filename = key.split("/")[-1]
+            # Remove timestamp prefix to get original filename
+            parts = filename.split("_", 2)
+            original_name = parts[2] if len(parts) > 2 else filename
+            
+            url = get_presigned_url(key, expires_in=3600)
+            files.append({
+                "key": key,
+                "filename": original_name,
+                "url": url,
+            })
+        
+        return {"files": files}
+    finally:
+        db.close()
+

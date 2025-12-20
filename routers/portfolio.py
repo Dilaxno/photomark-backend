@@ -3,7 +3,7 @@ import uuid
 import re
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import logging
@@ -269,11 +269,11 @@ async def get_portfolio_photos(
 @router.post("/photos/upload")
 async def upload_portfolio_photo(
     file: UploadFile = File(...),
-    title: Optional[str] = None,
+    title: Optional[str] = Form(None),
     uid: str = Depends(get_current_user_uid),
     db: Session = Depends(get_db)
 ):
-    """Upload a photo to the portfolio"""
+    """Upload a photo to the portfolio using R2 storage"""
     try:
         if not file.content_type or not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
@@ -281,24 +281,29 @@ async def upload_portfolio_photo(
         # Read file content
         content = await file.read()
         
-        # Generate unique filename
+        # Validate file size (max 10MB)
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large. Maximum size is 10MB")
+        
+        # Generate unique filename with date prefix for organization
         photo_id = str(uuid.uuid4())
         ext = os.path.splitext(file.filename or '')[1] or '.jpg'
-        key = f"users/{uid}/portfolio/{photo_id}{ext}"
+        date_prefix = datetime.now(timezone.utc).strftime('%Y/%m/%d')
+        key = f"users/{uid}/portfolio/{date_prefix}/{photo_id}{ext}"
         
-        # Upload to storage
-        upload_bytes(key, content, content_type=file.content_type)
+        # Upload to R2 storage - returns presigned URL
+        url = upload_bytes(key, content, content_type=file.content_type)
         
         # Get next order
         max_order = db.query(PortfolioPhoto).filter(
             PortfolioPhoto.uid == uid
         ).count()
         
-        # Create photo record
+        # Create photo record with the R2 URL
         photo = PortfolioPhoto(
             id=photo_id,
             uid=uid,
-            url=f"https://your-cdn.com/{key}",  # Replace with actual CDN URL
+            url=url,
             title=title,
             order=max_order,
             source="upload"
@@ -308,11 +313,78 @@ async def upload_portfolio_photo(
         db.commit()
         db.refresh(photo)
         
-        return photo.to_dict()
+        # Return with thumbnail URL
+        photo_dict = photo.to_dict(include_thumb_url=True)
+        photo_dict["thumb_url"] = _get_thumbnail_url(url)
+        
+        return photo_dict
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error uploading portfolio photo: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to upload photo")
+
+
+@router.patch("/photos/{photo_id}")
+async def update_portfolio_photo(
+    photo_id: str,
+    payload: dict,
+    uid: str = Depends(get_current_user_uid),
+    db: Session = Depends(get_db)
+):
+    """Update a photo's title or other metadata"""
+    try:
+        photo = db.query(PortfolioPhoto).filter(
+            PortfolioPhoto.id == photo_id,
+            PortfolioPhoto.uid == uid
+        ).first()
+        
+        if not photo:
+            raise HTTPException(status_code=404, detail="Photo not found")
+        
+        if "title" in payload:
+            photo.title = payload["title"]
+        
+        db.commit()
+        return {"message": "Photo updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating portfolio photo: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update photo")
+
+
+@router.post("/photos/reorder")
+async def reorder_portfolio_photos(
+    payload: dict,
+    uid: str = Depends(get_current_user_uid),
+    db: Session = Depends(get_db)
+):
+    """Reorder portfolio photos"""
+    try:
+        order_list = payload.get("order", [])
+        if not order_list:
+            raise HTTPException(status_code=400, detail="Order list required")
+        
+        # Update order for each photo
+        for index, photo_id in enumerate(order_list):
+            photo = db.query(PortfolioPhoto).filter(
+                PortfolioPhoto.id == photo_id,
+                PortfolioPhoto.uid == uid
+            ).first()
+            if photo:
+                photo.order = index
+        
+        db.commit()
+        return {"message": "Photos reordered successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reordering portfolio photos: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to reorder photos")
 
 @router.delete("/photos/{photo_id}")
 async def delete_portfolio_photo(
