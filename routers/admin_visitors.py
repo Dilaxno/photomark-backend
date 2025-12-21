@@ -53,23 +53,21 @@ class Visitor(BaseModel):
 
 def get_admin_user(request: Request) -> str:
     """Verify admin access from Firebase token"""
-    from core.auth import verify_firebase_token
+    from core.auth import get_uid_from_request, get_user_email_from_uid
     
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization")
+    uid = get_uid_from_request(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization")
     
-    token = auth_header.replace("Bearer ", "")
-    try:
-        decoded = verify_firebase_token(token)
-        email = decoded.get("email", "").lower()
-        
-        if email not in ADMIN_EMAILS:
-            raise HTTPException(status_code=403, detail="Admin access required")
-        
-        return email
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+    email = get_user_email_from_uid(uid)
+    if not email:
+        raise HTTPException(status_code=401, detail="Could not get user email")
+    
+    email = email.lower()
+    if email not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    return email
 
 
 def parse_user_agent(ua: str) -> Dict[str, str]:
