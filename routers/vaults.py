@@ -686,9 +686,28 @@ async def vaults_create(request: Request, payload: VaultCreatePayload, db: Sessi
         
         # Initialize vault metadata
         meta = {}
+        safe_name = _vault_key(uid, name)[1]
+        
         if payload.protect and (payload.password or '').strip():
-            salt = _vault_salt(uid, name)
-            meta.update({"protected": True, "hash": _hash_password(payload.password or '', salt)})
+            # Use bcrypt for new vaults
+            meta.update({"protected": True, "password_hash": _hash_password_bcrypt(payload.password or '')})
+            
+            # Backup the password for recovery
+            try:
+                from models.vault_password_backup import VaultPasswordBackup
+                from routers.vault_password_recovery import _encrypt_password
+                
+                encrypted = _encrypt_password(payload.password, uid)
+                backup = VaultPasswordBackup(
+                    owner_uid=uid,
+                    vault_name=safe_name,
+                    encrypted_password=encrypted
+                )
+                db.add(backup)
+                db.commit()
+            except Exception as backup_ex:
+                logger.warning(f"Failed to backup vault password: {backup_ex}")
+                # Don't fail vault creation if backup fails
         
         # Create Sendbird channel for vault communication
         channel_url = None
@@ -1175,7 +1194,7 @@ class VaultProtectionPayload(BaseModel):
 
 
 @router.post("/vaults/update-protection")
-async def vaults_update_protection(request: Request, payload: VaultProtectionPayload):
+async def vaults_update_protection(request: Request, payload: VaultProtectionPayload, db: Session = Depends(get_db)):
     """Update vault protection settings (add or remove password protection)"""
     uid = get_uid_from_request(request)
     if not uid:
@@ -1200,6 +1219,32 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
             meta["password_hash"] = _hash_password_bcrypt(payload.password)
             # Lock the vault after adding protection
             _lock_vault(uid, safe_vault)
+            
+            # Backup the password for recovery
+            try:
+                from models.vault_password_backup import VaultPasswordBackup
+                from routers.vault_password_recovery import _encrypt_password
+                
+                encrypted = _encrypt_password(payload.password, uid)
+                existing = db.query(VaultPasswordBackup).filter(
+                    VaultPasswordBackup.owner_uid == uid,
+                    VaultPasswordBackup.vault_name == safe_vault
+                ).first()
+                
+                if existing:
+                    existing.encrypted_password = encrypted
+                    existing.updated_at = datetime.utcnow()
+                else:
+                    backup = VaultPasswordBackup(
+                        owner_uid=uid,
+                        vault_name=safe_vault,
+                        encrypted_password=encrypted
+                    )
+                    db.add(backup)
+                db.commit()
+            except Exception as backup_ex:
+                logger.warning(f"Failed to backup vault password: {backup_ex}")
+                # Don't fail the main operation if backup fails
         else:
             # Removing protection
             meta["protected"] = False
@@ -1210,6 +1255,17 @@ async def vaults_update_protection(request: Request, payload: VaultProtectionPay
             
             # Unlock the vault after removing protection
             _lock_vault(uid, safe_vault)
+            
+            # Remove password backup
+            try:
+                from models.vault_password_backup import VaultPasswordBackup
+                db.query(VaultPasswordBackup).filter(
+                    VaultPasswordBackup.owner_uid == uid,
+                    VaultPasswordBackup.vault_name == safe_vault
+                ).delete()
+                db.commit()
+            except Exception as backup_ex:
+                logger.warning(f"Failed to remove vault password backup: {backup_ex}")
         
         # Save updated metadata
         _write_vault_meta(uid, safe_vault, meta)

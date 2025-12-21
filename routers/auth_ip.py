@@ -8,45 +8,16 @@ from core.database import get_db
 from models.user import User
 from models.login_history import LoginHistory
 from utils.emailing import render_email, send_email_smtp
+from utils.login_tracker import (
+    track_login_event,
+    get_client_ip,
+    get_user_agent,
+    detect_login_source,
+    get_ip_location,
+)
 import httpx
 
 router = APIRouter(prefix="/api/auth/ip", tags=["auth-ip"])
-
-
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request, handling proxies."""
-    # Check X-Forwarded-For header (when behind proxy/load balancer)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    # Check X-Real-IP header
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-    # Fall back to direct client IP
-    return request.client.host if request.client else "unknown"
-
-
-async def get_ip_location(ip: str) -> dict:
-    """Get city, country, and country code from IP address using ip-api.com (free, no API key needed)."""
-    try:
-        # Skip geolocation for localhost/private IPs
-        if ip in ("127.0.0.1", "localhost", "unknown") or ip.startswith(("192.168.", "10.", "172.")):
-            return {"city": "Local Network", "country": "Local", "country_code": None}
-        
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"http://ip-api.com/json/{ip}?fields=status,city,country,countryCode")
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "success":
-                    return {
-                        "city": data.get("city", "Unknown"),
-                        "country": data.get("country", "Unknown"),
-                        "country_code": data.get("countryCode"),  # ISO 3166-1 alpha-2
-                    }
-    except Exception as ex:
-        logger.warning(f"IP geolocation failed for {ip}: {ex}")
-    return {"city": "Unknown", "country": "Unknown", "country_code": None}
 
 
 def send_new_ip_login_email(email: str, display_name: str, ip: str, city: str, country: str):
@@ -158,8 +129,10 @@ async def last_login(request: Request, background_tasks: BackgroundTasks, db: Se
             except Exception:
                 pass
         
-        # Get client IP
+        # Get client IP and detect source
         current_ip = get_client_ip(request)
+        user_agent = get_user_agent(request)
+        source = detect_login_source(request)
         
         # Update PostgreSQL user last_login_at, email, and check IP
         try:
@@ -177,7 +150,7 @@ async def last_login(request: Request, background_tasks: BackgroundTasks, db: Se
                 u.last_login_ip = current_ip
                 db.commit()
                 
-                # Get location and store login history in background
+                # Track login event and send notification in background
                 async def process_login():
                     location = await get_ip_location(current_ip)
                     
@@ -192,10 +165,13 @@ async def last_login(request: Request, background_tasks: BackgroundTasks, db: Se
                                 city=location["city"],
                                 country=location["country"],
                                 country_code=location.get("country_code"),
+                                user_agent=user_agent,
+                                source=source,
+                                success=True,
                             )
                             db_session.add(login_record)
                             db_session.commit()
-                            logger.info(f"[auth_ip] Stored login history for {uid} from {current_ip}")
+                            logger.info(f"[auth_ip] Stored login history for {uid} from {current_ip} via {source}")
                         finally:
                             db_session.close()
                     except Exception as ex:
@@ -252,3 +228,62 @@ async def get_login_history(request: Request, db: Session = Depends(get_db), lim
     except Exception as ex:
         logger.exception(f"[auth_ip] Failed to get login history for {uid}: {ex}")
         return JSONResponse({"error": "Failed to retrieve login history"}, status_code=500)
+
+
+@router.post("/track-login")
+async def track_login_endpoint(request: Request, db: Session = Depends(get_db)):
+    """
+    Track a login event. Called by desktop plugins and API clients after successful authentication.
+    The source is auto-detected from User-Agent or X-Photomark-Source header.
+    
+    This endpoint is authenticated - requires valid Firebase token or API token.
+    """
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Track the login event
+        await track_login_event(
+            request=request,
+            uid=uid,
+            success=True,
+            update_last_login=True,
+        )
+        return {"ok": True}
+    except Exception as ex:
+        logger.warning(f"[auth_ip] track-login failed for {uid}: {ex}")
+        return {"ok": False}
+
+
+@router.post("/track-failed-login")
+async def track_failed_login_endpoint(
+    request: Request,
+    payload: dict = Body(...),
+):
+    """
+    Track a failed login attempt. Called by frontend/plugins when login fails.
+    This endpoint is NOT authenticated (since login failed).
+    
+    Body: { "email": str, "reason": str (optional) }
+    """
+    email = (payload or {}).get("email", "").strip().lower()
+    reason = (payload or {}).get("reason", "").strip() or "invalid_credentials"
+    
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    
+    try:
+        # Track the failed login event
+        await track_login_event(
+            request=request,
+            uid=None,
+            success=False,
+            failure_reason=reason,
+            attempted_email=email,
+            update_last_login=False,
+        )
+        return {"ok": True}
+    except Exception as ex:
+        logger.warning(f"[auth_ip] track-failed-login failed for {email}: {ex}")
+        return {"ok": False}

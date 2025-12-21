@@ -39,8 +39,9 @@ from utils.storage import read_json_key, write_json_key, upload_bytes
 from utils.metadata import auto_embed_metadata_for_user
 from sqlalchemy.orm import Session
 from fastapi import Depends
-from core.database import get_db
+from core.database import get_db, SessionLocal
 from models.gallery import GalleryAsset
+from models.user import User
 
 router = APIRouter(prefix="/api/style", tags=["style"])  # matches existing /api/style namespace
 
@@ -59,9 +60,23 @@ def _billing_uid_from_request(request: Request) -> str:
 
 
 def _is_paid_customer(uid: str) -> bool:
+  """Check if user has a paid plan by querying the database."""
   try:
+    # First try database (source of truth)
+    db = SessionLocal()
+    try:
+      user = db.query(User).filter(User.uid == uid).first()
+      if user:
+        plan = str(user.plan or '').strip().lower()
+        # Check for any paid plan
+        paid_plans = ['individual', 'photographers', 'studios', 'agencies', 'golden', 'golden_offer', 'pro', 'business', 'enterprise']
+        if plan in paid_plans:
+          return True
+    finally:
+      db.close()
+    
+    # Fallback to JSON file for backwards compatibility
     ent = read_json_key(f"users/{uid}/billing/entitlement.json") or {}
-    # Consider any non-free plan as paid to avoid entitlement lag blocking paid users
     plan = str(ent.get('plan') or '').strip().lower()
     if plan and plan != 'free':
       return True

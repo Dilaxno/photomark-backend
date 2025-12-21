@@ -507,6 +507,13 @@ try:
 except Exception as _ex:
     logger.warning(f"vault_recovery router not available: {_ex}")
 
+# vault password recovery router (forgot vault password with OTP)
+try:
+    from routers import vault_password_recovery  # noqa: E402
+    app.include_router(vault_password_recovery.router)
+except Exception as _ex:
+    logger.warning(f"vault_password_recovery router not available: {_ex}")
+
 # admin endpoints
 app.include_router(admin.router)
 # Removed: bookings, portfolio, and create_lut endpoints
