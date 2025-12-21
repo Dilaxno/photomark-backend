@@ -516,6 +516,14 @@ except Exception as _ex:
 
 # admin endpoints
 app.include_router(admin.router)
+
+# admin visitors tracking
+try:
+    from routers import admin_visitors  # noqa: E402
+    app.include_router(admin_visitors.router)
+except Exception as _ex:
+    logger.warning(f"admin_visitors router not available: {_ex}")
+
 # Removed: bookings, portfolio, and create_lut endpoints
 
 # legacy style LUT GPU endpoint
