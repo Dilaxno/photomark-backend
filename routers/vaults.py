@@ -3349,7 +3349,7 @@ async def vaults_favorites(request: Request, vault: str):
         safe_vault = _vault_key(uid, vault)[1]
         data = _read_json_key(_favorites_key(uid, safe_vault)) or {}
         # Transform structure: { by_photo: { key: { by_email: { email: {...} } } } }
-        # into: { favorites: { email: [keys] } }
+        # into: { favorites: { email: { keys: [...], client_name: '...' } } }
         by_photo = data.get("by_photo") or {}
         result = {}
         for photo_key, photo_data in by_photo.items():
@@ -3357,8 +3357,11 @@ async def vaults_favorites(request: Request, vault: str):
             for email, email_data in by_email.items():
                 if isinstance(email_data, dict) and email_data.get("favorite"):
                     if email not in result:
-                        result[email] = []
-                    result[email].append(photo_key)
+                        result[email] = {"keys": [], "client_name": email_data.get("client_name", "")}
+                    result[email]["keys"].append(photo_key)
+                    # Update client_name if we find one (in case it wasn't set initially)
+                    if not result[email]["client_name"] and email_data.get("client_name"):
+                        result[email]["client_name"] = email_data.get("client_name")
         return {"vault": safe_vault, "favorites": result}
     except Exception as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
