@@ -864,8 +864,12 @@ async def affiliates_track_conversion(request: Request, payload: dict = Body(...
             logger.info(f"[affiliates.track.conversion] conversion already exists for user={uid}")
             return {"ok": True, "tracked": False, "reason": "already_tracked"}
         
-        # Calculate commission (30% default)
-        commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
+        # Calculate commission: Golden/lifetime plan gets 40%, others get 30%
+        plan_lower = str(plan or '').lower()
+        if plan_lower in ('golden', 'golden_offer'):
+            commission_rate = 0.40
+        else:
+            commission_rate = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.30"))
         commission_cents = int(amount_cents * commission_rate)
         
         # Store conversion in JSON first (no FK constraints)
