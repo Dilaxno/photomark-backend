@@ -112,10 +112,10 @@ def parse_user_agent(ua: str) -> Dict[str, str]:
 
 
 async def get_geo_from_ip(ip: str) -> Dict[str, Any]:
-    """Get geolocation data from IP address using ip-api.com (free)"""
+    """Get geolocation data from IP address using IPinfo API"""
     try:
         # Skip localhost/private IPs
-        if ip in ["127.0.0.1", "localhost", "::1"] or ip.startswith("192.168.") or ip.startswith("10."):
+        if ip in ["127.0.0.1", "localhost", "::1"] or ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172."):
             return {
                 "country": "Local",
                 "countryCode": "XX",
@@ -125,21 +125,60 @@ async def get_geo_from_ip(ip: str) -> Dict[str, Any]:
                 "lng": 0
             }
         
+        # Get IPinfo token from environment (optional - works without token with rate limits)
+        ipinfo_token = os.getenv("IPINFO_TOKEN", "")
+        
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,regionName,lat,lon")
+            url = f"https://ipinfo.io/{ip}/json"
+            if ipinfo_token:
+                url += f"?token={ipinfo_token}"
+            
+            response = await client.get(url)
             data = response.json()
             
-            if data.get("status") == "success":
-                return {
-                    "country": data.get("country", "Unknown"),
-                    "countryCode": data.get("countryCode", "XX"),
-                    "city": data.get("city", "Unknown"),
-                    "region": data.get("regionName", "Unknown"),
-                    "lat": data.get("lat", 0),
-                    "lng": data.get("lon", 0)
-                }
+            # IPinfo returns loc as "lat,lng" string
+            lat, lng = 0.0, 0.0
+            if data.get("loc"):
+                try:
+                    lat_str, lng_str = data["loc"].split(",")
+                    lat = float(lat_str)
+                    lng = float(lng_str)
+                except (ValueError, AttributeError):
+                    pass
+            
+            # IPinfo uses 2-letter country codes
+            country_code = data.get("country", "XX")
+            
+            # Map country code to full name (common ones)
+            country_names = {
+                "US": "United States", "GB": "United Kingdom", "CA": "Canada",
+                "AU": "Australia", "DE": "Germany", "FR": "France", "JP": "Japan",
+                "IN": "India", "BR": "Brazil", "MX": "Mexico", "ES": "Spain",
+                "IT": "Italy", "NL": "Netherlands", "SE": "Sweden", "NO": "Norway",
+                "DK": "Denmark", "FI": "Finland", "PL": "Poland", "RU": "Russia",
+                "CN": "China", "KR": "South Korea", "SG": "Singapore", "HK": "Hong Kong",
+                "TW": "Taiwan", "NZ": "New Zealand", "IE": "Ireland", "CH": "Switzerland",
+                "AT": "Austria", "BE": "Belgium", "PT": "Portugal", "GR": "Greece",
+                "CZ": "Czech Republic", "HU": "Hungary", "RO": "Romania", "UA": "Ukraine",
+                "ZA": "South Africa", "EG": "Egypt", "NG": "Nigeria", "KE": "Kenya",
+                "MA": "Morocco", "AR": "Argentina", "CL": "Chile", "CO": "Colombia",
+                "PE": "Peru", "VE": "Venezuela", "TH": "Thailand", "VN": "Vietnam",
+                "PH": "Philippines", "ID": "Indonesia", "MY": "Malaysia", "PK": "Pakistan",
+                "BD": "Bangladesh", "TR": "Turkey", "SA": "Saudi Arabia", "AE": "UAE",
+                "IL": "Israel", "QA": "Qatar", "KW": "Kuwait"
+            }
+            country_name = country_names.get(country_code, data.get("country", "Unknown"))
+            
+            return {
+                "country": country_name,
+                "countryCode": country_code,
+                "city": data.get("city", "Unknown"),
+                "region": data.get("region", "Unknown"),
+                "lat": lat,
+                "lng": lng
+            }
     except Exception as e:
-        print(f"Geo lookup failed for {ip}: {e}")
+        print(f"IPinfo geo lookup failed for {ip}: {e}")
     
     return {
         "country": "Unknown",
