@@ -3009,9 +3009,9 @@ async def vaults_shared_approve(payload: ApprovalPayload):
     client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
-    # Enforce client role permissions: only editor/owner may approve/deny
+    # Enforce client role permissions: all roles (viewer/editor/owner) may approve/deny in proofing
     role = str((rec or {}).get('client_role') or 'viewer').lower()
-    if role not in ('editor', 'owner'):
+    if role not in ('viewer', 'editor', 'owner'):
         return JSONResponse({"error": "action not permitted for your role"}, status_code=403)
 
     # Validate photo belongs to this uid and vault
@@ -3063,9 +3063,9 @@ async def vaults_shared_retouch(payload: RetouchRequestPayload):
     client_name = rec.get('client_name') or ''
     if not uid or not vault:
         return JSONResponse({"error": "invalid share"}, status_code=400)
-    # Enforce client role permissions: only editor/owner may request retouch
+    # Enforce client role permissions: all roles (viewer/editor/owner) may request retouch in proofing
     role = str((rec or {}).get('client_role') or 'viewer').lower()
-    if role not in ('editor', 'owner'):
+    if role not in ('viewer', 'editor', 'owner'):
         return JSONResponse({"error": "action not permitted for your role"}, status_code=403)
 
     # Validate photo belongs to this uid and vault
