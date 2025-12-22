@@ -22,8 +22,8 @@ visitors_store: Dict[str, Dict[str, Any]] = {}
 visitor_sessions: Dict[str, datetime] = {}
 signups_store: Dict[str, Dict[str, Any]] = {}  # Track signups
 
-# Session timeout (5 minutes = online)
-SESSION_TIMEOUT = timedelta(minutes=5)
+# Session timeout (3 minutes = online, after that marked as offline)
+SESSION_TIMEOUT = timedelta(minutes=3)
 
 
 class VisitorData(BaseModel):
