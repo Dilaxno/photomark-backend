@@ -78,7 +78,7 @@ async def set_portfolio_domain(
                 "instructions": {
                     "recordType": "CNAME",
                     "name": hostname,
-                    "value": "photomark.app",
+                    "value": "api.photomark.cloud",
                     "ttl": 300
                 }
             }
@@ -107,7 +107,7 @@ async def set_portfolio_domain(
             "instructions": {
                 "recordType": "CNAME",
                 "name": hostname,
-                "value": "photomark.app",
+                "value": "api.photomark.cloud",
                 "ttl": 300
             }
         }
@@ -194,8 +194,8 @@ async def _check_dns_and_tls_status(hostname: str, db: Session = None, uid: str 
         if data.get("Status") == 0 and data.get("Answer"):
             for answer in data["Answer"]:
                 if answer.get("type") == 5:  # CNAME record
-                    target = answer.get("data", "").rstrip(".")
-                    if target == "photomark.app":
+                    target = answer.get("data", "").rstrip(".").lower()
+                    if target == "api.photomark.cloud":
                         cname_valid = True
                         cname_target = target
                         break
@@ -227,7 +227,7 @@ async def _check_dns_and_tls_status(hostname: str, db: Session = None, uid: str 
             "dns": {
                 "valid": cname_valid,
                 "target": cname_target,
-                "expected": "photomark.app"
+                "expected": "api.photomark.cloud"
             },
             "tls": {
                 "valid": tls_valid
