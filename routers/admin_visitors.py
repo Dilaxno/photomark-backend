@@ -21,15 +21,30 @@ ADMIN_EMAILS = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "dev.esstaf
 visitors_store: Dict[str, Dict[str, Any]] = {}
 visitor_sessions: Dict[str, datetime] = {}
 signups_store: Dict[str, Dict[str, Any]] = {}  # Track signups
+activity_store: Dict[str, List[Dict[str, Any]]] = {}  # Track visitor activities by session
 
 # Session timeout (3 minutes = online, after that marked as offline)
 SESSION_TIMEOUT = timedelta(minutes=3)
+# Max activities per session
+MAX_ACTIVITIES_PER_SESSION = 100
 
 
 class VisitorData(BaseModel):
     page: str
     referrer: Optional[str] = None
     userAgent: Optional[str] = None
+
+
+class ActivityItem(BaseModel):
+    sessionId: str
+    type: str  # 'page_view', 'click', 'scroll', 'form_input', 'download', 'hover', 'copy', 'search'
+    target: Optional[str] = None  # Button text, link URL, element ID
+    page: str
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ActivityBatch(BaseModel):
+    activities: List[ActivityItem]
 
 
 class SignupData(BaseModel):
@@ -378,3 +393,86 @@ async def track_signup(request: Request, data: SignupData):
         del signups_store[k]
     
     return {"ok": True, "signupId": signup_id}
+
+
+@router.post("/track-activity")
+async def track_activity(request: Request, data: ActivityBatch):
+    """Track visitor activities (clicks, scrolls, form inputs, etc.)"""
+    for activity in data.activities:
+        session_id = activity.sessionId
+        
+        # Initialize activity list for session if not exists
+        if session_id not in activity_store:
+            activity_store[session_id] = []
+        
+        # Add activity with timestamp
+        activity_record = {
+            "type": activity.type,
+            "target": activity.target,
+            "page": activity.page,
+            "metadata": activity.metadata or {},
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        activity_store[session_id].append(activity_record)
+        
+        # Limit activities per session
+        if len(activity_store[session_id]) > MAX_ACTIVITIES_PER_SESSION:
+            activity_store[session_id] = activity_store[session_id][-MAX_ACTIVITIES_PER_SESSION:]
+    
+    # Clean up old activity sessions (keep last 2 hours)
+    cutoff = datetime.utcnow() - timedelta(hours=2)
+    sessions_to_remove = []
+    for session_id, activities in activity_store.items():
+        if activities:
+            last_activity_time = datetime.fromisoformat(activities[-1]["timestamp"])
+            if last_activity_time < cutoff:
+                sessions_to_remove.append(session_id)
+    
+    for session_id in sessions_to_remove:
+        del activity_store[session_id]
+    
+    return {"ok": True, "count": len(data.activities)}
+
+
+@router.get("/activities/{session_id}")
+async def get_session_activities(session_id: str, request: Request, admin_email: str = Depends(get_admin_user)):
+    """Get activities for a specific session (admin only)"""
+    activities = activity_store.get(session_id, [])
+    return {"sessionId": session_id, "activities": activities, "count": len(activities)}
+
+
+@router.get("/activities")
+async def get_all_activities(request: Request, admin_email: str = Depends(get_admin_user)):
+    """Get all recent activities grouped by session (admin only)"""
+    now = datetime.utcnow()
+    result = []
+    
+    for session_id, activities in activity_store.items():
+        if not activities:
+            continue
+        
+        # Get visitor info for this session
+        visitor_info = None
+        for visitor in visitors_store.values():
+            if visitor.get("sessionId") == session_id:
+                visitor_info = visitor
+                break
+        
+        # Check if session is online
+        last_seen = visitor_sessions.get(session_id)
+        is_online = last_seen and (now - last_seen) < SESSION_TIMEOUT
+        
+        result.append({
+            "sessionId": session_id,
+            "visitor": visitor_info,
+            "isOnline": is_online,
+            "activities": activities[-50:],  # Last 50 activities
+            "activityCount": len(activities),
+            "lastActivity": activities[-1]["timestamp"] if activities else None
+        })
+    
+    # Sort by last activity (most recent first)
+    result.sort(key=lambda x: x.get("lastActivity") or "", reverse=True)
+    
+    return {"sessions": result[:50]}
