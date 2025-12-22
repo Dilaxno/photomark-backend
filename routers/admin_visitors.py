@@ -20,6 +20,7 @@ ADMIN_EMAILS = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "dev.esstaf
 # In-memory visitor storage (use Redis in production)
 visitors_store: Dict[str, Dict[str, Any]] = {}
 visitor_sessions: Dict[str, datetime] = {}
+signups_store: Dict[str, Dict[str, Any]] = {}  # Track signups
 
 # Session timeout (5 minutes = online)
 SESSION_TIMEOUT = timedelta(minutes=5)
@@ -28,6 +29,13 @@ SESSION_TIMEOUT = timedelta(minutes=5)
 class VisitorData(BaseModel):
     page: str
     referrer: Optional[str] = None
+    userAgent: Optional[str] = None
+
+
+class SignupData(BaseModel):
+    email: str
+    name: Optional[str] = None
+    method: str  # 'email' or 'google'
     userAgent: Optional[str] = None
 
 
@@ -299,8 +307,12 @@ async def get_visitors(request: Request, admin_email: str = Depends(get_admin_us
         "hourlyVisits": []  # Could be calculated from timestamps
     }
     
+    # Get signups sorted by timestamp (newest first)
+    signups = sorted(signups_store.values(), key=lambda x: x.get("timestamp", ""), reverse=True)
+    
     return {
         "visitors": visitors[:100],  # Limit to 100 most recent
+        "signups": signups[:50],  # Limit to 50 most recent signups
         "stats": stats
     }
 
@@ -320,3 +332,49 @@ async def visitor_heartbeat(request: Request):
         return {"ok": True, "sessionId": session_id}
     
     return {"ok": False, "message": "Session not found"}
+
+
+@router.post("/track-signup")
+async def track_signup(request: Request, data: SignupData):
+    """Track a new user signup (called from frontend after successful registration)"""
+    # Get client IP
+    ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+    if "," in ip:
+        ip = ip.split(",")[0].strip()
+    
+    user_agent = data.userAgent or request.headers.get("User-Agent", "")
+    
+    # Get geolocation
+    geo = await get_geo_from_ip(ip)
+    
+    # Parse user agent
+    ua_info = parse_user_agent(user_agent)
+    
+    # Create signup record
+    signup_id = f"signup_{hashlib.md5(data.email.encode()).hexdigest()[:12]}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    
+    signup = {
+        "id": signup_id,
+        "email": data.email,
+        "name": data.name or "",
+        "method": data.method,  # 'email' or 'google'
+        "ip": ip,
+        "country": geo["country"],
+        "countryCode": geo["countryCode"],
+        "city": geo["city"],
+        "browser": ua_info["browser"],
+        "os": ua_info["os"],
+        "device": ua_info["device"],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    
+    # Store signup (use email as key to avoid duplicates)
+    signups_store[data.email.lower()] = signup
+    
+    # Clean up old signups (keep last 7 days)
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    to_remove = [k for k, v in signups_store.items() if datetime.fromisoformat(v["timestamp"]) < cutoff]
+    for k in to_remove:
+        del signups_store[k]
+    
+    return {"ok": True, "signupId": signup_id}
