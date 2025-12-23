@@ -1797,7 +1797,7 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
 
     subject = "Your photos are ready for review 📸"
 
-    client_greeting = f"Hello {client_name}," if client_name else "Hello,"
+    client_greeting = f"Hi {client_name}," if client_name else "Hi there,"
 
     # Check if vault is protected and get password info
     vault_meta = _read_vault_meta(uid, safe_vault)
@@ -1809,51 +1809,39 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         vault_password = str((payload or {}).get('vault_password') or '').strip()
         if vault_password:
             password_info = (
-                f"<br>Vault Password: <strong>{vault_password}</strong>"
+                f"<br><br><span style=\"color:#888;\">Gallery password: <code style=\"background:#222;padding:2px 6px;border-radius:4px;\">{vault_password}</code></span>"
             )
-            password_info_text = f"\nVault Password: {vault_password}"
+            password_info_text = f"\n\nGallery password: {vault_password}"
 
     body_html = (
         f"{client_greeting}<br><br>"
-        f"Your photographer, {studio_name}, has shared your photos with you for review.<br><br>"
-        f"You can securely view {count} {noun}, mark your favorites, approve them, or request changes — all in one place.<br><br>"
-        f"👉 View your photos here:<br>"
-        f"<a href=\"{link}\">{link}</a><br><br>"
-        f"This private link will expire on <strong>{expire_pretty}</strong>.<br><br>"
-        f"If you have any questions while reviewing, you can leave feedback directly on the photos.<br><br>"
-        f"Enjoy reviewing your images!"
-        f"{password_info}"
+        f"{studio_name} has shared a photo gallery with you.<br><br>"
+        f"<strong>{count} {noun}</strong> are ready for you to review. You can mark favorites, approve photos, or request edits."
+        f"{password_info}<br><br>"
+        f"This gallery link expires on <strong>{expire_pretty}</strong>."
     )
 
-    extra = ""
-    if qr_bytes:
-        extra = "<br><br><div><img src=\"cid:share_qr\" alt=\"QR code to open vault\" style=\"max-width:220px;height:auto;border-radius:12px;border:1px solid #333;\" /></div>"
     html = render_email(
         "email_basic.html",
-        title="Photos shared for your review",
-        intro=(body_html + extra),
-        button_label="View photos",
+        title=f"Your photos from {studio_name}",
+        intro=body_html,
+        button_label="View Your Photos",
         button_url=link,
-        footer_note="If you did not expect this email, you can ignore it.",
+        footer_note=f"You received this because {studio_name} shared photos with you.",
     )
 
     text = (
-        (client_greeting.replace('<br>', '').replace('</br>', '').replace('<br/>', ''))
-        + "\n\n"
-        + f"Your photographer, {studio_name}, has shared your photos with you for review.\n\n"
-        + f"You can securely view {count} {noun}, mark your favorites, approve them, or request changes — all in one place.\n\n"
-        + "👉 View your photos here:\n"
-        + f"{link}\n\n"
-        + f"This private link will expire on {expire_pretty}.\n\n"
-        + "If you have any questions while reviewing, you can leave feedback directly on the photos.\n\n"
-        + "Enjoy reviewing your images!"
-        + password_info_text
+        f"{client_greeting}\n\n"
+        f"{studio_name} has shared a photo gallery with you.\n\n"
+        f"{count} {noun} are ready for you to review. You can mark favorites, approve photos, or request edits."
+        f"{password_info_text}\n\n"
+        f"View your photos: {link}\n\n"
+        f"This gallery link expires on {expire_pretty}.\n\n"
+        f"You received this because {studio_name} shared photos with you."
     )
 
-    attachments = None
-    if qr_bytes:
-        attachments = [{"filename": "vault-qr.png", "content": qr_bytes, "mime_type": "image/png", "cid": "share_qr"}]
-    sent = send_email_smtp(email, subject, html, text, attachments=attachments)
+    # Skip QR code attachment - it can trigger spam filters
+    sent = send_email_smtp(email, subject, html, text)
     if not sent:
         logger.error("Failed to send share email")
         return JSONResponse({"error": "Failed to send email"}, status_code=500)
