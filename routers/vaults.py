@@ -1597,6 +1597,8 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
     vault = str((payload or {}).get('vault') or '').strip()
     email = str((payload or {}).get('email') or '').strip()
     client_name = str((payload or {}).get('client_name') or '').strip()
+    is_final_delivery = bool((payload or {}).get('is_final_delivery', False))
+    delivery_message = str((payload or {}).get('delivery_message') or '').strip()
     if not vault or not email:
         return JSONResponse({"error": "vault and email required"}, status_code=400)
     # Validate vault exists and get normalized name
@@ -1638,6 +1640,8 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         "created_at": now.isoformat(),
         "max_uses": 1,
         "client_name": client_name,
+        "is_final_delivery": is_final_delivery,
+        "delivery_message": delivery_message if delivery_message else None,
     }
     # Granular client download permission
     try:
@@ -1795,8 +1799,6 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
         exp_dt = exp
     expire_pretty = f"{exp_dt.strftime('%Y-%m-%d at %H:%M')} UTC"
 
-    subject = "Your photos are ready for review 📸"
-
     client_greeting = f"Hi {client_name}," if client_name else "Hi there,"
 
     # Check if vault is protected and get password info
@@ -1813,32 +1815,69 @@ async def vaults_share(request: Request, payload: dict = Body(...), db: Session 
             )
             password_info_text = f"\n\nGallery password: {vault_password}"
 
-    body_html = (
-        f"{client_greeting}<br><br>"
-        f"{studio_name} has shared a photo gallery with you.<br><br>"
-        f"<strong>{count} {noun}</strong> are ready for you to review. You can mark favorites, approve photos, or request edits."
-        f"{password_info}<br><br>"
-        f"This gallery link expires on <strong>{expire_pretty}</strong>."
-    )
+    # Different email content for final delivery vs proofing
+    if is_final_delivery:
+        subject = "🎉 Your final images are ready!"
+        
+        body_html = (
+            f"{client_greeting}<br><br>"
+            f"Great news! <strong>{studio_name}</strong> has finished editing your photos and they're ready for download.<br><br>"
+            f"Your final, high-resolution images are waiting for you."
+            f"{password_info}"
+        )
+        
+        html = render_email(
+            "final_delivery.html",
+            title=f"Your final images from {studio_name}",
+            intro=body_html,
+            photo_count=count,
+            studio_name=studio_name,
+            message=delivery_message if delivery_message else None,
+            button_label="Download Your Photos",
+            button_url=link,
+            expires_at=expire_pretty,
+            footer_note=f"You received this because {studio_name} delivered your final photos.",
+        )
+        
+        text = (
+            f"{client_greeting}\n\n"
+            f"Great news! {studio_name} has finished editing your photos and they're ready for download.\n\n"
+            f"{count} {noun} are ready for you.\n\n"
+            f"{f'Message from {studio_name}: {delivery_message}' if delivery_message else ''}"
+            f"{password_info_text}\n\n"
+            f"Download your photos: {link}\n\n"
+            f"This download link expires on {expire_pretty}.\n\n"
+            f"You received this because {studio_name} delivered your final photos."
+        )
+    else:
+        subject = "Your photos are ready for review 📸"
+        
+        body_html = (
+            f"{client_greeting}<br><br>"
+            f"{studio_name} has shared a photo gallery with you.<br><br>"
+            f"<strong>{count} {noun}</strong> are ready for you to review. You can mark favorites, approve photos, or request edits."
+            f"{password_info}<br><br>"
+            f"This gallery link expires on <strong>{expire_pretty}</strong>."
+        )
 
-    html = render_email(
-        "email_basic.html",
-        title=f"Your photos from {studio_name}",
-        intro=body_html,
-        button_label="View Your Photos",
-        button_url=link,
-        footer_note=f"You received this because {studio_name} shared photos with you.",
-    )
+        html = render_email(
+            "email_basic.html",
+            title=f"Your photos from {studio_name}",
+            intro=body_html,
+            button_label="View Your Photos",
+            button_url=link,
+            footer_note=f"You received this because {studio_name} shared photos with you.",
+        )
 
-    text = (
-        f"{client_greeting}\n\n"
-        f"{studio_name} has shared a photo gallery with you.\n\n"
-        f"{count} {noun} are ready for you to review. You can mark favorites, approve photos, or request edits."
-        f"{password_info_text}\n\n"
-        f"View your photos: {link}\n\n"
-        f"This gallery link expires on {expire_pretty}.\n\n"
-        f"You received this because {studio_name} shared photos with you."
-    )
+        text = (
+            f"{client_greeting}\n\n"
+            f"{studio_name} has shared a photo gallery with you.\n\n"
+            f"{count} {noun} are ready for you to review. You can mark favorites, approve photos, or request edits."
+            f"{password_info_text}\n\n"
+            f"View your photos: {link}\n\n"
+            f"This gallery link expires on {expire_pretty}.\n\n"
+            f"You received this because {studio_name} shared photos with you."
+        )
 
     # Skip QR code attachment - it can trigger spam filters
     sent = send_email_smtp(email, subject, html, text)
@@ -1937,6 +1976,8 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
     phone = str((payload or {}).get('phone') or '').strip()
     client_name = str((payload or {}).get('client_name') or '').strip()
     use_rcs = bool((payload or {}).get('use_rcs', True))  # Default to RCS
+    is_final_delivery = bool((payload or {}).get('is_final_delivery', False))
+    delivery_message = str((payload or {}).get('delivery_message') or '').strip()
     
     if not vault or not phone:
         return JSONResponse({"error": "vault and phone required"}, status_code=400)
@@ -1977,6 +2018,8 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
         "max_uses": 1,
         "client_name": client_name,
         "shared_via": "sms",
+        "is_final_delivery": is_final_delivery,
+        "delivery_message": delivery_message if delivery_message else None,
     }
     
     # Download permission
@@ -2091,13 +2134,27 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
     count = len(keys)
     noun = "photo" if count == 1 else "photos"
     
-    # Build message
+    # Build message - different content for final delivery vs proofing
     greeting = f"Hi {client_name}! " if client_name else ""
-    message = (
-        f"{greeting}{studio_name} has shared {count} {noun} with you for review.\n\n"
-        f"View your photos: {link}\n\n"
-        f"This link expires in {days} days."
-    )
+    
+    if is_final_delivery:
+        # Final delivery message
+        message = (
+            f"{greeting}🎉 Great news! Your final images from {studio_name} are ready for download.\n\n"
+            f"{count} high-resolution {noun} waiting for you.\n\n"
+        )
+        if delivery_message:
+            message += f'"{delivery_message}" — {studio_name}\n\n'
+        message += f"Download here: {link}\n\nExpires in {days} days."
+        button_text = "Download Photos"
+    else:
+        # Proofing message
+        message = (
+            f"{greeting}{studio_name} has shared {count} {noun} with you for review.\n\n"
+            f"View your photos: {link}\n\n"
+            f"This link expires in {days} days."
+        )
+        button_text = "View Photos"
     
     # Get first photo thumbnail for RCS media (optional)
     media_url = None
@@ -2115,7 +2172,7 @@ async def vaults_share_sms(request: Request, payload: dict = Body(...), db: Sess
             phone_clean, 
             message, 
             media_url=media_url,
-            button_text="View Photos",
+            button_text=button_text,
             button_url=link
         )
     
