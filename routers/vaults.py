@@ -4151,11 +4151,15 @@ async def vaults_shared_originals_zip(request: Request, token: str, password: Op
     download_permission = str(rec.get('download_permission') or '').strip().lower()
     download_type = str(rec.get('download_type') or 'free').strip().lower()
     download_price_cents = int(rec.get('download_price_cents') or 0)
+    is_final_delivery = bool(rec.get('is_final_delivery', False))
     
     allow_download = False
     
+    # Final delivery always allows downloads (that's the whole point)
+    if is_final_delivery:
+        allow_download = True
     # Check based on download permission and type
-    if download_permission == 'proofing_download':
+    elif download_permission == 'proofing_download':
         # New flow: check if free or paid+licensed
         if download_type == 'free' or download_price_cents == 0:
             allow_download = True
@@ -4327,9 +4331,10 @@ async def vaults_shared_lowres_zip(request: Request, token: str, password: Optio
     if exp and now > exp:
         return JSONResponse({"error": "expired"}, status_code=410)
 
-    # Permission check: allow low-res for 'low', 'high', or 'proofing_download'
+    # Permission check: allow low-res for 'low', 'high', 'proofing_download', or final delivery
     perm = str((rec.get('download_permission') or '')).strip().lower()
-    if perm not in ('low', 'high', 'proofing_download'):
+    is_final_delivery = bool(rec.get('is_final_delivery', False))
+    if not is_final_delivery and perm not in ('low', 'high', 'proofing_download'):
         return JSONResponse({"error": "permission_denied"}, status_code=403)
     
     # Check download limit
@@ -4724,11 +4729,16 @@ class FinalDeliveryPayload(BaseModel):
     download_limit: Optional[int] = 1
     expiration_days: Optional[int] = 7
     zip_delivery: Optional[bool] = True
+    # Notification options
+    notify_email: Optional[str] = None  # Client email to notify
+    notify_phone: Optional[str] = None  # Client phone to notify via SMS
+    client_name: Optional[str] = None
+    delivery_message: Optional[str] = None  # Personal message from photographer
 
 
 @router.post("/vaults/final-delivery")
-async def prepare_final_delivery(request: Request, payload: FinalDeliveryPayload):
-    """Prepare final delivery for completed proofing"""
+async def prepare_final_delivery(request: Request, payload: FinalDeliveryPayload, db: Session = Depends(get_db)):
+    """Prepare final delivery for completed proofing and optionally notify client"""
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -4740,6 +4750,8 @@ async def prepare_final_delivery(request: Request, payload: FinalDeliveryPayload
         
         # Read vault metadata
         meta = _read_vault_meta(uid, vault)
+        keys = _read_vault(uid, vault)
+        safe_vault = _vault_key(uid, vault)[1]
         
         # Verify proofing is completed
         proofing_complete = meta.get("proofing_complete", {})
@@ -4769,10 +4781,186 @@ async def prepare_final_delivery(request: Request, payload: FinalDeliveryPayload
         
         logger.info(f"Final delivery prepared for vault {vault} by {uid}")
         
+        # Send notifications if email or phone provided
+        notification_sent = False
+        notification_channel = None
+        share_link = None
+        
+        if payload.notify_email or payload.notify_phone:
+            # Create share token for final delivery
+            now = datetime.utcnow()
+            days = payload.expiration_days or 7
+            exp = now + timedelta(days=days)
+            token = secrets.token_urlsafe(24)
+            
+            rec = {
+                "token": token,
+                "uid": uid,
+                "vault": safe_vault,
+                "email": (payload.notify_email or "").lower(),
+                "phone": payload.notify_phone or "",
+                "expires_at": exp.isoformat(),
+                "used": False,
+                "created_at": now.isoformat(),
+                "max_uses": payload.download_limit or 1,
+                "client_name": payload.client_name or "",
+                "is_final_delivery": True,
+                "delivery_message": payload.delivery_message or "",
+                "download_permission": "proofing_download",
+                "download_type": "free",
+                "licensed": True,
+                "download_limit": payload.download_limit or 1,
+                "download_count": 0,
+            }
+            _write_json_key(_share_key(token), rec)
+            
+            # Build share link
+            front = (os.getenv("FRONTEND_ORIGIN", "").split(",")[0].strip() or "https://photomark.cloud").rstrip("/")
+            
+            # Check for custom domain
+            custom_domain_link = None
+            try:
+                from models.vault_domain import VaultDomain
+                vault_domain = db.query(VaultDomain).filter(
+                    VaultDomain.uid == uid,
+                    VaultDomain.vault_name == safe_vault,
+                    VaultDomain.enabled == True
+                ).first()
+                if vault_domain:
+                    custom_domain_link = f"https://{vault_domain.hostname}"
+                    vault_domain.share_token = token
+                    db.commit()
+            except Exception:
+                pass
+            
+            share_link = custom_domain_link if custom_domain_link else f"{front}/#share?token={token}"
+            
+            # Get studio name
+            studio_name = None
+            try:
+                fs_db = get_fs_client()
+                if fs_db:
+                    doc = fs_db.collection('users').document(uid).get()
+                    data = doc.to_dict() if getattr(doc, 'exists', False) else {}
+                    studio_name = (
+                        data.get('studioName') or data.get('studio_name') or
+                        data.get('businessName') or data.get('business_name') or
+                        data.get('brand_name') or data.get('brandName') or
+                        data.get('displayName') or data.get('display_name') or
+                        data.get('name')
+                    )
+            except Exception:
+                pass
+            if not studio_name:
+                try:
+                    owner_email = (get_user_email_from_uid(uid) or '').strip()
+                    studio_name = (owner_email.split('@')[0] if '@' in owner_email else owner_email) or "Photomark"
+                except Exception:
+                    studio_name = "Photomark"
+            
+            count = len(keys)
+            noun = "photo" if count == 1 else "photos"
+            client_name = payload.client_name or ""
+            delivery_message = payload.delivery_message or ""
+            
+            # Send email notification
+            if payload.notify_email:
+                try:
+                    exp_dt = exp
+                    expire_pretty = f"{exp_dt.strftime('%Y-%m-%d at %H:%M')} UTC"
+                    client_greeting = f"Hi {client_name}," if client_name else "Hi there,"
+                    
+                    subject = "🎉 Your final images are ready!"
+                    
+                    body_html = (
+                        f"{client_greeting}<br><br>"
+                        f"Great news! <strong>{studio_name}</strong> has finished editing your photos and they're ready for download.<br><br>"
+                        f"Your final, high-resolution images are waiting for you."
+                    )
+                    
+                    html = render_email(
+                        "final_delivery.html",
+                        title=f"Your final images from {studio_name}",
+                        intro=body_html,
+                        photo_count=count,
+                        studio_name=studio_name,
+                        message=delivery_message if delivery_message else None,
+                        button_label="Download Your Photos",
+                        button_url=share_link,
+                        expires_at=expire_pretty,
+                        footer_note=f"You received this because {studio_name} delivered your final photos.",
+                    )
+                    
+                    text = (
+                        f"{client_greeting}\n\n"
+                        f"Great news! {studio_name} has finished editing your photos and they're ready for download.\n\n"
+                        f"{count} {noun} are ready for you.\n\n"
+                        f"{f'Message from {studio_name}: {delivery_message}' if delivery_message else ''}\n\n"
+                        f"Download your photos: {share_link}\n\n"
+                        f"This download link expires on {expire_pretty}.\n\n"
+                        f"You received this because {studio_name} delivered your final photos."
+                    )
+                    
+                    sent = send_email_smtp(payload.notify_email, subject, html, text)
+                    if sent:
+                        notification_sent = True
+                        notification_channel = "email"
+                        logger.info(f"Final delivery email sent to {payload.notify_email}")
+                    else:
+                        logger.error(f"Failed to send final delivery email to {payload.notify_email}")
+                except Exception as ex:
+                    logger.error(f"Error sending final delivery email: {ex}")
+            
+            # Send SMS notification
+            if payload.notify_phone:
+                try:
+                    phone_clean = ''.join(c for c in payload.notify_phone if c.isdigit() or c == '+')
+                    if not phone_clean.startswith('+'):
+                        if len(phone_clean) == 10:
+                            phone_clean = '+1' + phone_clean
+                        elif len(phone_clean) == 11 and phone_clean.startswith('1'):
+                            phone_clean = '+' + phone_clean
+                        else:
+                            phone_clean = '+' + phone_clean
+                    
+                    greeting = f"Hi {client_name}! " if client_name else ""
+                    sms_message = (
+                        f"{greeting}🎉 Great news! Your final images from {studio_name} are ready for download.\n\n"
+                        f"{count} high-resolution {noun} waiting for you.\n\n"
+                    )
+                    if delivery_message:
+                        sms_message += f'"{delivery_message}" — {studio_name}\n\n'
+                    sms_message += f"Download here: {share_link}\n\nExpires in {days} days."
+                    
+                    # Try RCS first, fall back to SMS
+                    result = None
+                    if TWILIO_RCS_SENDER_ID:
+                        result = await _send_twilio_rcs(
+                            phone_clean, 
+                            sms_message, 
+                            button_text="Download Photos",
+                            button_url=share_link
+                        )
+                    
+                    if not result or not result.get("ok"):
+                        result = await _send_twilio_sms(phone_clean, sms_message)
+                    
+                    if result and result.get("ok"):
+                        notification_sent = True
+                        notification_channel = result.get("channel", "sms") if not notification_channel else f"{notification_channel}+{result.get('channel', 'sms')}"
+                        logger.info(f"Final delivery SMS sent to {phone_clean}")
+                    else:
+                        logger.error(f"Failed to send final delivery SMS: {result.get('error') if result else 'unknown'}")
+                except Exception as ex:
+                    logger.error(f"Error sending final delivery SMS: {ex}")
+        
         return {
             "ok": True,
             "vault": vault,
-            "final_delivery": final_delivery
+            "final_delivery": final_delivery,
+            "notification_sent": notification_sent,
+            "notification_channel": notification_channel,
+            "share_link": share_link
         }
         
     except Exception as ex:
