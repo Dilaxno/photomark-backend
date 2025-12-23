@@ -475,7 +475,7 @@ def _lock_vault(uid: str, vault: str):
 
 
 @router.get("/vaults")
-async def vaults_list(request: Request):
+async def vaults_list(request: Request, db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -525,7 +525,7 @@ async def vaults_list(request: Request):
                         results.append({"name": name, "count": count})
     except Exception as ex:
         logger.warning(f"_list_vaults failed: {ex}")
-    # Mark protection state and attach display name
+    # Mark protection state and attach display name + persistent status from DB
     for v in results:
         name = v.get("name")
         if not isinstance(name, str):
@@ -538,6 +538,25 @@ async def vaults_list(request: Request):
             v["display_name"] = str(dn or name.replace("_", " "))
         except Exception:
             v["display_name"] = name
+        
+        # Get persistent status from PostgreSQL database
+        try:
+            db_meta = _pg_read_vault_meta(db, uid, name)
+            if db_meta:
+                v["status"] = db_meta.get("status", "awaiting_proofing")
+                v["proofing_completed_at"] = db_meta.get("proofing_completed_at")
+                v["final_delivery_prepared_at"] = db_meta.get("final_delivery_prepared_at")
+            else:
+                # Check file-based meta for legacy status
+                if meta.get("final_delivery", {}).get("prepared"):
+                    v["status"] = "delivered"
+                elif meta.get("proofing_complete", {}).get("completed"):
+                    v["status"] = "proofing_completed"
+                else:
+                    v["status"] = "awaiting_proofing"
+        except Exception as ex:
+            logger.warning(f"Failed to get vault status from DB: {ex}")
+            v["status"] = "awaiting_proofing"
     return {"vaults": results}
 
 
@@ -1143,6 +1162,86 @@ async def vaults_set_meta(request: Request, payload: VaultMetaUpdate, db: Sessio
         return JSONResponse({"error": str(ex)}, status_code=400)
 
 
+class VaultStatusPayload(BaseModel):
+    vault: str
+    status: str  # 'awaiting_proofing' | 'proofing_completed' | 'in_retouch' | 'ready_for_delivery' | 'delivered'
+
+
+@router.post("/vaults/status")
+async def update_vault_status(request: Request, payload: VaultStatusPayload, db: Session = Depends(get_db)):
+    """Update vault workflow status"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    vault = (payload.vault or '').strip()
+    status = (payload.status or '').strip()
+    
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    
+    valid_statuses = ['awaiting_proofing', 'proofing_completed', 'in_retouch', 'ready_for_delivery', 'delivered']
+    if status not in valid_statuses:
+        return JSONResponse({"error": f"invalid status, must be one of: {', '.join(valid_statuses)}"}, status_code=400)
+    
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        
+        # Update status in database
+        _pg_upsert_vault_meta(db, uid, safe_vault, {"status": status}, status=status)
+        
+        # Also update file-based metadata for consistency
+        meta = _read_vault_meta(uid, safe_vault) or {}
+        meta["status"] = status
+        _write_vault_meta(uid, safe_vault, meta)
+        
+        return {"ok": True, "vault": safe_vault, "status": status}
+    except Exception as ex:
+        logger.error(f"Failed to update vault status: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
+@router.get("/vaults/status")
+async def get_vault_status(request: Request, vault: str, db: Session = Depends(get_db)):
+    """Get vault workflow status"""
+    uid = get_uid_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    vault = (vault or '').strip()
+    if not vault:
+        return JSONResponse({"error": "vault required"}, status_code=400)
+    
+    try:
+        safe_vault = _vault_key(uid, vault)[1]
+        
+        # Get status from database
+        db_meta = _pg_read_vault_meta(db, uid, safe_vault)
+        
+        if db_meta:
+            return {
+                "ok": True,
+                "vault": safe_vault,
+                "status": db_meta.get("status", "awaiting_proofing"),
+                "proofing_completed_at": db_meta.get("proofing_completed_at"),
+                "final_delivery_prepared_at": db_meta.get("final_delivery_prepared_at")
+            }
+        else:
+            # Fall back to file-based metadata
+            meta = _read_vault_meta(uid, safe_vault) or {}
+            if meta.get("final_delivery", {}).get("prepared"):
+                status = "delivered"
+            elif meta.get("proofing_complete", {}).get("completed"):
+                status = "proofing_completed"
+            else:
+                status = "awaiting_proofing"
+            
+            return {"ok": True, "vault": safe_vault, "status": status}
+    except Exception as ex:
+        logger.error(f"Failed to get vault status: {ex}")
+        return JSONResponse({"error": str(ex)}, status_code=400)
+
+
 @router.post("/vaults/customize")
 async def vaults_customize(request: Request, vault: str = Body(..., embed=True), db: Session = Depends(get_db)):
     uid = get_uid_from_request(request)
@@ -1288,18 +1387,41 @@ def _get_thumbnail_url_fast(key_or_url: str, expires_in: int = 3600) -> Optional
             from utils.cloudinary import get_cloudinary_thumbnail_url
             return get_cloudinary_thumbnail_url(key_or_url)
         
-        # Otherwise, treat as S3/R2 storage key and check for generated thumbnail
+        # For S3/R2 storage keys, construct thumbnail URL directly without HEAD check
+        # The frontend will gracefully fall back to full URL if thumbnail doesn't exist
         from utils.thumbnails import get_thumbnail_key
         thumb_key = get_thumbnail_key(key_or_url, 'small')
         if s3 and R2_BUCKET:
-            try:
-                s3.Object(R2_BUCKET, thumb_key).load()
-                return _get_url_for_key(thumb_key, expires_in=expires_in)
-            except Exception:
-                return None
+            # Return presigned URL directly - let frontend handle 404 gracefully
+            return _get_url_for_key(thumb_key, expires_in=expires_in)
         return None
     except Exception:
         return None
+
+
+# Batch thumbnail URL generation for better performance
+def _get_thumbnail_urls_batch(uid: str, keys: list[str], expires_in: int = 3600) -> dict[str, Optional[str]]:
+    """Get thumbnail URLs for multiple keys efficiently."""
+    result = {}
+    if not s3 or not R2_BUCKET:
+        return {k: None for k in keys}
+    
+    try:
+        from utils.thumbnails import get_thumbnail_key
+        for key in keys:
+            try:
+                if 'cloudinary.com' in key:
+                    from utils.cloudinary import get_cloudinary_thumbnail_url
+                    result[key] = get_cloudinary_thumbnail_url(key)
+                else:
+                    thumb_key = get_thumbnail_key(key, 'small')
+                    result[key] = _get_url_for_key(thumb_key, expires_in=expires_in)
+            except Exception:
+                result[key] = None
+    except Exception:
+        return {k: None for k in keys}
+    
+    return result
 
 
 def _make_item_fast(uid: str, key: str) -> dict:
@@ -1367,9 +1489,20 @@ async def vaults_photos(request: Request, vault: str, password: Optional[str] = 
         # FAST MODE: Skip expensive originals lookup and invisible watermark detection
         # This makes initial vault load much faster (like SmugMug/Pixieset)
         if fast:
+            # Batch generate thumbnail URLs for better performance
+            thumb_urls = _get_thumbnail_urls_batch(uid, keys, expires_in=60 * 60)
             for key in keys:
                 try:
-                    item = _make_item_fast(uid, key)
+                    if not key.startswith(f"users/{uid}/"):
+                        continue
+                    name = os.path.basename(key)
+                    url = _get_url_for_key(key, expires_in=60 * 60) if s3 and R2_BUCKET else f"/static/{key}"
+                    item = {
+                        "key": key,
+                        "url": url,
+                        "thumb_url": thumb_urls.get(key),
+                        "name": name
+                    }
                     items.append(item)
                 except Exception:
                     pass
@@ -3361,6 +3494,15 @@ async def vaults_shared_notify_proofing_complete(payload: ProofingCompletePayloa
                     "total_reviewed": total_reviewed
                 }
                 _write_vault_meta(uid, safe_vault, meta)
+                
+                # Persist status to PostgreSQL database
+                from core.database import get_db
+                db = next(get_db())
+                try:
+                    _pg_upsert_vault_meta(db, uid, safe_vault, {"proofing_complete": meta["proofing_complete"]}, status="proofing_completed")
+                finally:
+                    db.close()
+                
                 logger.info(f"Marked proofing complete for vault {safe_vault} by client {client_email}")
             except Exception as ex:
                 logger.warning(f"Failed to mark proofing complete in vault metadata: {ex}")
@@ -4645,31 +4787,71 @@ async def update_vault_slideshow(request: Request, payload: SlideshowUpdatePaylo
     except Exception as ex:
         logger.error(f"Failed to update vault slideshow: {ex}")
         return JSONResponse({"error": str(ex)}, status_code=400)
+
 def _pg_read_vault_meta(db: Session, uid: str, name: str) -> dict:
     try:
-        row = db.execute(text("SELECT metadata FROM public.vaults WHERE owner_uid=:uid AND name=:name"), {"uid": uid, "name": name}).first()
+        row = db.execute(text("""
+            SELECT metadata, status, proofing_completed_at, final_delivery_prepared_at 
+            FROM public.vaults 
+            WHERE owner_uid=:uid AND name=:name
+        """), {"uid": uid, "name": name}).first()
         if not row:
             return {}
         data = row[0]
+        result = {}
         if isinstance(data, dict):
-            return data
-        try:
-            return json.loads(data) if isinstance(data, str) else {}
-        except Exception:
-            return {}
-    except Exception:
+            result = data
+        else:
+            try:
+                result = json.loads(data) if isinstance(data, str) else {}
+            except Exception:
+                result = {}
+        
+        # Add status fields from dedicated columns
+        result["status"] = row[1] or "awaiting_proofing"
+        if row[2]:
+            result["proofing_completed_at"] = row[2].isoformat() if hasattr(row[2], 'isoformat') else str(row[2])
+        if row[3]:
+            result["final_delivery_prepared_at"] = row[3].isoformat() if hasattr(row[3], 'isoformat') else str(row[3])
+        
+        return result
+    except Exception as ex:
+        logger.warning(f"_pg_read_vault_meta failed: {ex}")
         return {}
 
-def _pg_upsert_vault_meta(db: Session, uid: str, name: str, meta_updates: dict, visibility: str | None = None) -> None:
+def _pg_upsert_vault_meta(db: Session, uid: str, name: str, meta_updates: dict, visibility: str | None = None, status: str | None = None) -> None:
     md = json.dumps(meta_updates or {})
     try:
-        existing = db.execute(text("SELECT id, visibility FROM public.vaults WHERE owner_uid=:uid AND name=:name"), {"uid": uid, "name": name}).first()
+        existing = db.execute(text("SELECT id, visibility, status FROM public.vaults WHERE owner_uid=:uid AND name=:name"), {"uid": uid, "name": name}).first()
         if existing:
             vis = visibility or existing[1] or 'private'
-            db.execute(text("UPDATE public.vaults SET metadata = COALESCE(metadata, '{}'::jsonb) || :md::jsonb, visibility=:vis, updated_at=NOW() WHERE owner_uid=:uid AND name=:name"), {"md": md, "vis": vis, "uid": uid, "name": name})
+            new_status = status or existing[2] or 'awaiting_proofing'
+            
+            # Build update query with status
+            update_sql = """
+                UPDATE public.vaults 
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || :md::jsonb, 
+                    visibility=:vis, 
+                    status=:status,
+                    updated_at=NOW()
+            """
+            params = {"md": md, "vis": vis, "status": new_status, "uid": uid, "name": name}
+            
+            # Set timestamp columns based on status
+            if new_status == 'proofing_completed' and existing[2] != 'proofing_completed':
+                update_sql += ", proofing_completed_at=NOW()"
+            elif new_status == 'delivered' and existing[2] != 'delivered':
+                update_sql += ", final_delivery_prepared_at=NOW()"
+            
+            update_sql += " WHERE owner_uid=:uid AND name=:name"
+            db.execute(text(update_sql), params)
         else:
             vis = visibility or 'private'
-            db.execute(text("INSERT INTO public.vaults (owner_uid, name, visibility, metadata) VALUES (:uid, :name, :vis, :md::jsonb)"), {"uid": uid, "name": name, "vis": vis, "md": md})
+            new_status = status or 'awaiting_proofing'
+            db.execute(text("""
+                INSERT INTO public.vaults (owner_uid, name, visibility, metadata, status) 
+                VALUES (:uid, :name, :vis, :md::jsonb, :status)
+            """), {"uid": uid, "name": name, "vis": vis, "md": md, "status": new_status})
         db.commit()
     except Exception as ex:
         try:
@@ -4773,6 +4955,9 @@ async def prepare_final_delivery(request: Request, payload: FinalDeliveryPayload
         # Update vault metadata
         meta["final_delivery"] = final_delivery
         _write_vault_meta(uid, vault, meta)
+        
+        # Persist status to PostgreSQL database
+        _pg_upsert_vault_meta(db, uid, safe_vault, {"final_delivery": final_delivery}, status="delivered")
         
         # Clear the proofing completion banner (it's served its purpose)
         if "proofing_complete" in meta:
